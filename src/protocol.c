@@ -708,6 +708,7 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
 
     int fin = (frame_hdr[0] & 0x80) >> 7;
     int opcode = frame_hdr[0] & 0x0F;
+    (void)fin;  /* FIN bit: not checking fragmentation (C2 messages are small) */
     int masked = (frame_hdr[1] & 0x80) >> 7;
     uint8_t payload_len = frame_hdr[1] & 0x7F;
 
