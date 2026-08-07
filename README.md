@@ -58,14 +58,19 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 The bot loads config from `/etc/notnet.conf` (key=value format):
 
 | Key | Default | Description |
-|-----|---------|-------------|
-| `irc_server` | `irc.notnet.net` | IRC C2 server |
-| `irc_port` | `6697` | IRC C2 port |
-| `http_server` | `api.notnet.net` | HTTP C2 server |
-| `http_port` | `443` | HTTP C2 port |
-| `scan_interval` | `30` | Seconds between scan cycles |
-| `ssh_enabled` | `1` | Enable SSH spreading |
-| `telnet_enabled` | `1` | Enable Telnet spreading |
+||-----|---------|-------------|
+|| `irc_server` | `irc.notnet.net` | IRC C2 server |
+|| `irc_port` | `6697` | IRC C2 port |
+|| `irc_channel` | `#notnet` | IRC channel to join |
+|| `irc_pass` | *(none)* | IRC password (or `NOTNET_IRC_PASS` env var) |
+|| `irc_auth_nicks` | *(none)* | Comma-separated authorized operator nicks |
+|| `http_server` | `api.notnet.net` | HTTP C2 server |
+|| `http_port` | `443` | HTTP C2 port |
+|| `ws_server` | `ws.notnet.net` | WebSocket C2 server |
+|| `ws_port` | `443` | WebSocket C2 port |
+|| `scan_interval` | `30` | Seconds between scan cycles |
+|| `ssh_enabled` | `1` | Enable SSH spreading |
+|| `telnet_enabled` | `1` | Enable Telnet spreading |
 
 ### Scan targets
 
