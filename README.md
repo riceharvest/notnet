@@ -31,11 +31,11 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 
 | Target  | Method |
 |---------|--------|
-| SSH     | Password brute-force, key injection |
-| Telnet  | Login brute-force |
-| SMB     | Login brute-force |
+| SSH     | Password brute-force, post-exploitation payload deployment |
+| Telnet  | Password brute-force, post-exploitation payload deployment |
+| SMB     | Login brute-force (auth confirmation only) |
 | Redis   | Unauthenticated write, SSH key injection |
-| RDP     | Brute-force, credential reuse |
+| RDP     | Brute-force, credential reuse (auth confirmation only) |
 
 ## Payload Delivery
 
@@ -47,8 +47,9 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 - **spread** — Scan and replicate to vulnerable hosts
 - **scan** — Port scan / service fingerprinting
 - **exec** — Execute shell command on remote
-- **download** / **upload** — File transfer
-- **exfil** — Extract data from host
+- **download** — Download file from URL to target
+- **upload** — Upload file to target (not yet implemented)
+- **exfil** — Extract data from host (not yet implemented)
 - **update** — Fetch new binary from C2
 - **reboot** — Reboot target system
 - **status** — Report bot status to C2

