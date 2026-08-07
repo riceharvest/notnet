@@ -33,12 +33,12 @@ def handle_client(conn, addr):
             parts = line.split()
             nick = parts[1] if len(parts) > 1 else 'bot'
             # Send RPL_WELCOME (001)
-            conn.sendall(f':mockirc 001 {nick} mockirc :Welcome to notnet test server\r\n'.encode())
+            conn.sendall((':mockirc 001 %s :mockirc!mockirc@127.0.0.1\r\n' % nick).encode())
             # Send RPL_LUSERCHAN (250)
-            conn.sendall(f':mockirc 250 {nick} :Connection counts\r\n'.encode())
+            conn.sendall((':mockirc 250 %s :Connection counts\r\n' % nick).encode())
             # Send RPL_ENDOFMOTD (376) to trigger JOIN
-            conn.sendall(f':mockirc 376 {nick} :End of /MOTD\r\n'.encode())
-            print(f"[+] IRC client connected: {addr[0]}:{addr[1]} (nick={nick})")
+            conn.sendall((':mockirc 376 %s :End of /MOTD\r\n' % nick).encode())
+            print("[+] IRC client connected: %s:%d (nick=%s)" % (addr[0], addr[1], nick))
             break
 
     # Read JOIN
@@ -56,20 +56,20 @@ def handle_client(conn, addr):
         if line.startswith('JOIN'):
             parts = line.split()
             channel = parts[1] if len(parts) > 1 else '#notnet'
-            print(f"[+] Client joined channel: {channel}")
+            print("[+] Client joined channel: %s" % channel)
             # Send RPL_ENDOFNAMES (366) to signal auth
-            conn.sendall(f':mockirc 366 {nick} {channel} :End of /NAMES list\r\n'.encode())
+            conn.sendall((':mockirc 366 %s %s :End of /NAMES list\r\n' % (nick, channel)).encode())
             break
 
     CLIENTS.append(conn)
-    print(f"[!] Total IRC clients: {len(CLIENTS)}")
+    print("[!] Total IRC clients: %d" % len(CLIENTS))
 
     # Send a test command after 2 seconds
     time.sleep(2)
     try:
-        test_cmd = f':mockirc PRIVMSG {channel} :exec uname -a\r\n'
+        test_cmd = ':mockirc!mockirc@127.0.0.1 PRIVMSG %s :exec uname -a\r\n' % channel
         conn.sendall(test_cmd.encode())
-        print(f"[>] Sent test command: exec uname -a")
+        print("[>] Sent test command: exec uname -a")
     except:
         pass
 
@@ -79,24 +79,23 @@ def handle_client(conn, addr):
             data = conn.recv(4096).decode(errors='replace')
             if not data:
                 break
-            print(f"[<] IRC recv: {data[:200]}")
+            print("[<] IRC recv: %s" % data[:200])
     except (socket.timeout, ConnectionError):
         pass
 
     conn.close()
-    print(f"[-] IRC client disconnected: {addr[0]}:{addr[1]}")
+    print("[-] IRC client disconnected: %s:%d" % (addr[0], addr[1]))
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: mock_irc.py <port>")
         sys.exit(1)
-
     port = int(sys.argv[1])
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(('0.0.0.0', port))
     server.listen(10)
-    print(f"[*] Mock IRC server listening on 0.0.0.0:{port}")
+    print("[*] Mock IRC server listening on 0.0.0.0:%d" % port)
 
     while True:
         try:
@@ -104,7 +103,7 @@ def main():
             t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
             t.start()
         except Exception as e:
-            print(f"[!] Error: {e}")
+            print("[!] Error: %s" % e)
 
 if __name__ == '__main__':
     main()

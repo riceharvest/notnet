@@ -22,6 +22,12 @@ typedef struct {
     char channel[128];
     char pass[64];
     char nick[32];
+    /* SECURITY FIX (#5): Authorized C2 operator nicks.
+     * Only PRIVMSGs from these nicks are accepted as commands.
+     * Populated from config (irc_auth_nicks=) or defaults to the
+     * bot's own nick (self-commands only). */
+    char auth_nicks[8][32];
+    int auth_nick_count;
     int sock;
     int connected;
     int authenticated;

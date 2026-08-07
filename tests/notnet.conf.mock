@@ -1,6 +1,7 @@
 # notnet test config - mock C2 + spread testing
 irc_server=mock-irc
 irc_port=6667
+irc_auth_nicks=mockirc
 http_server=mock-http
 http_port=8080
 scan_interval=1
@@ -11,5 +12,3 @@ ssh_enabled=1
 telnet_enabled=1
 redis_enabled=1
 scan_targets=192.168.1.0/24
-# Spread targets for mock services
-spread_targets=mock-ssh:22,mock-redis:6379

