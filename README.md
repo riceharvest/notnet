@@ -8,7 +8,7 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 - **Hybrid C2**: Dual protocol support (IRC + HTTP/WebSocket) for maximum compatibility
 - **Multi-vector spreading**: SSH, Telnet, SMB, Redis, RDP
 - **Peer-to-peer daisychain**: C2 fallback via peer relay using DNS discovery
-- **Modern + classic**: TLS encryption, on-target compilation, systemd persistence, alongside IRC command channels and brute-force spreading
+- **Modern + classic**: On-target compilation, systemd persistence, alongside IRC command channels and brute-force spreading
 
 ## Architectures
 
@@ -24,8 +24,8 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 | Protocol  | Use Case |
 |-----------|----------|
 | IRC       | Legacy, low-overhead, NAT traversal via nick routing |
-| HTTP/S    | Modern, firewall-friendly, CDN-friendly |
-| WebSocket | Encrypted C2, browser-dashboard compatible |
+| HTTP      | Modern, firewall-friendly, CDN-friendly (cleartext) |
+| WebSocket | Text-based C2, browser-dashboard compatible (cleartext) |
 
 ## Spreading Vectors
 
