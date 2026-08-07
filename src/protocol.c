@@ -298,7 +298,7 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
             /* Copy full message text as the command (e.g. "exec uname -a") */
             int cmd_len = msg_len;
             if (cmd_len > len - 1) cmd_len = len - 1;
-            memcpy(buf, colon, cmd_len);
+            memmove(buf, colon, cmd_len);
             buf[cmd_len] = '\0';
             log_info("IRC: command: %s", buf);
             return 1; /* signal new command */
@@ -944,7 +944,10 @@ int protocol_process_commands(notnet_bot_t *bot) {
             while (*args == ' ' || *args == '\t') args++;
 
             /* Allowlist of permitted commands */
-            static const char *allowlist[] = { "uname", "uptime", "ifconfig", "hostname", NULL };
+            static const char *allowlist[] = {
+                "uname", "date", "uptime", "whoami", "id", "ls",
+                "ifconfig", "hostname", "netstat", "ps", NULL
+            };
             char cmd_name[64];
             char arg1[256];
             cmd_name[0] = arg1[0] = '\0';
