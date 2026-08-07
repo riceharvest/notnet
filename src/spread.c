@@ -71,14 +71,22 @@ static int create_connection(const char *ip, uint16_t port, int timeout_ms) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     
-    /* SECURITY FIX (#3): Use inet_pton + safe fallback instead of
-     * gethostbyname + memcpy (h_length can be 16 for IPv6, overflowing). */
+    /* SECURITY FIX (#3): Use inet_pton + getaddrinfo fallback instead of
+     * gethostbyname + memcpy (h_length overflow on IPv6 results).
+     * SECURITY FIX (#54): Use getaddrinfo instead of inet_addr to avoid
+     * accepting 255.255.255.255 as valid (inet_addr returns INADDR_NONE
+     * for both error and that address). */
     if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
-        addr.sin_addr.s_addr = inet_addr(ip);
-        if (addr.sin_addr.s_addr == INADDR_NONE) {
+        struct addrinfo hints = {0}, *res;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(ip, NULL, &hints, &res) != 0) {
             close(sock);
             return -1;
         }
+        struct sockaddr_in *sin = (struct sockaddr_in *)res->ai_addr;
+        addr.sin_addr = sin->sin_addr;
+        freeaddrinfo(res);
     }
     
     int ret = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
@@ -137,6 +145,7 @@ int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *p
     
     /* Read server banner or prompt */
     char resp[256];
+    memset(resp, 0, sizeof(resp));
     FD_ZERO(&fds);
     FD_SET(sock, &fds);
     tv.tv_sec = 1;
@@ -150,6 +159,7 @@ int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *p
     send(sock, cmd, strlen(cmd), 0);
     
     /* Read password prompt */
+    memset(resp, 0, sizeof(resp));
     FD_ZERO(&fds);
     FD_SET(sock, &fds);
     tv.tv_sec = 1;
@@ -169,6 +179,7 @@ int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *p
     
     int success = 0;
     if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        memset(resp, 0, sizeof(resp));
         recv(sock, resp, sizeof(resp) - 1, 0);
         resp[sizeof(resp) - 1] = '\0';
         /* Check for successful login indicators */
@@ -240,12 +251,14 @@ int try_login_telnet(const char *ip, uint16_t port, const char *user, const char
     
     /* Read prompt */
     char resp[256];
+    memset(resp, 0, sizeof(resp));
     FD_ZERO(&fds);
     FD_SET(sock, &fds);
     tv.tv_sec = 2;
     tv.tv_usec = 0;
     
     if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        memset(resp, 0, sizeof(resp));
         recv(sock, resp, sizeof(resp) - 1, 0);
     }
     
@@ -261,6 +274,7 @@ int try_login_telnet(const char *ip, uint16_t port, const char *user, const char
     
     int success = 0;
     if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        memset(resp, 0, sizeof(resp));
         recv(sock, resp, sizeof(resp) - 1, 0);
         resp[sizeof(resp) - 1] = '\0';
         if (strstr(resp, "$") || strstr(resp, "#") || strstr(resp, "OK")) {
