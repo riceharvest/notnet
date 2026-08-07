@@ -43,6 +43,28 @@ services:
     networks:
       - testnet
 
+  mock-ssh:
+    image: python:3.11-slim
+    container_name: mock-ssh
+    command: ["python3", "/app/mock_ssh.py", "22"]
+    volumes:
+      - ./tests:/app
+    expose:
+      - "22"
+    networks:
+      - testnet
+
+  mock-redis:
+    image: python:3.11-slim
+    container_name: mock-redis
+    command: ["python3", "/app/mock_redis.py", "6379"]
+    volumes:
+      - ./tests:/app
+    expose:
+      - "6379"
+    networks:
+      - testnet
+
   bot-mock-c2:
     build: .
     container_name: notnet-mock-c2
@@ -50,6 +72,8 @@ services:
     depends_on:
       - mock-irc
       - mock-http
+      - mock-ssh
+      - mock-redis
     volumes:
       - ./tests/notnet.conf.mock:/etc/notnet.conf:ro
     networks:
