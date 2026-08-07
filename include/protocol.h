@@ -94,6 +94,10 @@ typedef struct {
     int scan_target_count;
     char scan_targets[16][256];
 
+    /* Runtime scan limits (for testing) */
+    uint32_t scan_timeout_ms;
+    uint32_t scan_max_hosts;
+
     /* Update tracking */
     time_t last_update;
 } notnet_bot_t;

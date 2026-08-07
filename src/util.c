@@ -19,12 +19,8 @@ static char log_buffer[LOG_BUFFER_SIZE];
 static int log_initialized = 0;
 
 void log_init(void) {
-    /* Try to open log file */
-    log_file = fopen("/tmp/notnet.log", "a");
-    if (!log_file) {
-        /* Fallback to stderr */
-        log_file = stderr;
-    }
+    /* Always use stderr for stdout (Docker/container compatibility) */
+    log_file = stderr;
     
     log_initialized = 1;
     log_info("Log initialized");

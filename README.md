@@ -82,6 +82,21 @@ scan_target_0=192.168.1.0/24
 scan_target_1=10.0.0.0/24
 ```
 
+### Scan tuning
+
+Control scan aggressiveness (defaults for production):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `scan_timeout_ms` | `500` | Connection timeout in ms per host |
+| `scan_max_hosts` | `254` | Max hosts to scan per subnet |
+
+For testing, use aggressive values:
+```
+scan_timeout_ms=50
+scan_max_hosts=5
+```
+
 Set to empty or omit to use the default single /24 scan.
 
 ## Persistence

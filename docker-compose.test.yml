@@ -1,0 +1,60 @@
+# notnet Docker test environment
+# Two scenarios:
+#   a) no-network - just verify bot init + loop + shutdown
+#   b) mock-c2 - connect bot to mock IRC + HTTP C2 servers
+
+services:
+  # ── Scenario A: No-network test ──
+  bot-no-net:
+    build: .
+    container_name: notnet-no-net
+    network_mode: none
+    volumes:
+      - ./tests/notnet.conf.no-net:/etc/notnet.conf:ro
+    command: ["notnet"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    stop_grace_period: 5s
+    # Runs in a loop. Press Ctrl-C to stop.
+    # Expected: init logs, heartbeat timeout (no C2), scan cycle (timeout), repeat
+
+  # ── Scenario B: Mock C2 test ──
+  # Comment out bot-no-net to run scenario B only, or run both together
+  mock-irc:
+    image: python:3.11-slim
+    container_name: mock-irc
+    command: ["python3", "/app/mock_irc.py", "6667"]
+    volumes:
+      - ./tests:/app
+    expose:
+      - "6667"
+    networks:
+      - testnet
+
+  mock-http:
+    image: python:3.11-slim
+    container_name: mock-http
+    command: ["python3", "/app/mock_http.py", "8080"]
+    volumes:
+      - ./tests:/app
+    expose:
+      - "8080"
+    networks:
+      - testnet
+
+  bot-mock-c2:
+    build: .
+    container_name: notnet-mock-c2
+    command: ["notnet"]
+    depends_on:
+      - mock-irc
+      - mock-http
+    volumes:
+      - ./tests/notnet.conf.mock:/etc/notnet.conf:ro
+    networks:
+      - testnet
+
+networks:
+  testnet:
+    driver: bridge

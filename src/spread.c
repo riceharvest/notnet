@@ -474,9 +474,16 @@ int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
     
     uint32_t host_ip = ntohl(net_ip);
     int hosts = (1 << (32 - prefix)) - 2; /* exclude network and broadcast */
-    if (hosts > 254) hosts = 254; /* limit to /24 */
+    if (hosts > 254) hosts = 254; /* default limit to /24 */
+    if (bot->scan_max_hosts > 0 && bot->scan_max_hosts < (uint32_t)hosts) {
+        hosts = (int)bot->scan_max_hosts;
+    }
     
-    log_info("scan: %s/%s (%d hosts) mask=0x%x", net, mask, hosts, service_mask);
+    /* Use config timeout, fall back to compile-time default */
+    int timeout = SCAN_TIMEOUT_MS;
+    if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
+
+    log_info("scan: %s/%s (%d hosts) mask=0x%x timeout=%dms", net, mask, hosts, service_mask, timeout);
     
     for (int i = 1; i <= hosts; i++) {
         if (!(i % 50)) {
