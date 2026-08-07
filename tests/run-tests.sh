@@ -25,12 +25,12 @@ run_scenario() {
     # Run with timeout
     echo "[2/4] Starting bot (timeout: ${timeout}s)..."
     local output
-    output=$($COMPOSE run --rm --timeout "$timeout" "$compose_service" 2>&1 &
-        BOT_PID=$!
-        sleep "$timeout"
-        kill $BOT_PID 2>/dev/null || true
-        wait $BOT_PID 2>/dev/null || true
-    )
+    $COMPOSE run --rm --name "notnet-test-$compose_service" "$compose_service" 2>&1 &
+    BOT_PID=$!
+    sleep "$timeout"
+    kill $BOT_PID 2>/dev/null || true
+    wait $BOT_PID 2>/dev/null || true
+    output=$(docker logs "notnet-test-$compose_service" 2>&1 || true)
 
     echo ""
     echo "═══════════════════════════════════════════════════════"
