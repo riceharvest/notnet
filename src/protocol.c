@@ -162,6 +162,9 @@ int irc_send(notnet_bot_t *bot, const char *format, ...) {
         log_error("IRC: send() failed: %s", strerror(errno));
         return -1;
     }
+    if (sent < (int)strlen(full_cmd)) {
+        log_warn("IRC: partial send (%d of %zu bytes)", sent, strlen(full_cmd));
+    }
     
     return sent;
 }
@@ -734,12 +737,12 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
     /* Determine actual payload length */
     int plen = payload_len;
     if (plen == 126) {
-        uint8_t ext[2];
-        recv(bot->c2_ws.sock, (char *)ext, 2, 0);
+        uint8_t ext[2] = {0};
+        if (recv(bot->c2_ws.sock, (char *)ext, 2, 0) != 2) return -1;
         plen = (ext[0] << 8) | ext[1];
     } else if (plen == 127) {
-        uint8_t ext[8];
-        recv(bot->c2_ws.sock, (char *)ext, 8, 0);
+        uint8_t ext[8] = {0};
+        if (recv(bot->c2_ws.sock, (char *)ext, 8, 0) != 8) return -1;
         plen = 0;
         for (int i = 0; i < 8; i++) {
             plen = (plen << 8) | ext[i];
@@ -750,7 +753,7 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
      * but we handle both cases) */
     uint8_t mask[4] = {0};
     if (masked) {
-        recv(bot->c2_ws.sock, (char *)mask, 4, 0);
+        if (recv(bot->c2_ws.sock, (char *)mask, 4, 0) != 4) return -1;
     }
 
     /* Read payload */
