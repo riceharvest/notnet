@@ -190,12 +190,15 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
     /* Process IRC response */
     buf[received] = '\0';
     
-    /* Check for PING */
-    if (strstr(buf, "PING")) {
-        char host[256];
-        sscanf(buf, "PING :%s", host);
-        irc_send(bot, "PONG :%s", host);
-        log_debug("IRC: ponged %s", host);
+    /* Check for PING - must be at start of line for IRC server PING */
+    if (strncmp(buf, "PING", 4) == 0) {
+        char host[256] = {0};
+        if (sscanf(buf, "PING :%255s", host) == 1) {
+            irc_send(bot, "PONG :%s", host);
+            log_debug("IRC: ponged %s", host);
+        } else {
+            irc_send(bot, "PONG");
+        }
     }
     
     /* Check for JOIN confirmation (366 End of NAMES) */
