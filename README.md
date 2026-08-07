@@ -33,7 +33,7 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 |---------|--------|
 | SSH     | Password brute-force, key injection |
 | Telnet  | Login brute-force |
-| SMB     | EternalBlue-style (MS17-010), login brute-force |
+| SMB     | Login brute-force |
 | Redis   | Unauthenticated write, SSH key injection |
 | RDP     | Brute-force, credential reuse |
 
@@ -107,9 +107,8 @@ Automatically detects init system and installs:
 - SysV init script
 
 ## Encryption
-
-- TLS 1.2+ with cert pinning (default)
-- Plain text fallback (IRC, HTTP)
+- TLS 1.2+ support (planned — requires OpenSSL/mbedTLS linkage)
+- Currently cleartext C2 (IRC, HTTP, WS)
 
 ## License
 

