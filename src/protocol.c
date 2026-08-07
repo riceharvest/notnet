@@ -839,6 +839,8 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 /* Child: close read end, redirect stdout to pipe, exec */
                 close(pipefd[0]);
                 dup2(pipefd[1], STDOUT_FILENO);
+                /* Also redirect stderr to stdout to capture all output */
+                dup2(pipefd[1], STDERR_FILENO);
                 close(pipefd[1]);
 
                 char *argv[] = { cmd_name, arg1[0] ? arg1 : NULL, NULL };
