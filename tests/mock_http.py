@@ -102,6 +102,8 @@ def handle_client(conn, addr):
                 )
                 conn.sendall(response_line.encode() + response_headers.encode() + response_bytes)
                 print(f"[HTTP] Sent {len(response_bytes)} bytes response")
+                conn.close()
+                return
 
             buf = body_data[content_len:]
 

