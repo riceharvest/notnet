@@ -191,6 +191,7 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
     }
     
     /* Process IRC response */
+    if (received >= len) received = len - 1;
     buf[received] = '\0';
     
     /* Check for PING - must be at start of line for IRC server PING */
@@ -513,6 +514,7 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
     }
     
     log_info("HTTP: received %d bytes: %.200s", received, buf);
+    if (received >= len) received = len - 1;
     buf[received] = '\0';
     return received;
 }

