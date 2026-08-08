@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <time.h>
 #include <sys/time.h>
 #include <sys/stat.h>
@@ -187,6 +188,54 @@ int file_size(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0) return -1;
     return st.st_size;
+}
+
+/* Read entire file into dynamically allocated buffer. Caller must free().
+ * Returns bytes read, or -1 on error. */
+int file_read(const char *path, unsigned char **out_buf) {
+    if (!path || !out_buf) return -1;
+
+    /* Validate path */
+    const char *bad = strpbrk(path, ";|&`$(){}[]<>!");
+    if (bad) {
+        log_error("file_read: dangerous char in path: %s", path);
+        return -1;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        log_error("file_read: cannot open %s: %s", path, strerror(errno));
+        return -1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (fsize <= 0 || fsize > PAYLOAD_MAX_SIZE) {
+        log_error("file_read: invalid size %ld for %s", fsize, path);
+        fclose(f);
+        return -1;
+    }
+
+    *out_buf = (unsigned char *)malloc(fsize);
+    if (!*out_buf) {
+        log_error("file_read: malloc failed for %ld bytes", fsize);
+        fclose(f);
+        return -1;
+    }
+
+    size_t nread = fread(*out_buf, 1, fsize, f);
+    fclose(f);
+
+    if ((long)nread != fsize) {
+        log_error("file_read: short read (%zu of %ld) for %s", nread, fsize, path);
+        free(*out_buf);
+        *out_buf = NULL;
+        return -1;
+    }
+
+    return (int)nread;
 }
 
 /* ── Timing Helpers ─────────────────────────────────────── */

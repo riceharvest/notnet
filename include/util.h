@@ -35,7 +35,11 @@ char *format_ip(uint32_t ip);
 int file_exists(const char *path);
 int file_size(const char *path);
 
-/* ── Timing Helpers ───────────────────────────────────────────── */
+/* Read entire file into dynamically allocated buffer. Caller must free().
+ * Returns bytes read, or -1 on error. */
+int file_read(const char *path, unsigned char **out_buf);
+
+/* ── Timing Helpers ─────────────────────────────────────── */
 uint64_t get_timestamp_ms(void);
 int time_since(time_t t);
 

