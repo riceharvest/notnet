@@ -12,12 +12,15 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 
 ## Architectures
 
+The Makefile currently provides build targets for:
+
 - x86_64
-- ARM32 (armv7l, armv6l)
+- ARM32 (armv7l)
 - ARM64 (aarch64)
 - RISC-V (riscv64)
-- MIPS/MIPS64 (best-effort)
-- PowerPC (ppc64, ppc)
+
+ARMv6l, MIPS/MIPS64, and PowerPC are not currently supported by the
+repository build system. Do not treat them as available targets.
 
 ## C2 Protocols
 

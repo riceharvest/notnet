@@ -95,6 +95,7 @@ help:
 	@echo "  build-armv7l    Build for ARMv7"
 	@echo "  build-aarch64   Build for ARM64"
 	@echo "  build-riscv64   Build for RISC-V"
+	@echo "  ARMv6l, MIPS, and PowerPC targets are not currently supported"
 	@echo ""
 	@echo "Cross-compilation requires target toolchains"
 	@echo "Example: make build-x86_64"
