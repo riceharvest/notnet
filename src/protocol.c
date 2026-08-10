@@ -1629,9 +1629,14 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
 }
 
 int protocol_resolve_peers(notnet_bot_t *bot) {
-    /* SECURITY FIX (#3): Use getaddrinfo instead of gethostbyname.
-     * gethostbyname is deprecated, not thread-safe, and can return
-     * IPv6 results that overflow the in_addr copy. */
+    /* SECURITY FIX (#57): Check DNS cache TTL before fresh lookup.
+     * DNS_PEER_TTL (default 300s) prevents unnecessary DNS queries
+     * on every scan cycle while still refreshing stale entries. */
+    if (bot->peer_count > 0 && time(NULL) - bot->peer_cache_time < DNS_PEER_TTL) {
+        log_debug("DNS: using cached peer data (%d peers, %ld s ago)",
+                  bot->peer_count, (long)(time(NULL) - bot->peer_cache_time));
+        return 0;
+    }
     struct addrinfo hints, *res, *rp;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;  /* IPv4 only */
@@ -1653,6 +1658,7 @@ int protocol_resolve_peers(notnet_bot_t *bot) {
         }
     }
     
+    bot->peer_cache_time = time(NULL);
     freeaddrinfo(res);
     log_info("DNS: resolved %d peers for %s", bot->peer_count, DNS_PEER_RESOLUTION);
     return 0;

