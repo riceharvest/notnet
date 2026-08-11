@@ -161,6 +161,25 @@ int plugin_unload(notnet_bot_t *bot, const char *name) {
     return 0;
 }
 
+/* Teardown every loaded plugin via its unload (stop) callback —
+ * proxy_stop()/relay_stop() are idempotent, so double-stops from the
+ * boot-time accept threads and the C2 `kill` path are safe. A failing
+ * callback is logged and the plugin is still marked unloaded (kill
+ * must not wedge on a stubborn plugin). */
+void plugin_unload_all(notnet_bot_t *bot) {
+    for (int i = 0; i < g_plugin_count; i++) {
+        if (!g_plugins[i].loaded) continue;
+        if (g_plugins[i].unload && g_plugins[i].unload(bot) != 0) {
+            log_warn("PLUGIN: %s unload callback failed during teardown",
+                     g_plugins[i].name);
+        }
+        g_plugins[i].loaded = 0;
+        log_info("PLUGIN: %s unloaded", g_plugins[i].name);
+    }
+    log_info("PLUGIN: all plugins unloaded (%d/%d)",
+             g_plugin_count - plugin_loaded_count(), g_plugin_count);
+}
+
 void plugin_status(char *buf, size_t len) {
     if (!buf || len == 0) return;
     size_t off = 0;

