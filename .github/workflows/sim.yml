@@ -1,0 +1,67 @@
+name: sim
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * *"          # nightly full regression
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    name: sim smoke (c2-drive)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the real binary (host gate)
+        run: make
+
+      - name: Sim smoke — c2-drive (PR regression)
+        run: |
+          cd tests/sim
+          ./run-sim.sh --scenario c2-drive --posture lax
+        env:
+          # Native docker daemon (GH runner VM) + passwordless sudo make the
+          # DOCKER-USER firewall meaningful; dind would hide it in another
+          # netns and false-FAIL the segmentation row.
+          SUDO_PW: ""
+
+      - name: Upload parity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-smoke
+          path: tests/sim/reports/
+
+  full:
+    name: sim full regression (all scenarios)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the real binary (host gate)
+        run: make
+
+      - name: Sim full — all scenarios, standard posture
+        run: |
+          cd tests/sim
+          ./run-sim.sh --scenario all --posture standard
+        env:
+          SUDO_PW: ""
+
+      - name: Upload parity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-full
+          path: tests/sim/reports/
+
+      - name: Fail on silent no-report
+        if: always()
+        run: |
+          test -n "$(ls tests/sim/reports/parity-*.md 2>/dev/null | head -1)" \
+            || { echo "no parity report produced — run-sim.sh failed early"; exit 1; }
