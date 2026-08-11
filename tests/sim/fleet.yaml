@@ -285,6 +285,7 @@ devices:
     ip: 172.29.20.31
     ports: [22]
     ssh_creds: ["root:toor"]
+    persist: true          # S7 persistence test: payload relaunches after reboot
 
   - id: legacy-nas-01
     type: nas

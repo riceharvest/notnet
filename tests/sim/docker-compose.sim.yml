@@ -140,6 +140,9 @@ services:
 
   # ── Bot (the attacker's payload) ──
   bot:
+    build:
+      context: ../..
+      dockerfile: tests/sim/Dockerfile.sim
     image: notnet-sim-bot
     container_name: sim-bot
     command: ["notnet"]

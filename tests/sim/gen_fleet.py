@@ -80,6 +80,7 @@ def device_env(d):
         "SSH_CREDS": ",".join(d.get("ssh_creds", [])),
         "SMB_CREDS": ",".join(d.get("smb_creds", [])),
         "REDIS_PASS": d.get("redis_pass", ""),
+        "PERSIST": "true" if d.get("persist") else "false",
     }
     return env
 

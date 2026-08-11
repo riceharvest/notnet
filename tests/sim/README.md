@@ -17,6 +17,12 @@ payload execution on victims, credential harvesting, and an active defence layer
 - **Resilience**: fast-flux, dead-drop, C2 rotation
 - **Monetization**: SOCKS5 proxy, credential-log exfil, relay
 - **Defence envelope**: same attack under lax/standard/hardened posture
+- **Remaining parity (S7)**: the four README claims the sim previously never
+  exercised end-to-end — IRC-only C2 channel (connect/auth/command/heartbeat
+  over IRC), real SOCKS5 proxied traffic (RFC 1928/1929 client through the bot
+  proxy to a target that sees the bot's source IP), persistence across reboot
+  (device relaunches the payload after container restart), and payload
+  pinning (valid SHA-256 pin accepted, tampered payload refused).
 
 ## Usage
 
@@ -29,6 +35,7 @@ cd tests/sim
 ./run-sim.sh --scenario resilience                      # dead-drop + rotation
 ./run-sim.sh --scenario flux                            # fast-flux multi-A
 ./run-sim.sh --scenario monetization                    # proxy + relay
+./run-sim.sh --scenario remaining-parity                # S7: IRC/SOCKS5/persistence/pinning
 ```
 
 Requires: Docker + Docker Compose, Python 3 with pyyaml. The bot image

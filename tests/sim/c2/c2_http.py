@@ -173,6 +173,19 @@ def handle_request(method, path, body, addr, port_label, conn):
     elif method == "GET" and path.rstrip("/") == "/notnet-src.tar":
         serve_file(conn, os.path.join(PAYLOAD_DIR, "notnet-src.tar"), "application/x-tar")
         log(f"{port_label} SRC-TAR download from {addr[0]}")
+    elif method == "GET" and path.rstrip("/").startswith("/bot/"):
+        # Generic payload route: /bot/<name> serves payload/<name> if present.
+        # Used by the S7 payload-pinning test (notnet.pin / notnet.bad) and
+        # the drop path (/bot/notnet). Unknown names fall through to the
+        # JSON fallback below.
+        fname = os.path.basename(path.rstrip("/"))
+        full = os.path.join(PAYLOAD_DIR, fname)
+        if os.path.isfile(full):
+            serve_file(conn, full, "application/octet-stream")
+            log(f"{port_label} PAYLOAD {fname} download from {addr[0]}")
+        else:
+            send_response(conn, json.dumps({"status": "ok", "secret": C2_SECRET}))
+            log(f"{port_label} GET {path} from {addr[0]} (no payload {fname})")
     elif method == "GET":
         # fallback: any GET -> 200 with secret (covers http_get on custom paths)
         send_response(conn, json.dumps({"status": "ok", "secret": C2_SECRET}))

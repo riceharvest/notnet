@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # notnet sim runner — up -> driver -> down
-# Usage: ./tests/sim/run-sim.sh [--scenario all|c2-drive|autonomous|resilience|monetization|defence] [--posture lax|standard|hardened] [--keep]
+# Usage: ./tests/sim/run-sim.sh [--scenario all|c2-drive|autonomous|resilience|monetization|defence|remaining-parity] [--posture lax|standard|hardened] [--keep]
 set -euo pipefail
 
 cd "$(dirname "$0")"

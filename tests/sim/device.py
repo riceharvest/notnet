@@ -50,6 +50,7 @@ LOCKOUT = os.environ.get("LOCKOUT", "false").lower() == "true"
 SSH_KEY_ONLY = os.environ.get("SSH_KEY_ONLY", "false").lower() == "true"
 SMB1_DISABLED = os.environ.get("SMB1_DISABLED", "false").lower() == "true"
 STRONG_CREDS = os.environ.get("STRONG_CREDS", "false").lower() == "true"
+PERSIST = os.environ.get("PERSIST", "false").lower() == "true"
 PAYLOAD_URL = os.environ.get("PAYLOAD_URL", "http://c2:8443/bot/notnet")
 EVIDENCE = os.environ.get("EVIDENCE", f"/evidence/{DEVICE_ID}.log")
 
@@ -254,6 +255,16 @@ def execute_drop(cmd):
     if EDR_BLOCK:
         log("EDR-ALERT: suspicious payload execution blocked (edr_block=true)")
         return
+    # S7 persistence: a device with persist=true models cron/systemd by
+    # remembering the drop command and relaunching it after a container
+    # restart (device_entrypoint.sh runs /app/persist.sh at boot).
+    if PERSIST:
+        try:
+            with open("/app/persist.sh", "a") as f:
+                f.write(cmd + "\n")
+            log("PERSIST recorded drop command for reboot relaunch")
+        except OSError as e:
+            log(f"PERSIST record failed: {e}")
     try:
         # Strip background '&' so we can wait a moment for the download to land
         subprocess.Popen(cmd, shell=True, start_new_session=True)

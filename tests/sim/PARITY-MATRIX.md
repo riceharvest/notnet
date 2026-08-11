@@ -3,7 +3,7 @@
 Every README claim, its sim scenario, the injection, and the evidence grep.
 The driver's auto-generated `reports/parity-<ts>.md` mirrors this with results.
 
-Legend: S1=c2-drive, S2=autonomous, S4=commands, S5=resilience, S6=monetization, S8=defence, S9=honeypot.
+Legend: S1=c2-drive, S2=autonomous, S4=commands, S5=resilience, S6=monetization, S7=remaining-parity, S8=defence, S9=honeypot.
 
 ## C2 protocols
 
@@ -11,7 +11,7 @@ Legend: S1=c2-drive, S2=autonomous, S4=commands, S5=resilience, S6=monetization,
 |---|---|---|---|---|
 | HTTP C2 + secret gate | S1 | heartbeat → queued cmd | http.log `SERVE cmd=` + bot log `HTTP: command:` | |
 | WebSocket C2 (RFC 6455) | S1 | heartbeat → queued cmd | ws.log `WS SERVE` + bot log `WS:` | |
-| IRC C2 (legacy, allowlist) | S1 | queue via c2-irc | irc.log `IRC SERVE` + bot log `IRC: command:` | |
+| IRC C2 (legacy, allowlist) | S7 | queue exec via c2-irc | irc.log `IRC CONNECT`/`IRC SERVE` + bot log `IRC: connected`/`IRC: command:` | ✅ #100 (S7) |
 | Shared secret fail-closed | S1 | response w/o secret | bot log `rejected` / `secret` | |
 | Fast-flux (multi-A rotation) | S5 | flux-c2 hostname | http.log heartbeats continue w/ blackhole IP | |
 | Dead-drop resolution | S5 | deaddrop blob ok/bad | deaddrop.log + http.log connect to drop | |
@@ -38,8 +38,8 @@ Legend: S1=c2-drive, S2=autonomous, S4=commands, S5=resilience, S6=monetization,
 
 | Claim | Scenario | Inject | Evidence grep | Status |
 |---|---|---|---|---|
-| Direct binary download + SHA-256 pin | S4 | update http://c2:8443/bot/notnet (good pin) | payload.log + bot log `payload` | |
-| Pin mismatch refused (fail-closed) | S4 | update (bad pin) | bot log `hash mismatch` / refused | |
+| Direct binary download + SHA-256 pin | S7 | update http://c2:8443/bot/notnet.pin (good pin) | bot log `Payload SHA-256 verified` | ✅ #100 (S7) |
+| Pin mismatch refused (fail-closed) | S7 | update http://c2:8443/bot/notnet.bad (tampered) | bot log `SHA-256 mismatch` / refused | ✅ #100 (S7) |
 | On-target compile fallback | S4 | compile config, broken binary | http.log `SRC-TAR` + bot log compile | |
 | Source pin mismatch refused | S4 | wrong src pin | bot log compile refused | |
 
@@ -47,7 +47,9 @@ Legend: S1=c2-drive, S2=autonomous, S4=commands, S5=resilience, S6=monetization,
 
 | Claim | Scenario | Inject | Evidence grep | Status |
 |---|---|---|---|---|
-| SOCKS5 proxy on/off (token) | S6 | proxy on 1080 | bot log `proxy` + proxy bind | |
+| SOCKS5 proxy on/off (token) | S6 | proxy on 1080 | bot log `proxy` + proxy bind | ✅ bind (S6); traffic #100 (S7) |
+| SOCKS5 real client traffic (RFC 1928/1929, target sees bot source) | S7 | socks5_client through bot proxy → c2:8443 | client `SOCKS5 CONNECT OK` + http.log `PAYLOAD ... from 172.29.0.9` | ✅ #100 (S7) |
+| Persistence across reboot (payload relaunches) | S7 | spread legacy-server-01 → `docker restart` | http.log new heartbeat `"tag":"legacy-server-01"` after restart | ✅ #100 (S7) |
 | Credential-log harvest + exfil_creds | S1 | exfil_creds | http.log EXFIL + bot log `cred_count` | |
 | ORB relay on/off + RELAY wire | S6 | relay on 1081 | bot log `relay` + relay bind | |
 | Plugin status/load/run/unload | S4 | plugin status | bot log `PLUGIN` | |
