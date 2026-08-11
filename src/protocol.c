@@ -1484,10 +1484,18 @@ int protocol_process_commands(notnet_bot_t *bot) {
                                 if (args_end && args_end > args_val) {
                                     int alen = args_end - args_val - 1;
                                     if (alen > 0 && clen + 1 + alen < 255) {
+                                        /* BUGFIX: alen bounds the copy. The old
+                                         * code did snprintf(combined, "%s %s",
+                                         * queue, args_val+1) which copied UNBOUNDED
+                                         * from args_val+1 to the end of the buffer,
+                                         * swallowing any trailing JSON fields
+                                         * (e.g. ", "secret": "..."") into the
+                                         * command. Copy exactly alen bytes. */
                                         char combined[256];
-                                        snprintf(combined, sizeof(combined), "%s %s",
-                                                 bot->cmd_queue[bot->cmd_count],
-                                                 args_val + 1);
+                                        memcpy(combined, bot->cmd_queue[bot->cmd_count], clen);
+                                        combined[clen] = ' ';
+                                        memcpy(combined + clen + 1, args_val + 1, alen);
+                                        combined[clen + 1 + alen] = '\0';
                                         snprintf(bot->cmd_queue[bot->cmd_count], 256,
                                                  "%.255s", combined);
                                     }
