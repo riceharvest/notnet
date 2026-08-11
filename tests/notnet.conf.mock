@@ -4,6 +4,7 @@ irc_port=6667
 irc_auth_nicks=mockirc
 http_server=mock-http
 http_port=8080
+c2_secret=mocksecret
 scan_interval=1
 heartbeat_interval=5
 scan_timeout_ms=50

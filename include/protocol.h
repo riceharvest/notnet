@@ -123,6 +123,15 @@ typedef struct {
     /* Update tracking */
     time_t last_update;
 
+    /* SECURITY FIX (#35): Shared secret for HTTP/WS C2 authentication.
+     * The bot includes it in every heartbeat; the C2 must echo it back
+     * in command responses. Commands without a valid secret echo are
+     * rejected, giving HTTP/WS the same trust boundary IRC has via the
+     * nick allowlist. Configured via c2_secret= in the config file or
+     * the NOTNET_C2_SECRET environment variable. Empty = fail-closed
+     * (HTTP/WS commands are never trusted). */
+    char secret[64];
+
     /* SECURITY FIX (#14): Rate limiting for C2 commands */
     time_t last_cmd_time;
     int cmd_this_second;
