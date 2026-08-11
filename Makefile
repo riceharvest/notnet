@@ -26,7 +26,8 @@ SRCS := notnet.c \
         src/spread.c \
         src/payload.c \
         src/persist.c \
-        src/util.c
+        src/util.c \
+        src/deaddrop.c
 
 OBJS := $(SRCS:.c=.o)
 
@@ -86,9 +87,10 @@ dist: all
 # and pin it with payload_source_sha256= in the bot config.
 DIST_SRC_FILES := notnet.c \
                   src/protocol.c src/spread.c src/payload.c \
-                  src/persist.c src/util.c \
+                  src/persist.c src/util.c src/deaddrop.c \
                   include/config.h include/protocol.h include/spread.h \
                   include/payload.h include/persist.h include/util.h \
+                  include/deaddrop.h \
                   Makefile
 dist-src:
 	@mkdir -p dist
