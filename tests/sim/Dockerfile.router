@@ -1,0 +1,9 @@
+# notnet sim — router container (stateful NAT + per-posture iptables)
+FROM alpine:3.20
+
+RUN apk add --no-cache iptables iproute2 bash
+
+COPY tests/sim/defence/router.sh /app/router.sh
+RUN chmod +x /app/router.sh
+
+ENTRYPOINT ["/app/router.sh"]

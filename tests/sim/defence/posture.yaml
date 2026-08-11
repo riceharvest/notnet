@@ -1,0 +1,25 @@
+# notnet sim — defence posture knobs
+# Selected by run_sim.py --posture lax|standard|hardened
+lax:
+  lockout: false
+  ids_block: false
+  edr_block: false
+  segmentation: false
+  scan_threshold: 20
+  brute_threshold: 8
+
+standard:
+  lockout: true
+  ids_block: false     # IDS detects + alerts, does not block
+  edr_block: false
+  segmentation: true
+  scan_threshold: 20
+  brute_threshold: 8
+
+hardened:
+  lockout: true
+  ids_block: true      # IPS: blacklist offenders at the router
+  edr_block: true      # PCs refuse to execute the payload
+  segmentation: true
+  scan_threshold: 20
+  brute_threshold: 8

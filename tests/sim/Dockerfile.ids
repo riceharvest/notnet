@@ -1,0 +1,6 @@
+# notnet sim — IDS/IPS monitor (log watcher -> ALERT records, optional drop)
+FROM python:3.11-slim
+
+COPY tests/sim/defence/ids_monitor.py /app/ids_monitor.py
+
+CMD ["python3", "/app/ids_monitor.py"]

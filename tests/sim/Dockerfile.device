@@ -1,0 +1,23 @@
+# notnet sim — device image (infection-capable victims)
+# Runs the generic multi-service device emulator. Payload execution needs
+# wget + a shell; /etc/notnet.conf is baked so an executed payload joins C2
+# with bot_tag=<device-id>.
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY tests/sim/device.py /app/device.py
+# The payload binary (real compiled notnet) is baked so the device can run it
+# without depending on the C2 serving it — but the drop command uses wget, so
+# we also keep the binary available at the same path wget would write.
+COPY notnet /app/notnet
+
+# Per-device config template (bot_tag substituted by gen_fleet.py)
+# Real devices copy this into /etc/notnet.conf at boot via entrypoint.
+COPY tests/sim/conf/notnet.conf.device.tpl /app/notnet.conf.tpl
+COPY tests/sim/device_entrypoint.sh /app/device_entrypoint.sh
+RUN chmod +x /app/device_entrypoint.sh
+
+WORKDIR /app
+ENTRYPOINT ["/app/device_entrypoint.sh"]

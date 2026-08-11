@@ -1,0 +1,23 @@
+# notnet sim — device config template. device_entrypoint.sh substitutes
+# __DEVICE_ID__ into bot_tag so executed payloads are attributable per device.
+http_server=c2
+http_port=8080
+http_path=/api/v1/bot
+ws_server=c2-ws
+ws_port=8081
+ws_enabled=1
+c2_secret=mocksecret
+heartbeat_interval=2
+scan_interval=30
+scan_timeout_ms=50
+scan_max_hosts=254
+ssh_enabled=1
+telnet_enabled=1
+smb_enabled=1
+redis_enabled=1
+rdp_enabled=1
+persist_enabled=0
+proxy_token=proxytok
+relay_token=relaytok
+redis_ssh_key=ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDMockTestKeyForNotnetRedisVector1234567890abcdefghijklmnopqrstuvwxyz notnet-test
+bot_tag=__DEVICE_ID__

@@ -1,0 +1,20 @@
+# notnet sim — autonomous scenario (S2): IRC+HTTP both disabled so the main
+# loop's spread_local() path runs (Finding A). WS kept on so we can still see
+# heartbeats; scan targets the IoT segment.
+http_enabled=0
+irc_enabled=0
+ws_server=c2-ws
+ws_port=8081
+ws_enabled=1
+c2_secret=mocksecret
+heartbeat_interval=2
+scan_interval=1
+scan_timeout_ms=50
+scan_max_hosts=254
+ssh_enabled=1
+telnet_enabled=1
+smb_enabled=1
+redis_enabled=1
+rdp_enabled=1
+persist_enabled=0
+scan_targets=172.29.10.0/24

@@ -1,0 +1,17 @@
+# notnet sim — resilience scenario (S5): flux + dead-drop + rotation.
+# flux-c2 resolves via dnsmasq to a live IP + a blackhole IP.
+flux_enabled=1
+flux_ttl=2
+http_server=flux-c2
+http_port=8080
+http_path=/api/v1/bot
+c2_secret=mocksecret
+c2_backup_1=c2-backup:8082
+dead_drop_url=http://deaddrop:8090/blob?secret=ok
+dead_drop_interval=30
+heartbeat_interval=2
+scan_interval=30
+scan_timeout_ms=50
+scan_max_hosts=254
+persist_enabled=0
+bot_tag=sim-resilience-1

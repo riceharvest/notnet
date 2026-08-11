@@ -1,0 +1,11 @@
+# notnet sim — runtime artifacts (never commit)
+payload/
+evidence/
+queue/
+reports/
+cowrie/log/
+cowrie/*.pickle
+docker-compose.fleet.yml
+conf/generated/
+__pycache__/
+*.pyc

@@ -1,0 +1,270 @@
+# notnet sim — fleet manifest. Every row = one device container.
+# gen_fleet.py turns this into the compose override + per-device config.
+#
+# Types map to emulator profiles (device.py) or Cowrie honeypots:
+#   smart-fridge / smart-tv / printer / thermostat / baby-monitor : telnet + web
+#   tbk-dvr         : CVE-2024-3721 (port 80)
+#   huawei-hg532    : CVE-2017-17215 (port 37215)
+#   realtek         : CVE-2021-35395 (port 80)
+#   linux-pc        : SSH 22
+#   windows-pc      : SMB 445 + RDP 3389
+#   nas             : SSH 22 + SMB 445
+#   redis-cache     : Redis 6379 (no auth)
+#   redis-auth      : Redis 6379 (AUTH with pool password)
+#   honeypot-*      : Cowrie container (real SSH/Telnet honeypot, never executes)
+#
+# Credentials MUST match the bot's default pool (src/spread.c:112-127) to be
+# crackable: users admin/root/user/test/guest/pi/...; passes admin/password/
+# 123456/root/toor/... Devices with creds NOT in the pool are strong-creds
+# negative controls.
+
+segments:
+  iot:     "172.29.10.0/24"
+  office:  "172.29.20.0/24"
+  dmz:     "172.29.30.0/24"
+
+devices:
+  # ── IoT segment: cameras, fridges, routers, TVs, thermostats ──
+  - id: fridge-01
+    type: smart-fridge
+    segment: iot
+    ip: 172.29.10.10
+    ports: [23, 80]
+    telnet_creds: ["root:123456"]
+    cve: none
+
+  - id: fridge-02
+    type: smart-fridge
+    segment: iot
+    ip: 172.29.10.11
+    ports: [23]
+    telnet_creds: ["admin:admin"]
+    cve: none
+
+  - id: cam-01
+    type: tbk-dvr
+    segment: iot
+    ip: 172.29.10.12
+    ports: [80]
+    cve: CVE-2024-3721
+
+  - id: cam-02
+    type: tbk-dvr
+    segment: iot
+    ip: 172.29.10.13
+    ports: [80]
+    cve: CVE-2024-3721
+
+  - id: cam-03
+    type: tbk-dvr
+    segment: iot
+    ip: 172.29.10.14
+    ports: [80, 23]
+    cve: CVE-2024-3721
+    telnet_creds: ["admin:123456"]
+    patched_partial: true     # CVE verify fails, but telnet cred is crackable
+
+  - id: router-01
+    type: huawei-hg532
+    segment: iot
+    ip: 172.29.10.15
+    ports: [37215]
+    cve: CVE-2017-17215
+
+  - id: router-02
+    type: huawei-hg532
+    segment: iot
+    ip: 172.29.10.16
+    ports: [37215, 23]
+    cve: CVE-2017-17215
+    telnet_creds: ["admin:admin"]
+
+  - id: router-03
+    type: realtek
+    segment: iot
+    ip: 172.29.10.17
+    ports: [80]
+    cve: CVE-2021-35395
+
+  - id: router-04
+    type: realtek
+    segment: iot
+    ip: 172.29.10.18
+    ports: [80, 23]
+    cve: CVE-2021-35395
+    telnet_creds: ["root:toor"]
+
+  - id: tv-01
+    type: smart-tv
+    segment: iot
+    ip: 172.29.10.19
+    ports: [23, 80]
+    telnet_creds: ["root:toor"]
+    cve: none
+
+  - id: thermostat-01
+    type: thermostat
+    segment: iot
+    ip: 172.29.10.20
+    ports: [23, 80]
+    telnet_creds: ["admin:admin"]
+    cve: none
+
+  - id: baby-monitor-01
+    type: baby-monitor
+    segment: iot
+    ip: 172.29.10.21
+    ports: [23, 80]
+    telnet_creds: ["root:123456"]
+    cve: none
+
+  - id: printer-01
+    type: printer
+    segment: iot
+    ip: 172.29.10.22
+    ports: [23, 80]
+    telnet_creds: ["admin:admin"]
+    cve: none
+
+  - id: iot-gateway-01
+    type: linux-pc
+    segment: iot
+    ip: 172.29.10.23
+    ports: [22]
+    ssh_creds: ["root:root"]
+    cve: none
+
+  # ── Office segment: PCs, NAS, servers ──
+  - id: pc-01
+    type: linux-pc
+    segment: office
+    ip: 172.29.20.10
+    ports: [22]
+    ssh_creds: ["admin:admin"]   # FIRST entry in the bot's pool -> fast crack
+    edr_block: true
+
+  - id: pc-02
+    type: linux-pc
+    segment: office
+    ip: 172.29.20.11
+    ports: [22]
+    ssh_creds: ["ubuntu:password"]
+    lockout: true
+
+  - id: winpc-01
+    type: windows-pc
+    segment: office
+    ip: 172.29.20.12
+    ports: [445, 3389]
+    smb_creds: ["admin:admin"]
+    edr_block: true
+
+  - id: winpc-02
+    type: windows-pc
+    segment: office
+    ip: 172.29.20.13
+    ports: [445, 3389]
+    smb_creds: ["admin:123456"]
+
+  - id: nas-01
+    type: nas
+    segment: office
+    ip: 172.29.20.14
+    ports: [22, 445]
+    ssh_creds: ["admin:admin"]
+    smb_creds: ["admin:admin"]
+
+  - id: server-01
+    type: linux-pc
+    segment: office
+    ip: 172.29.20.15
+    ports: [22]
+    ssh_creds: ["root:toor"]
+
+  - id: server-02
+    type: linux-pc
+    segment: office
+    ip: 172.29.20.16
+    ports: [22, 6379]
+    ssh_creds: ["deploy:changeme"]
+
+  # ── DMZ: exposed boxes ──
+  - id: web-01
+    type: linux-pc
+    segment: dmz
+    ip: 172.29.30.10
+    ports: [22]
+    ssh_creds: ["www:admin"]
+
+  - id: redis-01
+    type: redis-cache
+    segment: dmz
+    ip: 172.29.30.11
+    ports: [6379]
+
+  - id: redis-02
+    type: redis-auth
+    segment: dmz
+    ip: 172.29.30.12
+    ports: [6379]
+    redis_pass: "password"
+
+  - id: db-01
+    type: linux-pc
+    segment: dmz
+    ip: 172.29.30.13
+    ports: [22, 6379]
+    ssh_creds: ["postgres:postgres"]
+
+  # ── Negative controls (must NOT get infected) ──
+  - id: patched-cam-01
+    type: tbk-dvr
+    segment: iot
+    ip: 172.29.10.50
+    ports: [80]
+    cve: CVE-2024-3721
+    patched: true
+
+  - id: patched-router-01
+    type: huawei-hg532
+    segment: iot
+    ip: 172.29.10.51
+    ports: [37215]
+    cve: CVE-2017-17215
+    patched: true
+
+  - id: patched-realtek-01
+    type: realtek
+    segment: iot
+    ip: 172.29.10.52
+    ports: [80]
+    cve: CVE-2021-35395
+    patched: true
+
+  - id: strong-creds-01
+    type: linux-pc
+    segment: office
+    ip: 172.29.20.50
+    ports: [22]
+    ssh_creds: ["root:Fg7#kQ2!zX"]
+
+  - id: strong-creds-02
+    type: smart-fridge
+    segment: iot
+    ip: 172.29.10.53
+    ports: [23]
+    telnet_creds: ["admin:Vb8-mQ4-wT9-xZ2"]
+    cve: none
+
+  # ── Honeypots (Cowrie, never executes) ──
+  - id: honeypot-telnet-01
+    type: honeypot-telnet
+    segment: iot
+    ip: 172.29.10.60
+    ports: [23]
+
+  - id: honeypot-ssh-01
+    type: honeypot-ssh
+    segment: dmz
+    ip: 172.29.30.60
+    ports: [22]
