@@ -12,8 +12,8 @@ c2-server/notnet_c2
 c2-server/*.o
 
 # Build system
-config.h
-config.mk
+/config.h
+/config.mk
 
 # Compiler caches
 .clangd/
