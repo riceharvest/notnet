@@ -123,8 +123,11 @@ Automatically detects init system and installs:
 - SysV init script
 
 ## Encryption
-- TLS 1.2+ support (planned — requires OpenSSL/mbedTLS linkage)
-- Currently cleartext C2 (IRC, HTTP, WS)
+- TLS 1.2+ for all three C2 channels (IRC, HTTP, WebSocket), enabled with
+  `make TLS=1` plus a pinned server certificate fingerprint:
+  `tls_cert_pin_sha256=<64 hex>` in config or `NOTNET_TLS_CERT_PIN_SHA256`
+  env var. Without the pin the channels stay plaintext.
+- Default build is cleartext C2 (IRC, HTTP, WS).
 
 ## License
 

