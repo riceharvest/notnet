@@ -27,6 +27,11 @@ Legend: S1=c2-drive, S2=autonomous, S4=commands, S5=resilience, S6=monetization,
 | CVE-2017-17215 HG532 (37215) | S1 | spread 172.29.10.15:37215 | router-01.log HG532 | ✅ Fixed #98 (CL) + #97 (autonomous) |
 | CVE-2021-35395 Realtek (80) | S1 | spread 172.29.10.17:80 | router-03.log Realtek | |
 | CVE fail-safe (patched = no drop) | S1 | spread patched IPs | patched-*.log probe miss, no DROP | |
+| Cross-vendor: TBK must NOT fire on Dahua/Hikvision (probe precision) | S1 | spread dahua-dvr-01 / hikvision-cam-01:80 | dahua-*.log/hikvision-*.log NO CVE drop | ✅ #102 (vendor tier) |
+| Cross-vendor: HG532 must NOT fire on Tenda TR-064 | S1 | spread tenda-router-01:37215 | tenda-*.log NO CVE drop | ✅ #102 (vendor tier) |
+| SMB dialect: win11 SMB2-only rejects SMB1 negotiate | S1 | spread win11-01:445 | win11-01.log `SMB1 disabled` / STATUS_NOT_SUPPORTED | ✅ #102 |
+| NAS vendor: Synology web admin + SSH surface | S1 | spread synology-nas-01:22 | synology-nas-01.log SSH key-only reject | ✅ #102 |
+| Switch/AP telnet target class | S1 | spread switch-01 / ap-01:23 | switch-01.log / ap-01.log telnet auth | ✅ #102 |
 | SSH brute-force | S1 | spread 172.29.20.10:22 | pc-01.log SSH AUTH OK | |
 | Telnet brute-force | S1 | spread 172.29.10.10:23 | fridge-01.log TELNET AUTH OK | |
 | SMB brute-force | S1 | spread 172.29.20.12:445 | winpc-01.log SMB AUTH OK | |

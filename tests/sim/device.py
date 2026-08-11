@@ -43,6 +43,7 @@ SSH_CREDS = [tuple(c.split(":", 1)) for c in os.environ.get("SSH_CREDS", "").spl
 SMB_CREDS = [tuple(c.split(":", 1)) for c in os.environ.get("SMB_CREDS", "").split(",") if ":" in c]
 REDIS_PASS = os.environ.get("REDIS_PASS", "")
 CVE = os.environ.get("CVE", "none")
+WEB_TITLE = os.environ.get("WEB_TITLE", "")   # vendor banner for generic web UI
 PATCHED = os.environ.get("PATCHED", "false").lower() == "true"
 PATCHED_PARTIAL = os.environ.get("PATCHED_PARTIAL", "false").lower() == "true"
 EDR_BLOCK = os.environ.get("EDR_BLOCK", "false").lower() == "true"
@@ -230,7 +231,8 @@ def handle_http_cve(conn, addr):
             return
 
         # generic web device (smart-fridge/tv/printer web UI, or target-web)
-        http_response(conn, f"<html><title>{DEVICE_ID}</title><body>device web UI</body></html>")
+        title = WEB_TITLE if WEB_TITLE else DEVICE_ID
+        http_response(conn, f"<html><title>{title}</title><body>{title}</body></html>")
         log(f"WEB {addr[0]}: {method} {path}")
     except (socket.timeout, ConnectionError, OSError):
         pass

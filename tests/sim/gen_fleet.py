@@ -81,6 +81,7 @@ def device_env(d):
         "SMB_CREDS": ",".join(d.get("smb_creds", [])),
         "REDIS_PASS": d.get("redis_pass", ""),
         "PERSIST": "true" if d.get("persist") else "false",
+        "WEB_TITLE": d.get("web_title", ""),
     }
     return env
 

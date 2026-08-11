@@ -39,6 +39,11 @@ FLEET_IDS = [
     "tv-01", "thermostat-01", "baby-monitor-01", "printer-01",
     "pc-01", "pc-02", "winpc-01", "winpc-02", "nas-01", "server-01", "server-02",
     "web-01", "redis-01", "db-01",
+    # vendor-diversity tier (#102) — modern/hardened variants
+    "dahua-dvr-01", "dahua-dvr-03", "tenda-router-01", "tenda-router-03",
+    "hikvision-cam-01", "hikvision-cam-03",
+    "win10-01", "win11-01", "synology-nas-01",
+    "switch-01", "ap-01",
 ]
 # Modern/hardened tier — a 2026 attacker should NOT crack these.
 MODERN_TIER = set(FLEET_IDS)
@@ -48,6 +53,9 @@ LEGACY_TIER = [
     "legacy-cam-01", "legacy-cam-02", "legacy-router-01", "legacy-router-02",
     "legacy-fridge-01", "legacy-pc-01", "legacy-server-01", "legacy-nas-01",
     "legacy-redis-01", "legacy-redis-02", "legacy-db-01",
+    # vendor-diversity tier (#102) — legacy variants, vulnerable by design
+    "dahua-dvr-02", "tenda-router-02", "hikvision-cam-02",
+    "synology-nas-02", "switch-02", "ap-02",
 ]
 HONEYPOTS = ["honeypot-telnet-01", "honeypot-ssh-01"]
 
@@ -214,6 +222,15 @@ def scenario_c2drive(report):
         ("172.29.20.12", 445, "winpc-01 SMB1 off"),
         ("172.29.20.12", 3389, "winpc-01 RDP NLA"),
         ("172.29.30.11", 6379, "redis-01 strong AUTH"),
+        # vendor-diversity (#102) — non-matching vendors must NOT fire CVE
+        ("172.29.10.40", 80, "dahua-dvr-01 TBK probe must miss (Dahua banner)"),
+        ("172.29.10.42", 37215, "tenda-router-01 HG532 probe must miss (no HUAWEIUPNP)"),
+        ("172.29.10.44", 80, "hikvision-cam-01 TBK probe must miss (Hikvision banner)"),
+        ("172.29.20.40", 445, "win10-01 SMB1 present but strong creds"),
+        ("172.29.20.41", 445, "win11-01 SMB1 disabled (negotiate rejected)"),
+        ("172.29.20.42", 22, "synology-nas-01 SSH key-only"),
+        ("172.29.10.46", 23, "switch-01 telnet strong creds"),
+        ("172.29.10.48", 23, "ap-01 telnet strong creds"),
         # legacy tier — the vulnerable tail botnets survive on
         ("172.29.10.30", 80, "legacy-cam-01 TBK + telnet"),
         ("172.29.10.32", 37215, "legacy-router-01 HG532 + telnet"),
@@ -223,6 +240,13 @@ def scenario_c2drive(report):
         ("172.29.20.32", 445, "legacy-nas-01 SMB"),
         ("172.29.30.20", 6379, "legacy-redis-01 unauth"),
         ("172.29.30.21", 6379, "legacy-redis-02 weak AUTH"),
+        # vendor-diversity legacy (#102) — legacy variants must be pwned
+        ("172.29.10.41", 23, "dahua-dvr-02 telnet admin:123456"),
+        ("172.29.10.43", 23, "tenda-router-02 telnet root:admin"),
+        ("172.29.10.45", 23, "hikvision-cam-02 telnet admin:12345"),
+        ("172.29.20.43", 22, "synology-nas-02 SSH admin:admin"),
+        ("172.29.10.47", 23, "switch-02 telnet admin:admin"),
+        ("172.29.10.49", 23, "ap-02 telnet root:123456"),
     ]
     for ip, port, label in targets:
         queue_cmd("spread", f"{ip}:{port}")
@@ -251,6 +275,18 @@ def scenario_c2drive(report):
                "PASS" if modern_cve_resist and not modern_drops else "FAIL",
                f"resistance={len(modern_cve_resist)} modern_drops={len(modern_drops)}; " +
                "; ".join(h[1][:70] for h in modern_cve_resist[:3]))
+
+    # Vendor-diversity (#102): a CVE module must NOT fire on a NON-matching
+    # vendor's device — cross-vendor false positive = a probe bug.
+    # Dahua/Tenda/Hikvision are separate vendors from TBK/Huawei/Realtek.
+    OTHER_VENDORS = ["dahua-dvr-01", "dahua-dvr-03", "tenda-router-01",
+                     "tenda-router-03", "hikvision-cam-01", "hikvision-cam-03"]
+    other_drops = [h for h in cve_drops if dev_name(h[0]) in OTHER_VENDORS]
+    other_cve_log = grep_evidence(ev, ["CVE-"], files=[f"{v}.log" for v in OTHER_VENDORS])
+    report.add("CVE modules DO NOT false-positive on non-matching vendors (#102)",
+               "PASS" if not other_drops else "FAIL",
+               f"cross-vendor drops={len(other_drops)}; " +
+               "; ".join(h[1][:70] for h in other_cve_log[:3]) or "no CVE traffic on Dahua/Tenda/Hikvision")
 
     # brute-force cred harvest — legacy should crack, modern must not
     cred_hits = grep_evidence(ev, ["AUTH OK", "cracked"])

@@ -213,6 +213,164 @@ devices:
     ports: [22]
     ssh_key_only: true
 
+  # ══════════════════════════════════════════════════════════════════
+  # VENDOR DIVERSITY tier (#102) — a second implementation of each
+  # service class so per-vendor CVE claims are tested against more than
+  # one vendor, and cross-vendor false positives are detectable (a CVE
+  # module firing on a NON-matching vendor's device = a probe bug).
+  # Each vendor gets a modern (patched/hardened) + legacy variant.
+  # ══════════════════════════════════════════════════════════════════
+
+  # Second DVR vendor: Dahua-style web service. The TBK module's probe
+  # greps for TBK/DVR/NVR — this banner must NOT match (no false positive).
+  - id: dahua-dvr-01
+    type: dahua-dvr
+    segment: iot
+    ip: 172.29.10.40
+    ports: [80]
+    web_title: "Dahua Web Service"
+    strong_creds: true
+
+  - id: dahua-dvr-02
+    type: dahua-dvr
+    segment: iot
+    ip: 172.29.10.41
+    ports: [80, 23]
+    web_title: "Dahua Web Service"
+    telnet_creds: ["admin:123456"]   # legacy default creds in the bot's pool
+
+  # Dahua partial-patch: same banner, but the web shell is fixed — no drop
+  - id: dahua-dvr-03
+    type: dahua-dvr
+    segment: iot
+    ip: 172.29.10.50
+    ports: [80]
+    web_title: "Dahua Web Service"
+    patched_partial: true
+
+  # Second router CVE profile: Tenda-style TR-064 on 37215. The HG532
+  # module's probe requires the HUAWEIUPNP marker — this banner must NOT
+  # match (proves HG532 is genuinely Huawei-specific).
+  - id: tenda-router-01
+    type: tenda-router
+    segment: iot
+    ip: 172.29.10.42
+    ports: [37215]
+    web_title: "Tenda TR-064"
+    strong_creds: true
+
+  - id: tenda-router-02
+    type: tenda-router
+    segment: iot
+    ip: 172.29.10.43
+    ports: [37215, 23]
+    web_title: "Tenda TR-064"
+    telnet_creds: ["root:admin"]
+
+  # Tenda partial-patch: TR-064 answers, injection fixed — no drop
+  - id: tenda-router-03
+    type: tenda-router
+    segment: iot
+    ip: 172.29.10.51
+    ports: [37215]
+    web_title: "Tenda TR-064"
+    patched_partial: true
+
+  # Second smart-camera brand: Hikvision-style, different banner + creds
+  - id: hikvision-cam-01
+    type: hikvision-cam
+    segment: iot
+    ip: 172.29.10.44
+    ports: [80]
+    web_title: "Hikvision iVMS"
+    strong_creds: true
+
+  - id: hikvision-cam-02
+    type: hikvision-cam
+    segment: iot
+    ip: 172.29.10.45
+    ports: [80, 23]
+    web_title: "Hikvision iVMS"
+    telnet_creds: ["admin:12345"]
+
+  # Hikvision partial-patch: banner served, CGI injection fixed
+  - id: hikvision-cam-03
+    type: hikvision-cam
+    segment: iot
+    ip: 172.29.10.52
+    ports: [80]
+    web_title: "Hikvision iVMS"
+    patched_partial: true
+
+  # Windows 10 vs Windows 11 split: win10 keeps SMB1 (the bot can
+  # negotiate, then auth fails on strong creds); win11 is SMB2-only and
+  # rejects the SMB1 negotiate outright.
+  - id: win10-01
+    type: windows-pc
+    segment: office
+    ip: 172.29.20.40
+    ports: [445, 3389]
+    smb1_disabled: false          # legacy SMB1 present — but strong creds
+    strong_creds: true
+
+  - id: win11-01
+    type: windows-pc
+    segment: office
+    ip: 172.29.20.41
+    ports: [445, 3389]
+    smb1_disabled: true           # modern SMB2-only — negotiate rejected
+
+  # Second NAS vendor: Synology-style, web admin on 5000/5001 + SSH
+  - id: synology-nas-01
+    type: nas
+    segment: office
+    ip: 172.29.20.42
+    ports: [5000, 22]
+    web_title: "Synology DSM"
+    ssh_key_only: true
+    smb1_disabled: true
+
+  - id: synology-nas-02
+    type: nas
+    segment: office
+    ip: 172.29.20.43
+    ports: [5000, 22]
+    web_title: "Synology DSM"
+    ssh_creds: ["admin:admin"]
+
+  # Managed switch / AP — a common worm target class the fleet lacked
+  - id: switch-01
+    type: managed-switch
+    segment: iot
+    ip: 172.29.10.46
+    ports: [23, 80]
+    web_title: "Netgear Switch"
+    strong_creds: true
+
+  - id: switch-02
+    type: managed-switch
+    segment: iot
+    ip: 172.29.10.47
+    ports: [23, 80]
+    web_title: "Netgear Switch"
+    telnet_creds: ["admin:admin"]
+
+  - id: ap-01
+    type: access-point
+    segment: iot
+    ip: 172.29.10.48
+    ports: [80, 23]
+    web_title: "Ubiquiti AP"
+    strong_creds: true
+
+  - id: ap-02
+    type: access-point
+    segment: iot
+    ip: 172.29.10.49
+    ports: [80, 23]
+    web_title: "Ubiquiti AP"
+    telnet_creds: ["root:123456"]
+
   - id: redis-01
     type: redis-auth
     segment: dmz
