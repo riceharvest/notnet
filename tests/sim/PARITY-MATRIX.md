@@ -24,15 +24,15 @@ Legend: S1=c2-drive, S2=autonomous, S4=commands, S5=resilience, S6=monetization,
 | Claim | Scenario | Inject | Evidence grep | Status |
 |---|---|---|---|---|
 | CVE-2024-3721 TBK (port 80) | S1 | spread 172.29.10.12:80 | cam-01.log TBK DROP / bot log CVE-2024-3721 | |
-| CVE-2017-17215 HG532 (37215) | S1 | spread 172.29.10.15:37215 | router-01.log HG532 | |
+| CVE-2017-17215 HG532 (37215) | S1 | spread 172.29.10.15:37215 | router-01.log HG532 | ✅ Fixed #98 (CL) + #97 (autonomous) |
 | CVE-2021-35395 Realtek (80) | S1 | spread 172.29.10.17:80 | router-03.log Realtek | |
 | CVE fail-safe (patched = no drop) | S1 | spread patched IPs | patched-*.log probe miss, no DROP | |
 | SSH brute-force | S1 | spread 172.29.20.10:22 | pc-01.log SSH AUTH OK | |
 | Telnet brute-force | S1 | spread 172.29.10.10:23 | fridge-01.log TELNET AUTH OK | |
 | SMB brute-force | S1 | spread 172.29.20.12:445 | winpc-01.log SMB AUTH OK | |
-| Redis unauth + AUTH | S1 | spread redis IPs:6379 | redis-*.log REDIS | |
+| Redis unauth + AUTH | S1 | spread redis IPs:6379 | redis-*.log REDIS | ✅ Fixed #99 (recv loop) |
 | RDP brute-force | S1 | spread 172.29.20.12:3389 | winpc-01.log RDP | |
-| Autonomous spreading (README claim) | S2 | none (C2 disabled) | any DROP evidence = PASS; none = FAIL (#95) | |
+| Autonomous spreading (README claim) | S2 | none (C2 disabled) | any DROP evidence = PASS; none = FAIL — **PASS since c511733 (#95)**: spread_local wires spawn_scan_threads, main loop gates on live connection state | ✅ Fixed #95 |
 
 ## Payload delivery
 
