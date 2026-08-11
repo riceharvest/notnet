@@ -360,10 +360,11 @@ def handle_ssh(conn, addr):
 # ─────────────────────────── SMB handler ───────────────────────────
 
 def smb_status_response(conn, status, uid=0):
-    """SMB1 response header: 0xFF SMB + 32-byte header with NT status."""
-    # header: protocol(4) cmd(1) status(4 LE) flags(1) flags2(2) pid_high(2)
-    #         security_signature(8) reserved(2) tid(2) pid(2) uid(2) mid(2)
-    hdr = bytearray(32)
+    """SMB1 response header: 0xFF SMB + 32-byte header with NT status.
+    Bot's smb1_transaction requires offset >= 38 (4 prefix + 32 header +
+    word count + byte count), so send 40 bytes: header + word count(2) +
+    byte count(2)."""
+    hdr = bytearray(36)
     hdr[0:4] = b"\xFFSMB"
     hdr[4] = 0x72  # SMB_COM_NEGOTIATE (harmless for both)
     hdr[5:9] = status.to_bytes(4, "little")

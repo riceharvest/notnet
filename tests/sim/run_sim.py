@@ -202,12 +202,14 @@ def scenario_c2drive(report):
     time.sleep(75)
     ev = read_evidence()
 
-    # CVE drops — evidence lives in the DEVICE logs (cam-01.log, router-01.log...)
+    # CVE drops — evidence lives in the DEVICE logs (cam-01.log, router-01.log...).
+    # Match only REAL exploit traffic, not the LISTEN banner (which contains
+    # "cve=CVE-..." and would false-positive a PASS).
     cve_hits = grep_evidence(ev, ["TBK DROP", "TBK VERIFY", "HG532 DROP", "HG532 VERIFY",
-                                  "Realtek DROP", "Realtek VERIFY", "CVE-2024-3721",
-                                  "CVE-2017-17215", "CVE-2021-35395"])
-    report.add("CVE modules fired via C2 spread", "PASS" if cve_hits else "FAIL",
-               "; ".join(h[1][:80] for h in cve_hits[:5]) or "no CVE evidence")
+                                  "Realtek DROP", "Realtek VERIFY"])
+    report.add("CVE modules fired via C2 spread (real probe/verify/drop traffic)",
+               "PASS" if cve_hits else "FAIL",
+               "; ".join(h[1][:80] for h in cve_hits[:5]) or "no CVE exploit traffic")
 
     # brute-force cred harvest
     cred_hits = grep_evidence(ev, ["AUTH OK", "cracked"])
