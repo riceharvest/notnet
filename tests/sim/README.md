@@ -51,7 +51,14 @@ c2net-less flat simnet 172.29.0.0/16 (Docker bridge)
   30+ device containers (device.py emulator) + Cowrie honeypots
 ```
 
-Segmentation is emulated by per-segment scan targeting (the bot only scans its
-configured subnet range); a real iptables router is future work (needs
-advanced Docker networking). The defence layer runs on evidence logs, so no
-packet capture is required.
+Segmentation is enforced TWO ways:
+1. Per-segment scan targeting in the bot config (the bot only scans its configured
+   subnet range) — this is what the ATTACKER sees.
+2. **Host firewall (real L3)** — `defence/host_firewall.sh` programs Docker's
+   DOCKER-USER chain so segments are actually isolated at the packet level
+   (IoT cannot reach Office/DMZ, DMZ cannot initiate inward, C2 control ports
+   stay reachable, hardened adds brute-force protection + IPS blacklist drops).
+   Needs root: set `SUDO_PW=<pw>` or NOPASSWD sudo, else the firewall is
+   skipped with a warning and the sim runs with the log-layer defence only.
+
+The defence layer also runs on evidence logs (no packet capture required).

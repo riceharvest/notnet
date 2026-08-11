@@ -77,5 +77,5 @@ Legend: S1=c2-drive, S2=autonomous, S4=commands, S5=resilience, S6=monetization,
 | IPS blacklists offender | hardened | ids_alerts.log IPS + router drop | |
 | Account lockout stalls brute | standard | device log LOCKOUT | |
 | EDR blocks payload exec | hardened | device log EDR-ALERT | |
-| Segmentation confines IoT | all | router iptables rules | |
+| Segmentation confines IoT | standard/hardened | DOCKER-USER rules + cross-segment DROP | ✅ host firewall (defence/host_firewall.sh) |
 | Honeypot captures attempt | S9 | cowrie log / honeypot evidence | |

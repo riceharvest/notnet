@@ -159,9 +159,10 @@ devices:
     segment: office
     ip: 172.29.20.11
     ports: [22]
-    ssh_key_only: true
+    ssh_key_only: false          # password auth allowed — but strong creds
+    ssh_creds: ["dario:Xk7-mQ9-vR3-zL2-Wp8"]   # NOT in the bot's pool
     edr_block: true
-    lockout: true
+    lockout: true                # 5 failures -> 60s lockout (real fail2ban)
 
   # Modern Windows PCs: SMB1 disabled, RDP with NLA, EDR
   - id: winpc-01
@@ -275,7 +276,8 @@ devices:
     segment: office
     ip: 172.29.20.30
     ports: [22]
-    ssh_creds: ["pi:raspberry"]
+    ssh_creds: ["pi:password"]   # in the bot's pool -> crackable
+    edr_block: true        # legacy box WITH an EDR — crack succeeds, exec blocked
 
   - id: legacy-server-01
     type: linux-pc
@@ -307,9 +309,9 @@ devices:
   - id: legacy-db-01
     type: linux-pc
     segment: dmz
-    ip: 172.29.30.22
-    ports: [22, 6379]
-    ssh_creds: ["postgres:postgres"]
+    ip: 172.29.30.23
+    ports: [22]
+    ssh_creds: ["postgres:password"]   # in the bot's pool -> crackable
 
   # ══════════════════════════════════════════════════════════════════
   # Honeypots (Cowrie, never executes)

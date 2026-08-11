@@ -394,6 +394,22 @@ def scenario_monetization(report):
                "; ".join(h[1][:80] for h in relay_hits[:2] + [("sim-bot-log", l.strip()) for l in relay_bot[:2]]) or "no relay evidence")
 
 
+def fw_rules_active():
+    """Host firewall presence: count our DOCKER-USER rules via sudo."""
+    import subprocess
+    try:
+        pw = os.environ.get("SUDO_PW", "")
+        if pw:
+            cmd = ["sudo", "-S", "iptables", "-S", "DOCKER-USER"]
+            r = subprocess.run(cmd, input=pw + "\n", capture_output=True, text=True, timeout=10)
+        else:
+            cmd = ["sudo", "-n", "iptables", "-S", "DOCKER-USER"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return "notnet-sim" in (r.stdout or "")
+    except Exception:
+        return False
+
+
 def scenario_defence(report):
     log("=== S8 defence envelope ===")
     posture = os.environ.get("SIM_POSTURE", "lax")
@@ -401,25 +417,42 @@ def scenario_defence(report):
     # pc-02 has lockout=true (SSH creds in pool → many failures first),
     # pc-01 + winpc-01 have edr_block=true, fridge-01 triggers brute-burst.
     for ip, port, label in [
+        ("172.29.20.11", 22, "pc-02 SSH lockout (fails 5x -> lockout)"),
+        ("172.29.10.10", 23, "fridge-01 telnet brute (8x -> IDS BRUTE-BURST)"),
+        ("172.29.20.30", 22, "legacy-pc-01 SSH crack -> EDR blocks exec"),
         ("172.29.20.10", 22, "pc-01 SSH EDR"),
         ("172.29.20.12", 445, "winpc-01 SMB EDR"),
-        ("172.29.20.11", 22, "pc-02 SSH lockout"),
-        ("172.29.10.10", 23, "fridge-01 telnet brute"),
         ("172.29.10.12", 80, "cam-01 CVE"),
     ]:
         queue_cmd("spread", f"{ip}:{port}")
     # The bot serves one command per heartbeat; brute-force pools take time.
-    time.sleep(90)
+    time.sleep(200)
     ev = read_evidence()
     alert_hits = grep_evidence(ev, ["ALERT sig="], files=["ids_alerts.log"])
-    report.add(f"IDS alerts under posture={posture}", "PASS" if alert_hits else "SKIP",
-               "; ".join(h[1][:80] for h in alert_hits[-3:]) or "no IDS alerts (lax expected)")
-    lockout_hits = grep_evidence(ev, ["LOCKOUT"])
+    if posture == "hardened":
+        # In hardened the host firewall's brute-force protection often drops the
+        # attacker's connection burst BEFORE it reaches devices, so the IDS (which
+        # feeds on device logs) may see little. That IS the defence working.
+        report.add(f"IDS alerts under posture={posture}",
+                   "PASS" if alert_hits else "SKIP",
+                   "; ".join(h[1][:80] for h in alert_hits[-3:]) or "suppressed by host firewall brute-force protection (expected at hardened)")
+    else:
+        report.add(f"IDS alerts under posture={posture}", "PASS" if alert_hits else "SKIP",
+                   "; ".join(h[1][:80] for h in alert_hits[-3:]) or "no IDS alerts (lax expected)")
+    lockout_hits = grep_evidence(ev, ["LOCKOUT triggered", "LOCKOUT: ", "account locked"])
     report.add(f"Account lockout under posture={posture}", "PASS" if lockout_hits else "SKIP",
                "; ".join(h[1][:80] for h in lockout_hits[:3]) or "no lockouts")
     edr_hits = grep_evidence(ev, ["EDR-ALERT"])
     report.add(f"EDR detection under posture={posture}", "PASS" if edr_hits else "SKIP",
                "; ".join(h[1][:80] for h in edr_hits[:3]) or "no EDR alerts (not hardened)")
+    # Host firewall: segmentation rules must be present for standard/hardened.
+    fw = fw_rules_active()
+    if posture == "lax":
+        report.add("Host firewall (DOCKER-USER) enforced", "SKIP" if fw else "PASS",
+                   "lax = no rules expected")
+    else:
+        report.add("Host firewall (DOCKER-USER) enforced", "PASS" if fw else "FAIL",
+                   "segmentation rules in DOCKER-USER" if fw else "no notnet-sim rules found (needs sudo)")
 
 
 def copy_evidence():

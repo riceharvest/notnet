@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 EVIDENCE_DIR = os.environ.get("SIM_EVIDENCE", "/evidence")
 ALERT_FILE = os.environ.get("SIM_ALERT_FILE", "/evidence/ids_alerts.log")
 IPS = os.environ.get("SIM_IPS", "0") == "1"
-BLACKLIST = os.environ.get("SIM_BLACKLIST", "/run/ips_blacklist")
+BLACKLIST = os.environ.get("SIM_BLACKLIST", "/evidence/ips_blacklist")
 SCAN_THRESH = int(os.environ.get("SIM_SCAN_THRESH", "20"))
 BRUTE_THRESH = int(os.environ.get("SIM_BRUTE_THRESH", "8"))
 WINDOW = int(os.environ.get("SIM_IDS_WINDOW", "30"))

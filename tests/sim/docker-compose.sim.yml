@@ -131,7 +131,7 @@ services:
       SIM_EVIDENCE: /evidence
       SIM_ALERT_FILE: /evidence/ids_alerts.log
       SIM_IPS: ${SIM_IPS:-0}
-      SIM_BLACKLIST: /run/ips_blacklist
+      SIM_BLACKLIST: /evidence/ips_blacklist
     volumes:
       - ./evidence:/evidence:rw
     networks:
