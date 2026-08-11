@@ -167,24 +167,32 @@ int random_bytes(void *buf, size_t len) {
 
 /* ── String Helpers ───────────────────────────────────────────── */
 char *str_replace(char *str, const char *old, const char *new) {
-    /* Simple string replacement */
-    char *newstr = strdup(str);
-    if (!newstr) return NULL;
-    
-    char *found = strstr(newstr, old);
-    if (!found) {
-        free(newstr);
-        return str;
-    }
-    
-    /* Replace first occurrence */
+    if (!str || !old || !new) return NULL;
+
     int old_len = strlen(old);
+    if (old_len == 0) return strdup(str);
+
+    char *found = strstr(str, old);
+    if (!found) return strdup(str);
+
     int new_len = strlen(new);
-    
-    memmove(found + new_len, found + old_len, strlen(found + old_len) + 1);
-    memcpy(found, new, new_len);
-    
-    return newstr;
+    int head_len = (int)(found - str);
+    int tail_len = (int)strlen(found + old_len);
+
+    /* SECURITY FIX (#49): Compute the exact result size and allocate it.
+     * The old code strdup'd the input (strlen(str)+1 bytes) then shifted
+     * the tail right by (new_len - old_len) bytes — a heap overflow when
+     * new is longer than old (CWE-122). Build into a correctly-sized
+     * buffer instead of mutating the original allocation. */
+    size_t total = (size_t)head_len + (size_t)new_len + (size_t)tail_len + 1;
+    char *result = (char *)malloc(total);
+    if (!result) return NULL;
+
+    memcpy(result, str, head_len);
+    memcpy(result + head_len, new, new_len);
+    memcpy(result + head_len + new_len, found + old_len, tail_len + 1);
+
+    return result;
 }
 
 /* ── Network Helpers ─────────────────────────────────────────── */
