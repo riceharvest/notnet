@@ -1226,9 +1226,14 @@ static int rdp_send_security_negotiation(int sock, const char *user, const char 
     pkt[pos++] = 0x00;
     pkt[pos++] = 0x00;
 
-    /* Client random (32 bytes of pseudo-random data) */
-    for (int i = 0; i < 32; i++) {
-        pkt[pos++] = (rand() & 0xFF);
+    /* Client random (32 bytes of cryptographically-random data) */
+    {
+        uint8_t rnd[32];
+        if (random_bytes(rnd, sizeof(rnd)) != 0) {
+            for (int i = 0; i < (int)sizeof(rnd); i++) rnd[i] = (rand() & 0xFF);
+        }
+        memcpy(pkt + pos, rnd, sizeof(rnd));
+        pos += sizeof(rnd);
     }
 
     /* Domain (empty) */
@@ -1370,9 +1375,14 @@ static int rdp_send_key_exchange(int sock) {
     pkt[pos++] = 0x00;
     pkt[pos++] = 0x00;
 
-    /* Public key (dummy RSA-like key) */
-    for (int i = 0; i < 64; i++) {
-        pkt[pos++] = (rand() & 0xFF);
+    /* Public key (64 bytes of cryptographically-random data) */
+    {
+        uint8_t rnd[64];
+        if (random_bytes(rnd, sizeof(rnd)) != 0) {
+            for (int i = 0; i < (int)sizeof(rnd); i++) rnd[i] = (rand() & 0xFF);
+        }
+        memcpy(pkt + pos, rnd, sizeof(rnd));
+        pos += sizeof(rnd);
     }
 
     /* Update length */
@@ -1522,9 +1532,14 @@ static int rdp_send_cred_key_exchange(int sock, const char *user, const char *pa
     pkt[pos++] = 0x00;
     pkt[pos++] = 0x00;
 
-    /* Public key (64 bytes) */
-    for (int i = 0; i < 64; i++) {
-        pkt[pos++] = (rand() & 0xFF);
+    /* Public key (64 bytes of cryptographically-random data) */
+    {
+        uint8_t rnd[64];
+        if (random_bytes(rnd, sizeof(rnd)) != 0) {
+            for (int i = 0; i < (int)sizeof(rnd); i++) rnd[i] = (rand() & 0xFF);
+        }
+        memcpy(pkt + pos, rnd, sizeof(rnd));
+        pos += sizeof(rnd);
     }
 
     /* Encrypted password length */
@@ -1534,9 +1549,14 @@ static int rdp_send_cred_key_exchange(int sock, const char *user, const char *pa
     pkt[pos++] = 0x00;
     pkt[pos++] = 0x00;
 
-    /* Encrypted password (32 bytes) */
-    for (int i = 0; i < 32; i++) {
-        pkt[pos++] = (rand() & 0xFF);
+    /* Encrypted password (32 bytes of cryptographically-random data) */
+    {
+        uint8_t rnd[32];
+        if (random_bytes(rnd, sizeof(rnd)) != 0) {
+            for (int i = 0; i < (int)sizeof(rnd); i++) rnd[i] = (rand() & 0xFF);
+        }
+        memcpy(pkt + pos, rnd, sizeof(rnd));
+        pos += sizeof(rnd);
     }
 
     /* Domain (empty) */
@@ -1616,9 +1636,14 @@ static int rdp_send_share_key(int sock) {
     pkt[pos++] = 0x00;
     pkt[pos++] = 0x00;
 
-    /* Key data */
-    for (int i = 0; i < 32; i++) {
-        pkt[pos++] = (rand() & 0xFF);
+    /* Key data (32 bytes of cryptographically-random data) */
+    {
+        uint8_t rnd[32];
+        if (random_bytes(rnd, sizeof(rnd)) != 0) {
+            for (int i = 0; i < (int)sizeof(rnd); i++) rnd[i] = (rand() & 0xFF);
+        }
+        memcpy(pkt + pos, rnd, sizeof(rnd));
+        pos += sizeof(rnd);
     }
 
     int sent = send(sock, pkt, pos, 0);

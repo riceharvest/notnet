@@ -126,18 +126,49 @@ void log_debug(const char *fmt, ...) {
 /* ── Random Helpers ─────────────────────────────────────────────── */
 uint32_t random_uint32(void) {
     /* SECURITY FIX (#26): Mask rand() output to avoid signed integer
-     * overflow when shifting. On glibc, rand() returns int in [0, 2^31-1). */
+     * overflow when shifting. On glibc, rand() returns int in [0, 2^31-1).
+     * SECURITY FIX (#37): Draw from getrandom() instead of rand() — the
+     * linear congruential generator seeded with time(NULL) is guessable. */
+    uint32_t v;
+    if (random_bytes(&v, sizeof(v)) == 0) return v;
+    /* Fallback only if the OS RNG is unavailable */
     return ((rand() & 0x7FFF) << 16) | (rand() & 0xFFFF);
 }
 
 uint16_t random_uint16(void) {
+    uint16_t v;
+    if (random_bytes(&v, sizeof(v)) == 0) return v;
     return rand() & 0xFFFF;
 }
 
 void random_string(char *buf, int len) {
     const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    for (int i = 0; i < len - 1; i++) {
-        buf[i] = charset[rand() % (sizeof(charset) - 1)];
+    if (!buf || len <= 0) return;
+    /* SECURITY FIX (#37): Fill a random buffer once and map bytes into the
+     * charset (with modulo bias avoided via rejection sampling) instead of
+     * calling rand() per character. */
+    unsigned char raw[512];
+    if (len - 1 > (int)sizeof(raw)) len = (int)sizeof(raw) + 1;
+    if (random_bytes(raw, (size_t)(len - 1)) != 0) {
+        /* Fallback: rand()-based (still bounded, but not cryptographic) */
+        for (int i = 0; i < len - 1; i++) {
+            buf[i] = charset[rand() % (sizeof(charset) - 1)];
+        }
+        buf[len - 1] = '\0';
+        return;
+    }
+    size_t cmax = (256 / (sizeof(charset) - 1)) * (sizeof(charset) - 1);
+    int out = 0;
+    for (int i = 0; i < len - 1 && out < len - 1; i++) {
+        unsigned char c = raw[i];
+        if (c >= cmax) continue;  /* rejection sampling */
+        buf[out++] = charset[c % (sizeof(charset) - 1)];
+    }
+    while (out < len - 1) {
+        /* Extremely unlikely; fill remainder from fresh bytes */
+        unsigned char c;
+        if (random_bytes(&c, 1) != 0) break;
+        if (c < cmax) buf[out++] = charset[c % (sizeof(charset) - 1)];
     }
     buf[len - 1] = '\0';
 }

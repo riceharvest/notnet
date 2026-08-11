@@ -1123,10 +1123,14 @@ int ws_connect(notnet_bot_t *bot) {
 
 /* Generate a random 4-byte masking key for client-to-server frames */
 static void ws_make_mask(uint8_t *mask) {
-    mask[0] = rand() & 0xFF;
-    mask[1] = rand() & 0xFF;
-    mask[2] = rand() & 0xFF;
-    mask[3] = rand() & 0xFF;
+    /* SECURITY FIX (#37): Use getrandom() — a predictable mask lets an
+     * on-path observer unmask/forge C2 frames. */
+    if (random_bytes(mask, 4) != 0) {
+        mask[0] = rand() & 0xFF;
+        mask[1] = rand() & 0xFF;
+        mask[2] = rand() & 0xFF;
+        mask[3] = rand() & 0xFF;
+    }
 }
 
 /* Apply WebSocket mask to payload data in-place */
