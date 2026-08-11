@@ -11,6 +11,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <sys/random.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -139,6 +140,29 @@ void random_string(char *buf, int len) {
         buf[i] = charset[rand() % (sizeof(charset) - 1)];
     }
     buf[len - 1] = '\0';
+}
+
+int random_bytes(void *buf, size_t len) {
+    if (!buf || len == 0) return -1;
+#ifdef __linux__
+    ssize_t got = getrandom(buf, len, 0);
+    if (got == (ssize_t)len) return 0;
+#endif
+    /* Fallback: /dev/urandom (works everywhere, still cryptographic) */
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return -1;
+    size_t total = 0;
+    unsigned char *p = (unsigned char *)buf;
+    while (total < len) {
+        ssize_t n = read(fd, p + total, len - total);
+        if (n <= 0) {
+            close(fd);
+            return -1;
+        }
+        total += (size_t)n;
+    }
+    close(fd);
+    return 0;
 }
 
 /* ── String Helpers ───────────────────────────────────────────── */

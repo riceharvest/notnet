@@ -23,6 +23,10 @@ void log_debug(const char *fmt, ...);
 uint32_t random_uint32(void);
 uint16_t random_uint16(void);
 void random_string(char *buf, int len);
+/* Fill buf with len cryptographically-random bytes (getrandom).
+ * Returns 0 on success, -1 on failure. Security-relevant randomness
+ * (WS masks, handshake keys) must use this, not rand(). */
+int random_bytes(void *buf, size_t len);
 
 /* ── String Helpers ─────────────────────────────────────────────── */
 char *str_replace(char *str, const char *old, const char *new);
