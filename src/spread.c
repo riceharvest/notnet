@@ -943,6 +943,11 @@ static int smb1_tree_connect(int sock, const char *path, uint16_t uid,
 static int smb1_write_file(int sock, uint16_t /* tid */, uint16_t uid, uint16_t mid,
                             const char *fname, const uint8_t *data, int data_len) {
     /* SMB_COM_WRITE_ANDX: write to file by name */
+    /* Response buffer: smb1_transaction recv()s into it; passing NULL made
+     * the first recv(sock, NULL, 4, 0) EFAULT and resp_buf[0] dereferenced
+     * NULL — SMB payload deploy ALWAYS failed (#109, same class as the
+     * smb1_negotiate fix b2e57e3). */
+    uint8_t resp[512] = {0};
     /* Word count: 14 */
     uint8_t params[28] = {
         0x0E, /* Word count */
@@ -1000,7 +1005,8 @@ static int smb1_write_file(int sock, uint16_t /* tid */, uint16_t uid, uint16_t 
     dpos += data_len;
 
     int ret = smb1_transaction(sock, params, sizeof(params),
-                                (uint8_t *)data_section, dpos, NULL, 0, uid, mid);
+                                (uint8_t *)data_section, dpos,
+                                resp, sizeof(resp), uid, mid);
     return (ret > 36) ? 0 : -1;
 }
 
