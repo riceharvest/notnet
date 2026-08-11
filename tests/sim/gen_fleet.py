@@ -71,6 +71,9 @@ def device_env(d):
         "PATCHED_PARTIAL": "true" if d.get("patched_partial") else "false",
         "EDR_BLOCK": "true" if d.get("edr_block") else "false",
         "LOCKOUT": "true" if d.get("lockout") else "false",
+        "SSH_KEY_ONLY": "true" if d.get("ssh_key_only") else "false",
+        "SMB1_DISABLED": "true" if d.get("smb1_disabled") else "false",
+        "STRONG_CREDS": "true" if d.get("strong_creds") else "false",
         "PAYLOAD_URL": f"http://{PAYLOAD_HOST}:{PAYLOAD_PORT}/bot/notnet",
         "EVIDENCE": f"/evidence/{d['id']}.log",
         "TELNET_CREDS": ",".join(d.get("telnet_creds", [])),
@@ -109,7 +112,7 @@ def build_compose(fleet):
             }
             continue
         services[d["id"]] = {
-            "build": {"context": os.path.join(BASE, "..", ".."), "dockerfile": "tests/sim/Dockerfile.device"},
+            "image": "notnet-sim-device",
             "container_name": d["id"],
             "hostname": d["id"],
             "networks": {"simnet": {"ipv4_address": d["ip"]}},

@@ -1,7 +1,13 @@
 # notnet sim — fleet manifest. Every row = one device container.
 # gen_fleet.py turns this into the compose override + per-device config.
 #
-# Types map to emulator profiles (device.py) or Cowrie honeypots:
+# REAL-WORLD 2026 POSTURE: the fleet mirrors what a real attacker actually
+# finds on the modern internet — most devices are patched and hardened
+# (unique credentials, EDR, lockout, SSH key-only, SMB1 disabled, telnet
+# gone), and botnets survive on a small LEGACY TAIL of unmanaged devices
+# that still ship default credentials or unpatched CVEs.
+#
+# Device types (device.py profiles):
 #   smart-fridge / smart-tv / printer / thermostat / baby-monitor : telnet + web
 #   tbk-dvr         : CVE-2024-3721 (port 80)
 #   huawei-hg532    : CVE-2017-17215 (port 37215)
@@ -13,10 +19,21 @@
 #   redis-auth      : Redis 6379 (AUTH with pool password)
 #   honeypot-*      : Cowrie container (real SSH/Telnet honeypot, never executes)
 #
-# Credentials MUST match the bot's default pool (src/spread.c:112-127) to be
-# crackable: users admin/root/user/test/guest/pi/...; passes admin/password/
-# 123456/root/toor/... Devices with creds NOT in the pool are strong-creds
-# negative controls.
+# Security flags (device.py):
+#   patched          : CVE fingerprint absent -> probe miss -> no exploit
+#   patched_partial  : fingerprint present, verify fails -> no drop
+#   ssh_key_only     : rejects password auth entirely (modern SSHd)
+#   smb1_disabled    : rejects SMB1 negotiate (modern Windows)
+#   edr_block        : refuses to execute dropped payloads
+#   lockout          : 5 failed auths -> 60s lock
+#   strong creds     : credentials NOT in the bot's default pool (spread.c)
+#
+# Credential pool the bot tries (src/spread.c:112-127):
+#   users  admin root user test guest pi ubuntu deploy ftp www oracle
+#          postgres mysql mssql redis telnet default support info operator
+#   passes admin password 123456 root toor pass test guest 12345 1234
+#          123456789 letmein welcome monkey qwerty abc123 login default
+#          111111 666666 123 123456789 changeme 123123 password1
 
 segments:
   iot:     "172.29.10.0/24"
@@ -24,29 +41,37 @@ segments:
   dmz:     "172.29.30.0/24"
 
 devices:
-  # ── IoT segment: cameras, fridges, routers, TVs, thermostats ──
+  # ══════════════════════════════════════════════════════════════════
+  # MODERN / HARDENED tier — the majority. A 2026 attacker does NOT
+  # crack these. Each feature here should FAIL the sim (that is the
+  # real-world result).
+  # ══════════════════════════════════════════════════════════════════
+
+  # Modern smart fridge: patched firmware, telnet removed, no default creds
   - id: fridge-01
     type: smart-fridge
     segment: iot
     ip: 172.29.10.10
-    ports: [23, 80]
-    telnet_creds: ["root:123456"]
-    cve: none
+    ports: [80]
+    patched: true
+    strong_creds: true
 
   - id: fridge-02
     type: smart-fridge
     segment: iot
     ip: 172.29.10.11
-    ports: [23]
-    telnet_creds: ["admin:admin"]
-    cve: none
+    ports: [80]
+    patched: true
+    strong_creds: true
 
+  # Modern camera: patched DVR firmware (CVE fixed), unique creds
   - id: cam-01
     type: tbk-dvr
     segment: iot
     ip: 172.29.10.12
     ports: [80]
     cve: CVE-2024-3721
+    patched: true
 
   - id: cam-02
     type: tbk-dvr
@@ -54,109 +79,97 @@ devices:
     ip: 172.29.10.13
     ports: [80]
     cve: CVE-2024-3721
+    patched_partial: true     # old banner, vuln fixed
 
-  - id: cam-03
-    type: tbk-dvr
-    segment: iot
-    ip: 172.29.10.14
-    ports: [80, 23]
-    cve: CVE-2024-3721
-    telnet_creds: ["admin:123456"]
-    patched_partial: true     # CVE verify fails, but telnet cred is crackable
-
+  # Modern router: TR-064 patched (HG532 dead), strong admin
   - id: router-01
     type: huawei-hg532
     segment: iot
     ip: 172.29.10.15
     ports: [37215]
     cve: CVE-2017-17215
+    patched: true
 
   - id: router-02
     type: huawei-hg532
     segment: iot
     ip: 172.29.10.16
-    ports: [37215, 23]
+    ports: [37215]
     cve: CVE-2017-17215
-    telnet_creds: ["admin:admin"]
+    patched_partial: true
 
+  # Modern Realtek router: Boa banner but patched
   - id: router-03
     type: realtek
     segment: iot
     ip: 172.29.10.17
     ports: [80]
     cve: CVE-2021-35395
+    patched: true
 
   - id: router-04
     type: realtek
     segment: iot
     ip: 172.29.10.18
-    ports: [80, 23]
+    ports: [80]
     cve: CVE-2021-35395
-    telnet_creds: ["root:toor"]
+    patched_partial: true
 
+  # Modern smart TV / thermostat / baby monitor / printer: no telnet, patched
   - id: tv-01
     type: smart-tv
     segment: iot
     ip: 172.29.10.19
-    ports: [23, 80]
-    telnet_creds: ["root:toor"]
-    cve: none
+    ports: [80]
+    patched: true
 
   - id: thermostat-01
     type: thermostat
     segment: iot
     ip: 172.29.10.20
-    ports: [23, 80]
-    telnet_creds: ["admin:admin"]
-    cve: none
+    ports: [80]
+    patched: true
 
   - id: baby-monitor-01
     type: baby-monitor
     segment: iot
     ip: 172.29.10.21
-    ports: [23, 80]
-    telnet_creds: ["root:123456"]
-    cve: none
+    ports: [80]
+    patched: true
 
   - id: printer-01
     type: printer
     segment: iot
     ip: 172.29.10.22
-    ports: [23, 80]
-    telnet_creds: ["admin:admin"]
-    cve: none
+    ports: [80]
+    patched: true
 
-  - id: iot-gateway-01
-    type: linux-pc
-    segment: iot
-    ip: 172.29.10.23
-    ports: [22]
-    ssh_creds: ["root:root"]
-    cve: none
-
-  # ── Office segment: PCs, NAS, servers ──
+  # Modern Linux PCs: SSH key-only (password auth disabled), EDR, lockout
   - id: pc-01
     type: linux-pc
     segment: office
     ip: 172.29.20.10
     ports: [22]
-    ssh_creds: ["admin:admin"]   # FIRST entry in the bot's pool -> fast crack
+    ssh_key_only: true
     edr_block: true
+    lockout: true
 
   - id: pc-02
     type: linux-pc
     segment: office
     ip: 172.29.20.11
     ports: [22]
-    ssh_creds: ["ubuntu:password"]
+    ssh_key_only: true
+    edr_block: true
     lockout: true
 
+  # Modern Windows PCs: SMB1 disabled, RDP with NLA, EDR
   - id: winpc-01
     type: windows-pc
     segment: office
     ip: 172.29.20.12
     ports: [445, 3389]
-    smb_creds: ["admin:admin"]
+    smb1_disabled: true
     edr_block: true
 
   - id: winpc-02
@@ -164,99 +177,143 @@ devices:
     segment: office
     ip: 172.29.20.13
     ports: [445, 3389]
-    smb_creds: ["admin:123456"]
+    smb1_disabled: true
+    edr_block: true
 
+  # Modern NAS: SSH key-only, SMB1 off, strong creds
   - id: nas-01
     type: nas
     segment: office
     ip: 172.29.20.14
     ports: [22, 445]
-    ssh_creds: ["admin:admin"]
-    smb_creds: ["admin:admin"]
+    ssh_key_only: true
+    smb1_disabled: true
 
+  # Modern servers: SSH key-only, patched
   - id: server-01
     type: linux-pc
     segment: office
     ip: 172.29.20.15
     ports: [22]
-    ssh_creds: ["root:toor"]
+    ssh_key_only: true
 
   - id: server-02
     type: linux-pc
     segment: office
     ip: 172.29.20.16
-    ports: [22, 6379]
-    ssh_creds: ["deploy:changeme"]
+    ports: [22]
+    ssh_key_only: true
 
-  # ── DMZ: exposed boxes ──
+  # DMZ: modern web server + Redis with requirepass (protected-mode)
   - id: web-01
     type: linux-pc
     segment: dmz
     ip: 172.29.30.10
     ports: [22]
-    ssh_creds: ["www:admin"]
+    ssh_key_only: true
 
   - id: redis-01
-    type: redis-cache
+    type: redis-auth
     segment: dmz
     ip: 172.29.30.11
     ports: [6379]
-
-  - id: redis-02
-    type: redis-auth
-    segment: dmz
-    ip: 172.29.30.12
-    ports: [6379]
-    redis_pass: "password"
+    redis_pass: "Kx9-mQ2-vR7-zL4-Xw8"    # strong, not in pool
 
   - id: db-01
     type: linux-pc
     segment: dmz
     ip: 172.29.30.13
+    ports: [22]
+    ssh_key_only: true
+
+  # ══════════════════════════════════════════════════════════════════
+  # LEGACY / UNMANAGED tail — the small population real botnets survive
+  # on. Default credentials, unpatched CVEs, telnet still enabled.
+  # These SHOULD be pwned by the sim (the real-world finding).
+  # ══════════════════════════════════════════════════════════════════
+
+  - id: legacy-cam-01
+    type: tbk-dvr
+    segment: iot
+    ip: 172.29.10.30
+    ports: [80, 23]
+    cve: CVE-2024-3721
+    telnet_creds: ["admin:123456"]
+
+  - id: legacy-cam-02
+    type: tbk-dvr
+    segment: iot
+    ip: 172.29.10.31
+    ports: [80]
+    cve: CVE-2024-3721
+
+  - id: legacy-router-01
+    type: huawei-hg532
+    segment: iot
+    ip: 172.29.10.32
+    ports: [37215, 23]
+    cve: CVE-2017-17215
+    telnet_creds: ["root:toor"]
+
+  - id: legacy-router-02
+    type: realtek
+    segment: iot
+    ip: 172.29.10.33
+    ports: [80, 23]
+    cve: CVE-2021-35395
+    telnet_creds: ["admin:admin"]
+
+  - id: legacy-fridge-01
+    type: smart-fridge
+    segment: iot
+    ip: 172.29.10.34
+    ports: [23]
+    telnet_creds: ["root:123456"]
+
+  - id: legacy-pc-01
+    type: linux-pc
+    segment: office
+    ip: 172.29.20.30
+    ports: [22]
+    ssh_creds: ["pi:raspberry"]
+
+  - id: legacy-server-01
+    type: linux-pc
+    segment: office
+    ip: 172.29.20.31
+    ports: [22]
+    ssh_creds: ["root:toor"]
+
+  - id: legacy-nas-01
+    type: nas
+    segment: office
+    ip: 172.29.20.32
+    ports: [22, 445]
+    ssh_creds: ["admin:admin"]
+
+  - id: legacy-redis-01
+    type: redis-cache
+    segment: dmz
+    ip: 172.29.30.20
+    ports: [6379]
+
+  - id: legacy-redis-02
+    type: redis-auth
+    segment: dmz
+    ip: 172.29.30.21
+    ports: [6379]
+    redis_pass: "password"
+
+  - id: legacy-db-01
+    type: linux-pc
+    segment: dmz
+    ip: 172.29.30.22
     ports: [22, 6379]
     ssh_creds: ["postgres:postgres"]
 
-  # ── Negative controls (must NOT get infected) ──
-  - id: patched-cam-01
-    type: tbk-dvr
-    segment: iot
-    ip: 172.29.10.50
-    ports: [80]
-    cve: CVE-2024-3721
-    patched: true
-
-  - id: patched-router-01
-    type: huawei-hg532
-    segment: iot
-    ip: 172.29.10.51
-    ports: [37215]
-    cve: CVE-2017-17215
-    patched: true
-
-  - id: patched-realtek-01
-    type: realtek
-    segment: iot
-    ip: 172.29.10.52
-    ports: [80]
-    cve: CVE-2021-35395
-    patched: true
-
-  - id: strong-creds-01
-    type: linux-pc
-    segment: office
-    ip: 172.29.20.50
-    ports: [22]
-    ssh_creds: ["root:Fg7#kQ2!zX"]
-
-  - id: strong-creds-02
-    type: smart-fridge
-    segment: iot
-    ip: 172.29.10.53
-    ports: [23]
-    telnet_creds: ["admin:Vb8-mQ4-wT9-xZ2"]
-    cve: none
-
-  # ── Honeypots (Cowrie, never executes) ──
+  # ══════════════════════════════════════════════════════════════════
+  # Honeypots (Cowrie, never executes)
+  # ══════════════════════════════════════════════════════════════════
   - id: honeypot-telnet-01
     type: honeypot-telnet
     segment: iot

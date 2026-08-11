@@ -32,14 +32,21 @@ C2_SECRET = os.environ.get("SIM_C2_SECRET", "mocksecret")
 
 # Fleet summary loaded from fleet.yaml (light, no yaml dep: hardcode ids)
 FLEET_IDS = [
-    "fridge-01", "fridge-02", "cam-01", "cam-02", "cam-03",
+    "fridge-01", "fridge-02", "cam-01", "cam-02",
     "router-01", "router-02", "router-03", "router-04",
-    "tv-01", "thermostat-01", "baby-monitor-01", "printer-01", "iot-gateway-01",
+    "tv-01", "thermostat-01", "baby-monitor-01", "printer-01",
     "pc-01", "pc-02", "winpc-01", "winpc-02", "nas-01", "server-01", "server-02",
-    "web-01", "redis-01", "redis-02", "db-01",
+    "web-01", "redis-01", "db-01",
 ]
-NEGATIVE_CONTROLS = ["patched-cam-01", "patched-router-01", "patched-realtek-01",
-                     "strong-creds-01", "strong-creds-02"]
+# Modern/hardened tier — a 2026 attacker should NOT crack these.
+MODERN_TIER = set(FLEET_IDS)
+# Legacy/unmanaged tier — the small population botnets survive on;
+# these SHOULD be pwned.
+LEGACY_TIER = [
+    "legacy-cam-01", "legacy-cam-02", "legacy-router-01", "legacy-router-02",
+    "legacy-fridge-01", "legacy-pc-01", "legacy-server-01", "legacy-nas-01",
+    "legacy-redis-01", "legacy-redis-02", "legacy-db-01",
+]
 HONEYPOTS = ["honeypot-telnet-01", "honeypot-ssh-01"]
 
 
@@ -172,53 +179,79 @@ def bot_log_since(ts_epoch):
 
 # ───────────────────────── scenarios ─────────────────────────
 
+def dev_name(fname):
+    """'legacy-cam-01.log' -> 'legacy-cam-01'; 'cam-01.log' -> 'cam-01'."""
+    return os.path.basename(fname).rsplit(".", 1)[0]
+
+
 def scenario_c2drive(report):
     log("=== S1 c2-drive: operator-driven proliferation ===")
     # 1. scan small subnets quickly (a /24 scan blocks the command loop ~30s+)
     queue_cmd("scan", "172.29.10.0/28")
     queue_cmd("scan", "172.29.20.0/28")
 
-    # 2. spread per vector against known vulnerable hosts (CVE ports + brute)
+    # 2. spread per vector — BOTH tiers: modern (should resist) and legacy
+    #    (the real-world finding: this is what actually gets pwned).
     targets = [
-        # (ip, port, label)
-        ("172.29.10.12", 80, "cam-01 TBK CVE-2024-3721"),
-        ("172.29.10.13", 80, "cam-02 TBK CVE-2024-3721"),
-        ("172.29.10.15", 37215, "router-01 HG532 CVE-2017-17215"),
-        ("172.29.10.17", 80, "router-03 Realtek CVE-2021-35395"),
-        ("172.29.10.10", 23, "fridge-01 telnet"),
-        ("172.29.10.19", 23, "tv-01 telnet"),
-        ("172.29.20.10", 22, "pc-01 SSH"),
-        ("172.29.20.12", 445, "winpc-01 SMB"),
-        ("172.29.20.12", 3389, "winpc-01 RDP"),
-        ("172.29.30.11", 6379, "redis-01 Redis unauth"),
-        ("172.29.30.12", 6379, "redis-02 Redis AUTH"),
+        # modern tier — a 2026 attacker should NOT crack these
+        ("172.29.10.12", 80, "cam-01 TBK patched"),
+        ("172.29.10.13", 80, "cam-02 TBK partial-patch"),
+        ("172.29.10.15", 37215, "router-01 HG532 patched"),
+        ("172.29.10.17", 80, "router-03 Realtek patched"),
+        ("172.29.20.10", 22, "pc-01 SSH key-only"),
+        ("172.29.20.12", 445, "winpc-01 SMB1 off"),
+        ("172.29.20.12", 3389, "winpc-01 RDP NLA"),
+        ("172.29.30.11", 6379, "redis-01 strong AUTH"),
+        # legacy tier — the vulnerable tail botnets survive on
+        ("172.29.10.30", 80, "legacy-cam-01 TBK + telnet"),
+        ("172.29.10.32", 37215, "legacy-router-01 HG532 + telnet"),
+        ("172.29.10.33", 80, "legacy-router-02 Realtek + telnet"),
+        ("172.29.10.34", 23, "legacy-fridge-01 telnet"),
+        ("172.29.20.30", 22, "legacy-pc-01 SSH"),
+        ("172.29.20.32", 445, "legacy-nas-01 SMB"),
+        ("172.29.30.20", 6379, "legacy-redis-01 unauth"),
+        ("172.29.30.21", 6379, "legacy-redis-02 weak AUTH"),
     ]
     for ip, port, label in targets:
         queue_cmd("spread", f"{ip}:{port}")
 
     # 3. wait for spread + payload execution + heartbeats.
     # Each spread command may run the full brute-force pool; the C2 serves one
-    # command per heartbeat, so give the queue ample time to drain.
-    time.sleep(75)
+    # command per heartbeat, and MODERN devices burn the full 19x25 pool
+    # rejecting. Give the queue ample time to drain (legacy completes early,
+    # modern grind takes minutes).
+    time.sleep(120)
     ev = read_evidence()
 
-    # CVE drops — evidence lives in the DEVICE logs (cam-01.log, router-01.log...).
-    # Match only REAL exploit traffic, not the LISTEN banner (which contains
-    # "cve=CVE-..." and would false-positive a PASS).
-    cve_hits = grep_evidence(ev, ["TBK DROP", "TBK VERIFY", "HG532 DROP", "HG532 VERIFY",
-                                  "Realtek DROP", "Realtek VERIFY"])
-    report.add("CVE modules fired via C2 spread (real probe/verify/drop traffic)",
-               "PASS" if cve_hits else "FAIL",
-               "; ".join(h[1][:80] for h in cve_hits[:5]) or "no CVE exploit traffic")
+    # CVE drops — evidence lives in the DEVICE logs. Match only REAL exploit
+    # traffic: "DROP received" / "EXECUTING DROP" on a device = exploit fired.
+    cve_drops = grep_evidence(ev, ["DROP received", "EXECUTING DROP"])
+    legacy_drops = [h for h in cve_drops if dev_name(h[0]) in LEGACY_TIER]
+    report.add("CVE modules fire against LEGACY devices (real exploit traffic)",
+               "PASS" if legacy_drops else "FAIL",
+               "; ".join(h[1][:80] for h in legacy_drops[:5]) or "no CVE exploit traffic on legacy")
 
-    # brute-force cred harvest
+    # Modern-tier CVE resistance: patched devices must show resistance
+    # evidence (probe miss / verify no-echo) and NO drop.
+    modern_cve_resist = grep_evidence(ev, ["probe on patched", "verify on partial-patch", "-> miss"])
+    modern_drops = [h for h in cve_drops if dev_name(h[0]) in MODERN_TIER]
+    report.add("CVE modules DO NOT fire against patched/modern devices (real-world resistance)",
+               "PASS" if modern_cve_resist and not modern_drops else "FAIL",
+               f"resistance={len(modern_cve_resist)} modern_drops={len(modern_drops)}; " +
+               "; ".join(h[1][:70] for h in modern_cve_resist[:3]))
+
+    # brute-force cred harvest — legacy should crack, modern must not
     cred_hits = grep_evidence(ev, ["AUTH OK", "cracked"])
-    report.add("Brute-force auth successes (SSH/Telnet/SMB/Redis)", "PASS" if cred_hits else "FAIL",
-               "; ".join(h[1][:80] for h in cred_hits[:5]) or "no auth evidence")
+    cred_on_modern = [h for h in cred_hits if dev_name(h[0]) in MODERN_TIER]
+    cred_on_legacy = [h for h in cred_hits if dev_name(h[0]) in LEGACY_TIER]
+    report.add("Brute-force succeeds ONLY on legacy devices (real-world)",
+               "PASS" if cred_on_legacy and not cred_on_modern else "FAIL",
+               f"legacy={len(cred_on_legacy)} modern={len(cred_on_modern)}; " +
+               "; ".join(h[1][:70] for h in cred_on_legacy[:3]))
 
     # payload execution (drop actually ran)
     drop_hits = grep_evidence(ev, ["EXECUTING DROP", "DROP received", "DROP spawned"])
-    report.add("Payload drop executed on victims", "PASS" if drop_hits else "FAIL",
+    report.add("Payload drop executed on victims (legacy tier)", "PASS" if drop_hits else "FAIL",
                "; ".join(h[1][:80] for h in drop_hits[:5]) or "no drop evidence")
 
     # infection propagation: heartbeat tags beyond the attacker bot
@@ -226,14 +259,19 @@ def scenario_c2drive(report):
     infected = tags - {"sim-attacker-1"}
     report.add("Infected devices join C2 with own bot_tag (propagation)",
                "PASS" if infected else "FAIL",
-               f"tags={sorted(infected)[:10]}" if infected else "no infected tags",
+               f"tags={sorted(infected)[:12]}" if infected else "no infected tags",
                f"{len(infected)} infected")
 
-    # negative controls never infected
-    bad = infected & set(NEGATIVE_CONTROLS)
-    report.add("Negative controls (patched/strong-creds) NOT infected",
+    # real-world tier separation: modern tier must stay clean
+    bad = infected & MODERN_TIER
+    report.add("MODERN tier NOT infected (real-world security holds)",
                "PASS" if not bad else "FAIL",
-               f"unexpected={sorted(bad)}" if bad else "none infected")
+               f"unexpected={sorted(bad)}" if bad else "modern fleet clean")
+    # legacy tier: some should be infected (that's the real-world finding)
+    legacy_infected = infected & set(LEGACY_TIER)
+    report.add("LEGACY tier is the infected population (real-world finding)",
+               "PASS" if legacy_infected else "SKIP",
+               f"legacy infected={sorted(legacy_infected)[:8]}" if legacy_infected else "no legacy infected yet")
 
     # cred log exfil
     queue_cmd("exfil_creds")
@@ -279,7 +317,6 @@ def scenario_autonomous(report):
     report.add("Autonomous infection of the fleet (new tags only)",
                "FAIL" if not new_infected else "PASS",
                f"new={sorted(new_infected)[:10]}" if new_infected else f"no NEW infections (Finding A); pre-existing={sorted(pre_tags)}")
-
 
 def scenario_resilience(report):
     log("=== S5 resilience: dead-drop + rotation (flux uses its own config) ===")

@@ -47,6 +47,9 @@ PATCHED = os.environ.get("PATCHED", "false").lower() == "true"
 PATCHED_PARTIAL = os.environ.get("PATCHED_PARTIAL", "false").lower() == "true"
 EDR_BLOCK = os.environ.get("EDR_BLOCK", "false").lower() == "true"
 LOCKOUT = os.environ.get("LOCKOUT", "false").lower() == "true"
+SSH_KEY_ONLY = os.environ.get("SSH_KEY_ONLY", "false").lower() == "true"
+SMB1_DISABLED = os.environ.get("SMB1_DISABLED", "false").lower() == "true"
+STRONG_CREDS = os.environ.get("STRONG_CREDS", "false").lower() == "true"
 PAYLOAD_URL = os.environ.get("PAYLOAD_URL", "http://c2:8443/bot/notnet")
 EVIDENCE = os.environ.get("EVIDENCE", f"/evidence/{DEVICE_ID}.log")
 
@@ -174,6 +177,12 @@ def handle_http_cve(conn, addr):
                 http_response(conn, "<html>404 Not Found</html>", code="404 Not Found")
                 log(f"HG532 probe on patched device {addr[0]} -> miss")
                 return
+            if PATCHED_PARTIAL:
+                # Banner/service still answers (SOAP envelope), but the
+                # injection no longer executes — verify must fail.
+                http_response(conn, '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:UpgradeResponse xmlns:u="urn:schemas-upnp-org:service:WANPPPConnection:1"><NewStatusURL>HUAWEIUPNP-PATCHED</NewStatusURL></u:UpgradeResponse></s:Body></s:Envelope>')
+                log(f"HG532 verify on partial-patch {addr[0]} -> no echo (patched)")
+                return
             if method == "POST" and "/ctrlt/DeviceUpgrade_1" in path:
                 soap_action = headers.get("soapaction", "")
                 log(f"HG532 POST {addr[0]} SOAPAction={soap_action[:100]} body={body_txt[:200]}")
@@ -193,6 +202,12 @@ def handle_http_cve(conn, addr):
             if PATCHED:
                 http_response(conn, "<html><title>Apache2 Debian</title></html>", ctype="text/html; charset=utf-8", extra="Server: Apache/2.4.41 (Debian)")
                 log(f"Realtek probe on patched device {addr[0]} -> miss")
+                return
+            if PATCHED_PARTIAL:
+                # Boa banner still served but sysCmd injection is fixed:
+                # verify gets a generic response, not the echoed token.
+                http_response(conn, "<html>ok</html>", extra="Server: Boa/0.94.14rc21")
+                log(f"Realtek verify on partial-patch {addr[0]} -> no echo (patched)")
                 return
             if method == "GET" and path.startswith("/"):
                 http_response(conn, "<html><title>Router</title></html>", extra="Server: Boa/0.94.14rc21")
@@ -330,6 +345,12 @@ def handle_ssh(conn, addr):
                 return
             pass_buf += chunk
         password = pass_buf.strip().decode(errors="replace")
+        if SSH_KEY_ONLY:
+            # Modern sshd: PasswordAuthentication no — key auth only.
+            # The bot only brute-forces passwords, so this must always fail.
+            log(f"SSH {addr[0]} REJECTED (key-only auth, password auth disabled)")
+            conn.sendall(b"Permission denied (publickey)\r\n")
+            return
         if check_lockout():
             log(f"SSH {addr[0]} auth {user} REJECTED (lockout)")
             conn.sendall(b"Permission denied\r\n")
@@ -387,6 +408,12 @@ def handle_smb(conn, addr):
         if not data:
             return
         log(f"SMB {addr[0]} NEGOTIATE ({len(data)} bytes)")
+        if SMB1_DISABLED:
+            # Modern Windows: SMB1 removed/disabled. The bot only speaks
+            # SMB1, so the whole vector must fail here.
+            log(f"SMB {addr[0]} REJECTED (SMB1 disabled)")
+            smb_status_response(conn, 0xC00000BB)  # STATUS_NOT_SUPPORTED
+            return
         smb_status_response(conn, 0)  # STATUS_SUCCESS
         # session setup with creds
         data = conn.recv(4096)
