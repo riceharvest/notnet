@@ -134,13 +134,6 @@ uint32_t random_uint32(void) {
     /* Fallback only if the OS RNG is unavailable */
     return ((rand() & 0x7FFF) << 16) | (rand() & 0xFFFF);
 }
-
-uint16_t random_uint16(void) {
-    uint16_t v;
-    if (random_bytes(&v, sizeof(v)) == 0) return v;
-    return rand() & 0xFFFF;
-}
-
 void random_string(char *buf, int len) {
     const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     if (!buf || len <= 0) return;
@@ -298,62 +291,8 @@ int sha256_hex(const unsigned char *data, size_t len, char out[65]) {
 }
 
 /* ── String Helpers ───────────────────────────────────────────── */
-char *str_replace(char *str, const char *old, const char *new) {
-    if (!str || !old || !new) return NULL;
-
-    int old_len = strlen(old);
-    if (old_len == 0) return strdup(str);
-
-    char *found = strstr(str, old);
-    if (!found) return strdup(str);
-
-    int new_len = strlen(new);
-    int head_len = (int)(found - str);
-    int tail_len = (int)strlen(found + old_len);
-
-    /* SECURITY FIX (#49): Compute the exact result size and allocate it.
-     * The old code strdup'd the input (strlen(str)+1 bytes) then shifted
-     * the tail right by (new_len - old_len) bytes — a heap overflow when
-     * new is longer than old (CWE-122). Build into a correctly-sized
-     * buffer instead of mutating the original allocation. */
-    size_t total = (size_t)head_len + (size_t)new_len + (size_t)tail_len + 1;
-    char *result = (char *)malloc(total);
-    if (!result) return NULL;
-
-    memcpy(result, str, head_len);
-    memcpy(result + head_len, new, new_len);
-    memcpy(result + head_len + new_len, found + old_len, tail_len + 1);
-
-    return result;
-}
-
 /* ── Network Helpers ─────────────────────────────────────────── */
-uint32_t generate_random_ip(void) {
-    return (random_uint32() & 0xFFFFFF00) | (random_uint32() & 0xFF);
-}
-
-char *format_ip(uint32_t ip) {
-    static char buf[16];
-    snprintf(buf, sizeof(buf), "%d.%d.%d.%d",
-             (ip >> 24) & 0xFF,
-             (ip >> 16) & 0xFF,
-             (ip >> 8) & 0xFF,
-             ip & 0xFF);
-    return buf;
-}
-
 /* ── File Helpers ─────────────────────────────────────────────── */
-int file_exists(const char *path) {
-    struct stat st;
-    return stat(path, &st) == 0;
-}
-
-int file_size(const char *path) {
-    struct stat st;
-    if (stat(path, &st) != 0) return -1;
-    return st.st_size;
-}
-
 /* Read entire file into dynamically allocated buffer. Caller must free().
  * Returns bytes read, or -1 on error. */
 int file_read(const char *path, unsigned char **out_buf) {
@@ -412,8 +351,4 @@ uint64_t get_timestamp_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-}
-
-int time_since(time_t t) {
-    return time(NULL) - t;
 }

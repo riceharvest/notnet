@@ -34,6 +34,5 @@ int payload_compile(notnet_bot_t *bot, const char *source, const char *dest);
 int payload_install(notnet_bot_t *bot, const char *bin_path);
 int payload_check_update(notnet_bot_t *bot);
 const char *payload_get_arch(void);
-int payload_detect_arch(char *buf, int len);
 
 #endif /* NOTNET_PAYLOAD_H */

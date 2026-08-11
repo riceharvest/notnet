@@ -39,13 +39,6 @@ const char *payload_get_arch(void) {
 
     return "unknown";
 }
-
-int payload_detect_arch(char *buf, int len) {
-    const char *arch = payload_get_arch();
-    snprintf(buf, len, "%s", arch);
-    return strlen(arch);
-}
-
 /* ── Payload Download ────────────────────────────────────────── */
 
 /* Forward declaration: on-target compilation fallback (defined below). */

