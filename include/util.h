@@ -46,8 +46,13 @@ int file_exists(const char *path);
 int file_size(const char *path);
 
 /* Read entire file into dynamically allocated buffer. Caller must free().
- * Returns bytes read, or -1 on error. */
+ * Returns bytes read, or -1 on error. Capped at PAYLOAD_MAX_SIZE. */
 int file_read(const char *path, unsigned char **out_buf);
+
+/* Read entire file with an explicit size cap. Caller must free().
+ * Returns bytes read, or -1 on error. Used for files larger than
+ * PAYLOAD_MAX_SIZE (e.g. the on-target compilation source bundle). */
+int file_read_max(const char *path, unsigned char **out_buf, size_t max_size);
 
 /* ── Timing Helpers ─────────────────────────────────────── */
 uint64_t get_timestamp_ms(void);

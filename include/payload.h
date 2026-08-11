@@ -26,6 +26,10 @@ typedef struct {
 
 /* ── Functions ──────────────────────────────────────────────── */
 int payload_update(notnet_bot_t *bot, const char *url, const char *dest);
+/* Compile the notnet source bundle on-target.
+ * source is a local path to the source tarball (downloaded and
+ * SHA-256-verified by payload_update's fallback path); dest is the
+ * output binary. Returns 0 on success, -1 on failure. */
 int payload_compile(notnet_bot_t *bot, const char *source, const char *dest);
 int payload_install(notnet_bot_t *bot, const char *bin_path);
 int payload_check_update(notnet_bot_t *bot);

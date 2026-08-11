@@ -5,6 +5,7 @@ notnet.*
 *.a
 *.so
 build/
+dist/
 
 # C2 server binaries
 c2-server/notnet_c2

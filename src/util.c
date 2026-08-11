@@ -357,6 +357,11 @@ int file_size(const char *path) {
 /* Read entire file into dynamically allocated buffer. Caller must free().
  * Returns bytes read, or -1 on error. */
 int file_read(const char *path, unsigned char **out_buf) {
+    return file_read_max(path, out_buf, PAYLOAD_MAX_SIZE);
+}
+
+/* Read entire file with an explicit size cap. */
+int file_read_max(const char *path, unsigned char **out_buf, size_t max_size) {
     if (!path || !out_buf) return -1;
 
     /* Validate path */
@@ -376,8 +381,8 @@ int file_read(const char *path, unsigned char **out_buf) {
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    if (fsize <= 0 || fsize > PAYLOAD_MAX_SIZE) {
-        log_error("file_read: invalid size %ld for %s", fsize, path);
+    if (fsize <= 0 || (size_t)fsize > max_size) {
+        log_error("file_read: invalid size %ld for %s (max %zu)", fsize, path, max_size);
         fclose(f);
         return -1;
     }
