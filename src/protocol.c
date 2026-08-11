@@ -2205,6 +2205,11 @@ int load_config(notnet_bot_t *bot, const char *path) {
         log_info("No config file at %s, using defaults", path);
         return -1;
     }
+
+    /* SECURITY FIX (#82): Explicit enable/disable keys. Track whether each
+     * was seen so the port-based auto-detect below cannot override an
+     * explicit <proto>_enabled=0. */
+    int irc_explicit = 0, http_explicit = 0, ws_explicit = 0;
     
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -2355,6 +2360,22 @@ int load_config(notnet_bot_t *bot, const char *path) {
             bot->redis_enabled = atoi(value);
         } else if (strcmp(key, "rdp_enabled") == 0) {
             bot->rdp_enabled = atoi(value);
+        /* SECURITY FIX (#82): Explicit <proto>_enabled keys. These take
+         * precedence over port-based auto-detect — a non-default port
+         * implies the protocol is wanted, but to disable a protocol while
+         * keeping its default port, set <proto>_enabled=0. */
+        } else if (strcmp(key, "irc_enabled") == 0) {
+            irc_explicit = 1;
+            if (atoi(value) != 0) bot->c2_enabled |= C2_IRC;
+            else bot->c2_enabled &= ~C2_IRC;
+        } else if (strcmp(key, "http_enabled") == 0) {
+            http_explicit = 1;
+            if (atoi(value) != 0) bot->c2_enabled |= C2_HTTP;
+            else bot->c2_enabled &= ~C2_HTTP;
+        } else if (strcmp(key, "ws_enabled") == 0) {
+            ws_explicit = 1;
+            if (atoi(value) != 0) bot->c2_enabled |= C2_WS;
+            else bot->c2_enabled &= ~C2_WS;
         } else if (strcmp(key, "scan_targets") == 0) {
             /* README-documented format: scan_targets=192.168.1.0/24 */
             bot->scan_target_count = 0;
@@ -2383,16 +2404,18 @@ int load_config(notnet_bot_t *bot, const char *path) {
         }
     }
     
-    /* Auto-detect enabled protocols from config */
-    if (bot->c2_irc.port != IRC_DEFAULT_PORT) {
+    /* Auto-detect enabled protocols from config.
+     * SECURITY FIX (#82): Port-based auto-detect only applies when no
+     * explicit <proto>_enabled key was given. An explicit 0 must stick. */
+    if (!irc_explicit && bot->c2_irc.port != IRC_DEFAULT_PORT) {
         bot->c2_enabled |= C2_IRC;
         log_info("C2: IRC enabled (%s:%d)", bot->c2_irc.server, bot->c2_irc.port);
     }
-    if (bot->c2_http.port != HTTP_DEFAULT_PORT) {
+    if (!http_explicit && bot->c2_http.port != HTTP_DEFAULT_PORT) {
         bot->c2_enabled |= C2_HTTP;
         log_info("C2: HTTP enabled (%s:%d)", bot->c2_http.server, bot->c2_http.port);
     }
-    if (bot->c2_ws.port != WS_DEFAULT_PORT) {
+    if (!ws_explicit && bot->c2_ws.port != WS_DEFAULT_PORT) {
         bot->c2_enabled |= C2_WS;
         log_info("C2: WebSocket enabled (%s:%d)", bot->c2_ws.server, bot->c2_ws.port);
     }
