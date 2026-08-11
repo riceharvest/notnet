@@ -22,27 +22,30 @@ def handle_client(conn, addr):
             if not data:
                 break
             
-            text = data.decode(errors='replace').strip()
+            text = data.decode(errors='replace')
             print(f"[Redis] <- {text[:200]}")
             
-            # Respond to commands
-            upper = text.upper().strip()
-            if upper.startswith("PING"):
-                conn.sendall(b"+PONG\r\n")
-            elif upper.startswith("AUTH"):
-                conn.sendall(b"+PONG\r\n")
-            elif upper.startswith("CONFIG"):
-                conn.sendall(b"+OK\r\n")
-            elif upper.startswith("SET"):
-                conn.sendall(b"+OK\r\n")
-            elif upper.startswith("SAVE"):
-                conn.sendall(b"+OK\r\n")
-            elif upper.startswith("DEL"):
-                conn.sendall(b"+OK\r\n")
-            else:
-                conn.sendall(b"+PONG\r\n")
-            
-            print(f"[Redis] -> {text[:10]} response")
+            # The bot pipelines multiple commands in one send (CONFIG SET,
+            # SET, SAVE, PING). Respond to each command line in order so
+            # the final +PONG proves the whole sequence succeeded.
+            lines = [ln.strip() for ln in text.split("\r\n") if ln.strip()]
+            for ln in lines:
+                upper = ln.upper()
+                if upper.startswith("PING"):
+                    conn.sendall(b"+PONG\r\n")
+                elif upper.startswith("AUTH"):
+                    conn.sendall(b"+OK\r\n")
+                elif upper.startswith("CONFIG"):
+                    conn.sendall(b"+OK\r\n")
+                elif upper.startswith("SET"):
+                    conn.sendall(b"+OK\r\n")
+                elif upper.startswith("SAVE"):
+                    conn.sendall(b"+OK\r\n")
+                elif upper.startswith("DEL"):
+                    conn.sendall(b"+OK\r\n")
+                else:
+                    conn.sendall(b"+PONG\r\n")
+                print(f"[Redis] -> {ln[:20]} response")
     except Exception as e:
         print(f"[Redis] Error: {e}")
     finally:

