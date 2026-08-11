@@ -303,8 +303,10 @@ int try_login_ssh_with_timeout(const char *ip, uint16_t port, const char *user, 
     int sock = create_connection(ip, port, timeout_ms);
     if (sock < 0) return -1;
 
-    /* Read banner */
-    char banner[256];
+    /* Read banner. Initialized to {0} so a select() timeout (no banner on
+     * the wire, e.g. non-SSH port) cannot feed uninitialized stack bytes
+     * to strstr() below (CWE-457 #104). */
+    char banner[256] = {0};
     fd_set fds;
     struct timeval tv;
     FD_ZERO(&fds);
@@ -313,8 +315,8 @@ int try_login_ssh_with_timeout(const char *ip, uint16_t port, const char *user, 
     tv.tv_usec = 0;
 
     if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        recv(sock, banner, sizeof(banner) - 1, 0);
-        banner[sizeof(banner) - 1] = '\0';
+        int n = (int)recv(sock, banner, sizeof(banner) - 1, 0);
+        if (n > 0) banner[n] = '\0';
     }
 
     /* Check for SSH-2 banner (more secure than SSH-1) */
@@ -507,7 +509,9 @@ int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *use
     int sock = create_connection(ip, port, timeout_ms);
     if (sock < 0) return -1;
 
-    char banner[256];
+    /* banner is not read by this function, but zero-init it for hygiene
+     * and bound the NUL after recv (CWE-457, same class as #104). */
+    char banner[256] = {0};
     fd_set fds;
     struct timeval tv;
     FD_ZERO(&fds);
@@ -516,7 +520,8 @@ int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *use
     tv.tv_usec = 0;
 
     if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        recv(sock, banner, sizeof(banner) - 1, 0);
+        int n = (int)recv(sock, banner, sizeof(banner) - 1, 0);
+        if (n > 0) banner[n] = '\0';
     }
 
     /* Send username */
