@@ -132,6 +132,14 @@ typedef struct {
      * (HTTP/WS commands are never trusted). */
     char secret[64];
 
+    /* SECURITY FIX (#81): Expected SHA-256 of the payload binary, as a
+     * 64-char lowercase hex string. payload_update() rejects any download
+     * whose hash does not match, closing the MITM RCE hole where a 4-byte
+     * 'NOTN' magic was the only integrity check (CWE-345). Configured via
+     * payload_sha256= in the config file or the NOTNET_PAYLOAD_SHA256
+     * environment variable. Empty = fail-closed (update is refused). */
+    char payload_sha256[65];
+
     /* SECURITY FIX (#14): Rate limiting for C2 commands */
     time_t last_cmd_time;
     int cmd_this_second;

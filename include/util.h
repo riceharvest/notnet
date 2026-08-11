@@ -31,6 +31,12 @@ int random_bytes(void *buf, size_t len);
 /* ── String Helpers ─────────────────────────────────────────────── */
 char *str_replace(char *str, const char *old, const char *new);
 
+/* ── Crypto Helpers ─────────────────────────────────────────────── */
+/* Compute SHA-256 of data and write it as a lowercase hex string to
+ * out (must hold 65 bytes: 64 hex chars + NUL). Returns 0 on success,
+ * -1 on invalid args. Used for payload integrity verification (#81). */
+int sha256_hex(const unsigned char *data, size_t len, char out[65]);
+
 /* ── Network Helpers ─────────────────────────────────────────── */
 uint32_t generate_random_ip(void);
 char *format_ip(uint32_t ip);

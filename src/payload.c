@@ -111,11 +111,44 @@ int payload_update(notnet_bot_t *bot, const char *url, const char *dest) {
         return -1;
     }
 
-    /* NOTE: For production, add SHA-256 hash verification here
-     * against a value signed by the C2 operator. A 4-byte magic
-     * provides zero cryptographic assurance — a MITM can trivially
-     * construct a file starting with 'NOTN'. */
-    log_warn("Payload magic verified but NO cryptographic signature check (TODO)");
+    /* SECURITY FIX (#81): SHA-256 signature verification. The 4-byte
+     * magic provides zero cryptographic assurance — a MITM can prepend
+     * 'NOTN' to any binary (CWE-345). Read the whole payload, hash it,
+     * and require an exact match against the operator-configured pin.
+     * Fail-closed: no pin configured means no update, ever. */
+    unsigned char *payload = NULL;
+    int plen = file_read(tmp_path, &payload);
+    if (plen <= 0 || !payload) {
+        log_error("Payload: cannot read downloaded file for hashing");
+        if (payload) free(payload);
+        unlink(tmp_path);
+        return -1;
+    }
+
+    if (bot->payload_sha256[0] == '\0') {
+        log_error("Payload update rejected: no payload_sha256 pin configured "
+                  "(set payload_sha256= or NOTNET_PAYLOAD_SHA256)");
+        free(payload);
+        unlink(tmp_path);
+        return -1;
+    }
+
+    char actual[65];
+    if (sha256_hex(payload, (size_t)plen, actual) != 0) {
+        log_error("Payload: SHA-256 computation failed");
+        free(payload);
+        unlink(tmp_path);
+        return -1;
+    }
+    free(payload);
+
+    if (strcmp(actual, bot->payload_sha256) != 0) {
+        log_error("Payload SHA-256 mismatch: expected %s, got %s",
+                  bot->payload_sha256, actual);
+        unlink(tmp_path);
+        return -1;
+    }
+    log_info("Payload SHA-256 verified (%s)", actual);
 
     /* SECURITY FIX (#13): Atomic rename after verification */
     if (rename(tmp_path, dest) != 0) {

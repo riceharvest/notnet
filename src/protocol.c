@@ -2280,6 +2280,33 @@ int load_config(notnet_bot_t *bot, const char *path) {
             } else {
                 log_warn("C2: c2_secret rejected — use alphanumeric only");
             }
+        } else if (strcmp(key, "payload_sha256") == 0) {
+            /* SECURITY FIX (#81): Expected payload hash. Validate 64 hex
+             * chars; reject anything else so a typo cannot silently
+             * disable verification. */
+            int valid = 0;
+            if (strlen(value) == 64) {
+                valid = 1;
+                for (const char *p = value; *p; p++) {
+                    if (!((*p >= '0' && *p <= '9') ||
+                          (*p >= 'a' && *p <= 'f') ||
+                          (*p >= 'A' && *p <= 'F'))) {
+                        valid = 0;
+                        break;
+                    }
+                }
+            }
+            if (valid) {
+                /* Normalize to lowercase */
+                for (int i = 0; i < 64; i++) {
+                    if (value[i] >= 'A' && value[i] <= 'F') value[i] += ('a' - 'A');
+                }
+                strncpy(bot->payload_sha256, value, 64);
+                bot->payload_sha256[64] = '\0';
+                log_info("Payload SHA-256 pin configured");
+            } else {
+                log_warn("Config: payload_sha256 rejected — need 64 hex chars");
+            }
         } else if (strcmp(key, "irc_auth_nicks") == 0) {
             /* SECURITY FIX (#5): Comma-separated authorized C2 operator nicks.
              * Only PRIVMSGs from these nicks will be processed as commands. */
