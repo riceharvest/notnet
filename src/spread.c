@@ -690,8 +690,10 @@ static int smb1_transaction(int sock, uint8_t *params, int param_len,
 static int smb1_negotiate(int sock) {
     /* SMB_COM_NEGOTIATE: word count = 0, no params, no data */
     uint8_t params[2] = {0, 0}; /* Word count = 0, padding */
+    uint8_t resp[128];
+    memset(resp, 0, sizeof(resp));
     /* Byte count = 0 */
-    return smb1_transaction(sock, params, 2, NULL, 0, NULL, 0, 0, 1);
+    return smb1_transaction(sock, params, 2, NULL, 0, resp, sizeof(resp), 0, 1);
 }
 
 /* SMB1 session setup with username/password (ASCII) */
