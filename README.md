@@ -13,7 +13,8 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
   legitimate services — the takedown-resilience mechanisms that survived
   adversarial review. A Kademlia-style P2P daisychain was explicitly
   dropped: DHT overlays are crawlable and pollutable, and modern P2P
-  botnets remain niche. ORB-style peer relay is planned (see issue #91).
+  botnets remain niche. **ORB-style relay is implemented** (single-hop;
+  multi-hop chaining planned — see the Relay section below).
 - **On-target compilation**: supported as an update fallback — the bot can
   fetch a verified source bundle and compile locally (see Payload Delivery)
 - **Modern + classic**: systemd persistence, IRC command channels, CVE
@@ -179,6 +180,43 @@ RedLine / Lumma-stealer MaaS model).
   combined log (service, host, username, password) and sells it; the buyer
   monetizes via credential stuffing / account takeover / access resale.
 
+## Relay (ORB-style, Volt Typhoon pattern)
+
+2026 judgment — the modern synthesis: **use the compromised devices
+themselves as relay infrastructure**, the state-actor ORB (Operational
+Relay Box) pattern where Volt Typhoon proxied operations through SOHO
+routers geographically near victims. Instead of C2/spread traffic
+originating from the bot's own IP, an operator routes it through a chain
+of bots (TCP CONNECT-style forwarding between peers). This complements
+fast-flux (C2 resilience) and the residential proxy (monetization) and is
+**explicitly NOT a DHT** — no peer discovery, no overlay, nothing to
+crawl or pollute.
+
+- **Single-hop relay (implemented).** Each bot can run a
+  token-authenticated relay listener (`relay_enabled=1` + `relay_token`,
+  fail-closed). A client sends one line
+  `RELAY <token> <target_host> <target_port>`; the relay bot connects to
+  the target and splices raw bytes bidirectionally
+  (`client → bot:relay_port → target host:port`). The accept loop runs in
+  its own pthread (never blocks the C2 loop), each connection gets a
+  detached worker (capped at 32), tunnel buffers are 4KB, and
+  handshake/tunnel I/O is select-bounded — the same structure as the
+  SOCKS5 proxy. Token comparison is constant-time; the token is never
+  logged. IPv4/domain targets; IPv6 rejected.
+- **Per-target relay selection.** `relay <target> <port> [via
+  <host>:<port>]` probes reachability and RTT to a target — directly
+  (baseline) or through a relay bot (single hop). The operator probes
+  candidate relays and prefers the one closest to the target (the ORB
+  pattern). Heartbeats report `relay_on` + `relay_port` so the C2 can
+  build a relay inventory.
+- **Operator control:** `relay on [port]` / `relay off` at runtime, or
+  set `relay_enabled=1` to start at boot. `config_set relay_enabled=1`
+  also starts it live.
+- **Multi-hop chaining (planned, not implemented).** A chain composes
+  these hops — each hop's "target" is the next relay bot's listener — but
+  the multi-hop wiring and relay-selection policy are future work. This
+  version is a working single-hop building block only.
+
 ## Commands
 
 Commands are issued via the C2 channels (IRC PRIVMSG or HTTP/WS JSON with the
@@ -198,7 +236,8 @@ shared secret). The command queue is rate-limited to 10 commands/second.
 | sleep   | `sleep <seconds>` | Implemented — set scan interval (clamped 1–3600) |
 | config_set | `config_set <key>=<value>` | Implemented — allowlisted runtime config keys |
 | proxy   | `proxy on [port]` / `proxy off` | Implemented — start/stop the residential SOCKS5 forward proxy (requires `proxy_token`) |
-| status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count, credential-log count, proxy status |
+| relay   | `relay on [port]` / `relay off` / `relay <target> <port> [via <host>:<port>]` | Implemented — start/stop the token-authenticated ORB-style relay listener (requires `relay_token`), or probe a target's reachability/RTT directly vs. through a relay bot (per-target relay selection, single hop) |
+| status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count, credential-log count, proxy status, relay status |
 
 ## Configuration
 
@@ -228,6 +267,9 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `proxy_enabled` | `0` | 0/1 — run the residential SOCKS5 forward proxy (monetizes the bot's network position). Requires `proxy_token` or the proxy refuses to bind (fail-closed) |
 || `proxy_port` | `1080` | Port the SOCKS5 proxy listens on (1–65535) |
 || `proxy_token` | *(none)* | Password clients must present (RFC 1929) to use the proxy. No default — the proxy will not start without it (or `NOTNET_PROXY_TOKEN` env var) |
+|| `relay_enabled` | `0` | 0/1 — run the ORB-style relay listener (Volt Typhoon pattern: proxy operations through compromised edge devices near the target). Requires `relay_token` or the relay refuses to bind (fail-closed) |
+|| `relay_port` | `1081` | Port the relay listener binds (1–65535) |
+|| `relay_token` | *(none)* | Shared fleet token relay clients must present (`RELAY <token> <target> <port>`). No default — the relay will not start without it (or `NOTNET_RELAY_TOKEN` env var). Single-hop only; multi-hop chains are planned, and this is not a DHT |
 || `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
 || `tls_cert_pin_sha256` | *(none)* | TLS server cert fingerprint pin; requires `make TLS=1` (or `NOTNET_TLS_CERT_PIN_SHA256` env var) |
 || `payload_sha256` | *(none)* | Expected SHA-256 of downloaded payload; update is refused without a match (or `NOTNET_PAYLOAD_SHA256` env var) |

