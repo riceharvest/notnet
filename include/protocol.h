@@ -226,6 +226,7 @@ int tls_handshake(notnet_tls_t *tls, const char *server_name);
 int tls_send(notnet_tls_t *tls, const char *buf, int len);
 int tls_recv(notnet_tls_t *tls, char *buf, int len);
 void tls_close(notnet_tls_t *tls);
+void tls_cleanup(void);
 
 /* ── Config ─────────────────────────────────────────────────── */
 int load_config(notnet_bot_t *bot, const char *path);
