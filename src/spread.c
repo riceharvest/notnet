@@ -2684,6 +2684,7 @@ int spawn_scan_threads(notnet_bot_t *bot, const char *subnet, uint8_t service_ma
     int per_thread = (hosts + threads - 1) / threads;
     pthread_t tid[SCAN_THREAD_COUNT];
     scan_thread_arg_t args[SCAN_THREAD_COUNT];
+    int spawned = 0;
 
     for (int t = 0; t < threads; t++) {
         args[t].bot = bot;
@@ -2700,10 +2701,14 @@ int spawn_scan_threads(notnet_bot_t *bot, const char *subnet, uint8_t service_ma
             log_error("spawn_scan_threads: pthread_create failed");
             break;
         }
+        spawned++;
     }
 
-    /* Wait for all threads */
-    for (int t = 0; t < threads; t++) {
+    /* Wait for the threads that were actually created — on a partial
+     * spawn failure (EAGAIN under scan pressure), joining tid[spawned..]
+     * would pass uninitialized pthread_t values to pthread_join (UB,
+     * CWE-457 #105). */
+    for (int t = 0; t < spawned; t++) {
         pthread_join(tid[t], NULL);
     }
 
