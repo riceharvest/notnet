@@ -2410,6 +2410,13 @@ int scan_port(notnet_bot_t *bot, const char *ip, uint16_t port) {
 /* Lightweight port scan that only checks if ports are open (no spreading).
  * Returns a string of "ip:port" for each open port found.
  * Caller must free(). Returns NULL on error. */
+#define SCAN_RESULT_MAX        4096
+/* Reserve headroom for the "N open ports: " header that is prepended
+ * after the entries are appended (CWE-122 #103). The header is built
+ * into a 64-byte buffer, so worst case is 63 chars; refusing the append
+ * once this reserve is used guarantees the prepend always fits. */
+#define SCAN_RESULT_HEADER_RESERVE 64
+
 char *scan_ports(const char *target, uint16_t *ports, int port_count) {
     /* Parse target: "192.168.1.0/24" or "192.168.1.1:22,23,445" */
     char ip[16] = {0};
@@ -2441,7 +2448,7 @@ char *scan_ports(const char *target, uint16_t *ports, int port_count) {
     }
 
     /* Build result string */
-    char *result = (char *)malloc(4096);
+    char *result = (char *)malloc(SCAN_RESULT_MAX);
     if (!result) return NULL;
     result[0] = '\0';
     int total_open = 0;
@@ -2482,7 +2489,7 @@ char *scan_ports(const char *target, uint16_t *ports, int port_count) {
                 if (sock >= 0) {
                     char entry[64];
                     int elen = snprintf(entry, sizeof(entry), "%s:%d ", ip_str, ports[p]);
-                    if (strlen(result) + elen < 4090) {
+                    if (strlen(result) + (size_t)elen < SCAN_RESULT_MAX - SCAN_RESULT_HEADER_RESERVE) {
                         strcat(result, entry);
                         total_open++;
                     }
@@ -2497,7 +2504,7 @@ char *scan_ports(const char *target, uint16_t *ports, int port_count) {
             if (sock >= 0) {
                 char entry[64];
                 int elen = snprintf(entry, sizeof(entry), "%s:%d ", ip, ports[p]);
-                if (strlen(result) + elen < 4090) {
+                if (strlen(result) + (size_t)elen < SCAN_RESULT_MAX - SCAN_RESULT_HEADER_RESERVE) {
                     strcat(result, entry);
                     total_open++;
                 }
@@ -2507,14 +2514,19 @@ char *scan_ports(const char *target, uint16_t *ports, int port_count) {
     }
 
     if (total_open == 0) {
-        snprintf(result, 4096, "no open ports found");
+        snprintf(result, SCAN_RESULT_MAX, "no open ports found");
     } else {
         char header[64];
         snprintf(header, sizeof(header), "%d open ports: ", total_open);
-        /* Prepend header */
-        int rlen = strlen(result);
-        memmove(result + strlen(header), result, rlen + 1);
-        memcpy(result, header, strlen(header));
+        /* Prepend header — the append guard reserved SCAN_RESULT_HEADER_RESERVE
+         * bytes, so header + entries + NUL always fit in SCAN_RESULT_MAX.
+         * Keep the guard here anyway (defense in depth). */
+        int rlen = (int)strlen(result);
+        size_t hlen = strlen(header);
+        if (hlen + (size_t)rlen + 1 <= SCAN_RESULT_MAX) {
+            memmove(result + hlen, result, (size_t)rlen + 1);
+            memcpy(result, header, hlen);
+        }
     }
 
     return result;
