@@ -181,6 +181,19 @@
 #define PLUGIN_NAME_MAX         32
 #define PLUGIN_DEFAULT_ENABLED  1
 
+/* ── BYOVD Defense-Neutralization Scaffold (#94) ────────── */
+/* Bring-your-own-vulnerable-driver (BYOVD): drop a legitimately-signed
+ * but vulnerable Windows driver and abuse it to neutralize security
+ * tooling — the commodity successor to kernel rootkits, which platform
+ * hardening (signature enforcement, Secure Boot, HVCI, PatchGuard) made
+ * a losing bet. ESET catalogued ~90 EDR killers, 54 abusing a shared
+ * pool of 35 legitimately signed drivers. notnet deliberately ships NO
+ * driver-loading code — this is a DEFENSIVE-ONLY research scaffold that
+ * documents the pattern and refuses every operation. byovd_guard
+ * (default 0) is the defensive toggle: when set, the byovd plugin's
+ * load callback reports that BYOVD-style driver abuse is blocked. */
+#define BYOVD_GUARD_DEFAULT 0
+
 /* ── Disposable Infrastructure + Affiliate Ops (#93) ─────── */
 /* Organizational resilience, not technical: the durable answer to
  * takedown is disposable C2 (rotate endpoints, rebuild fast) and

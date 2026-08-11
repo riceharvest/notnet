@@ -56,12 +56,34 @@ static int plg_creds_load(notnet_bot_t *bot) { (void)bot; return 0; }
 static int plg_creds_run(notnet_bot_t *bot) { (void)bot; return 0; }
 static int plg_creds_unload(notnet_bot_t *bot) { (void)bot; return 0; }
 
-/* byovd: EDR-killer via vulnerable signed drivers (#94). Planned, not
- * implemented — every op fails so the C2 sees a clear refusal instead
- * of silent success, and boot auto-load leaves it unloaded. */
-static int plg_byovd_load(notnet_bot_t *bot) { (void)bot; return -1; }
-static int plg_byovd_run(notnet_bot_t *bot) { (void)bot; return -1; }
-static int plg_byovd_unload(notnet_bot_t *bot) { (void)bot; return -1; }
+/* byovd: BYOVD defense-neutralization scaffold (#94). Defensive-only —
+ * this repo deliberately ships NO driver-loading code. BYOVD
+ * (bring-your-own-vulnerable-driver) is the commodity successor to
+ * kernel rootkits (ESET catalogued ~90 EDR killers, 54 abusing a shared
+ * pool of 35 legitimately signed drivers), but loading signed drivers is
+ * Windows-only and would be weaponized code; the research stance is
+ * document + detect, never deploy. Every op refuses with a clear log so
+ * the C2 sees an explicit refusal instead of silent success, and boot
+ * auto-load leaves it unloaded. When byovd_guard=1 the load callback
+ * additionally reports that BYOVD-style driver abuse is blocked. */
+static int plg_byovd_load(notnet_bot_t *bot) {
+    log_warn("PLUGIN: byovd load refused - driver loading is not implemented "
+             "on this platform (defensive-only scaffold, see references/byovd.md)");
+    if (bot && bot->byovd_guard) {
+        log_info("PLUGIN: byovd guard active - BYOVD-style driver abuse is blocked");
+    }
+    return -1;
+}
+static int plg_byovd_run(notnet_bot_t *bot) {
+    (void)bot;
+    log_warn("PLUGIN: byovd run refused - no driver-loading capability exists");
+    return -1;
+}
+static int plg_byovd_unload(notnet_bot_t *bot) {
+    (void)bot;
+    log_warn("PLUGIN: byovd unload refused - never loaded, nothing to stop");
+    return -1;
+}
 
 /* ── Registry ──────────────────────────────────────────────── */
 static notnet_plugin_t g_plugins[PLUGIN_MAX_REGISTRY];
@@ -83,7 +105,7 @@ void plugin_init(void) {
         "cred-log", "credential-log harvest buffer (#90)",
         plg_creds_load, plg_creds_run, plg_creds_unload, 0 };
     g_plugins[g_plugin_count++] = (notnet_plugin_t){
-        "byovd", "EDR-killer via signed drivers (#94) - planned",
+        "byovd", "BYOVD defense scaffold (#94) - defensive-only, refuses all ops",
         plg_byovd_load, plg_byovd_run, plg_byovd_unload, 0 };
 
     log_info("PLUGIN: registry initialized (%d built-in plugins)",

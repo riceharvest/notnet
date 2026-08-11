@@ -179,6 +179,17 @@ typedef struct {
      * config_set key. */
     uint8_t plugin_enabled;
 
+    /* SECURITY FIX (#94): BYOVD defense-neutralization guard. BYOVD
+     * (bring-your-own-vulnerable-driver) is the commodity successor to
+     * kernel rootkits — ESET catalogued ~90 EDR killers, 54 abusing a
+     * shared pool of 35 legitimately signed drivers. notnet ships NO
+     * driver-loading code: the byovd plugin is a DEFENSIVE-ONLY research
+     * scaffold whose every operation is refused. When byovd_guard=1 the
+     * plugin's load callback reports that BYOVD-style driver abuse is
+     * blocked (fail-closed defensive stance). Configured via byovd_guard=
+     * in the config file or the `byovd_guard` config_set key. */
+    uint8_t byovd_guard;
+
     /* SECURITY FIX (#93): Disposable-infrastructure C2 rotation. A
      * bounded backup chain (c2_backup_1..4, each "host:port")
      * layered ABOVE the flux resolver (#85) — flux rotates IPs

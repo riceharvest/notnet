@@ -2749,6 +2749,18 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     bot->plugin_enabled = (uint8_t)v;
                     applied = 1;
                 }
+            } else if (strcmp(key, "byovd_guard") == 0) {
+                /* SECURITY FIX (#94): strict 0/1 toggle for the BYOVD
+                 * defense-neutralization guard. The byovd plugin is a
+                 * defensive-only research scaffold — no driver-loading
+                 * code exists; the flag only changes what its load
+                 * refusal reports (driver abuse blocked). Takes effect
+                 * on the next command. */
+                int v = atoi(value);
+                if (v == 0 || v == 1) {
+                    bot->byovd_guard = (uint8_t)v;
+                    applied = 1;
+                }
             } else if (strncmp(key, "c2_backup_", 10) == 0) {
                 /* SECURITY FIX (#93): disposable-infrastructure
                  * backup endpoint, same validation as the config file
@@ -3887,6 +3899,13 @@ int load_config(notnet_bot_t *bot, const char *path) {
              * built-in plugin registry is bootstrapped at boot and the
              * `plugin` C2 command dispatches plugins by name. */
             bot->plugin_enabled = (atoi(value) != 0);
+        } else if (strcmp(key, "byovd_guard") == 0) {
+            /* SECURITY FIX (#94): BYOVD defense-neutralization guard.
+             * The byovd plugin is a defensive-only research scaffold
+             * (no driver-loading code ships); when set, its load
+             * callback reports that BYOVD-style driver abuse is
+             * blocked. */
+            bot->byovd_guard = (atoi(value) != 0);
         } else if (strncmp(key, "c2_backup_", 10) == 0) {
             /* SECURITY FIX (#93): disposable-infrastructure backup
              * endpoints, c2_backup_<n> = host:port with n in 1..4.

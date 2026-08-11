@@ -115,6 +115,12 @@ static int init_bot(void) {
      * the framework. */
     g_bot.plugin_enabled = PLUGIN_DEFAULT_ENABLED;
 
+    /* SECURITY FIX (#94): BYOVD defense-neutralization guard. Off by
+     * default. The byovd plugin is a defensive-only research scaffold —
+     * this repo ships no driver-loading code. When byovd_guard=1 its
+     * load callback reports that BYOVD-style driver abuse is blocked. */
+    g_bot.byovd_guard = BYOVD_GUARD_DEFAULT;
+
     /* SECURITY FIX (#93): Disposable-infrastructure C2 rotation. Off
      * by default — no backups configured, the chain is the primary
      * endpoint only. Configure c2_backup_1..4 = host:port (contiguous

