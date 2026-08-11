@@ -1,6 +1,6 @@
 # Build artifacts
 notnet
-notnet.*
+notnet.o
 *.o
 *.a
 *.so

