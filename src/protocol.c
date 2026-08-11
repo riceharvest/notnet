@@ -2583,42 +2583,6 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     return 0;
 }
 
-int protocol_resolve_peers(notnet_bot_t *bot) {
-    /* SECURITY FIX (#57): Check DNS cache TTL before fresh lookup.
-     * DNS_PEER_TTL (default 300s) prevents unnecessary DNS queries
-     * on every scan cycle while still refreshing stale entries. */
-    if (bot->peer_count > 0 && time(NULL) - bot->peer_cache_time < DNS_PEER_TTL) {
-        log_debug("DNS: using cached peer data (%d peers, %ld s ago)",
-                  bot->peer_count, (long)(time(NULL) - bot->peer_cache_time));
-        return 0;
-    }
-    struct addrinfo hints, *res, *rp;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;  /* IPv4 only */
-    hints.ai_socktype = SOCK_STREAM;
-    
-    int err = getaddrinfo(DNS_PEER_RESOLUTION, NULL, &hints, &res);
-    if (err != 0) return -1;
-    
-    bot->peer_count = 0;
-    for (rp = res; rp && bot->peer_count < PEER_CACHE_SIZE; rp = rp->ai_next) {
-        if (rp->ai_family == AF_INET) {
-            struct sockaddr_in *sin = (struct sockaddr_in *)rp->ai_addr;
-            char ip_str[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, &sin->sin_addr, ip_str, sizeof(ip_str))) {
-                strncpy(bot->peer_cache[bot->peer_count], ip_str, 255);
-                bot->peer_cache[bot->peer_count][255] = '\0';
-                bot->peer_count++;
-            }
-        }
-    }
-    
-    bot->peer_cache_time = time(NULL);
-    freeaddrinfo(res);
-    log_info("DNS: resolved %d peers for %s", bot->peer_count, DNS_PEER_RESOLUTION);
-    return 0;
-}
-
 int protocol_resolve_host(const char *host) {
     /* SECURITY FIX (#3): Use getaddrinfo instead of gethostbyname.
      * Returns a resolved IPv4 address in network byte order, or -1 on failure. */

