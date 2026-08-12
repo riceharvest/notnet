@@ -3042,13 +3042,56 @@ int protocol_process_commands(notnet_bot_t *bot) {
 
             if (args[0] == '\0') {
                 protocol_send_response(bot, CMD_PLUGIN,
-                    "plugin: usage 'plugin status' or 'plugin <name> load|run|unload|status'");
+                    "plugin: usage 'plugin status' | 'plugin fetch <name> <url> <sha256>' | 'plugin drop <name>' | 'plugin <name> load|run|unload|status'");
                 continue;
             }
             if (strcmp(args, "status") == 0) {
                 char pbuf[1024];
                 plugin_status(pbuf, sizeof(pbuf));
                 protocol_send_response(bot, CMD_PLUGIN, pbuf);
+                continue;
+            }
+            /* Remote shared-object fetch (#92 future work, 2026-08-12):
+             * `plugin fetch <name> <url> <sha256>` — downloads, verifies
+             * the SHA-256 pin (fail-closed), dlopen()s, and registers the
+             * plugin for the normal load/run/unload dispatch. */
+            if (strncmp(args, "fetch ", 6) == 0) {
+                char pname[PLUGIN_NAME_MAX];
+                char purl[512];
+                char psha[65];
+                char *a = args + 6;
+                if (sscanf(a, "%31s %511s %64s", pname, purl, psha) == 3) {
+                    char rbuf[160];
+                    if (plugin_fetch_remote(bot, pname, purl, psha) == 0) {
+                        snprintf(rbuf, sizeof(rbuf),
+                                 "plugin %s: fetched + registered (SHA-256 verified)", pname);
+                    } else {
+                        snprintf(rbuf, sizeof(rbuf),
+                                 "plugin %s: fetch failed (see bot log)", pname);
+                    }
+                    protocol_send_response(bot, CMD_PLUGIN, rbuf);
+                } else {
+                    protocol_send_response(bot, CMD_PLUGIN,
+                        "plugin: fetch usage: plugin fetch <name> <url> <sha256>");
+                }
+                continue;
+            }
+            /* Remote drop: unload + dlclose + remove the fetched .so. */
+            if (strncmp(args, "drop ", 5) == 0) {
+                char pname[PLUGIN_NAME_MAX];
+                if (sscanf(args + 5, "%31s", pname) == 1) {
+                    char rbuf[128];
+                    if (plugin_drop_remote(bot, pname) == 0) {
+                        snprintf(rbuf, sizeof(rbuf), "plugin %s: dropped", pname);
+                    } else {
+                        snprintf(rbuf, sizeof(rbuf),
+                                 "plugin %s: drop failed (unknown or built-in)", pname);
+                    }
+                    protocol_send_response(bot, CMD_PLUGIN, rbuf);
+                } else {
+                    protocol_send_response(bot, CMD_PLUGIN,
+                        "plugin: drop usage: plugin drop <name>");
+                }
                 continue;
             }
 

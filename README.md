@@ -173,9 +173,15 @@ dispatched by name from the C2. v1 ships a fixed built-in registry:
 Control: `plugin status`, `plugin <name> load|run|unload|status`.
 `plugin_enabled=0` disables the framework.
 
-Remote plugin fetch (shared-object dlopen) is planned, not implemented.
-When implemented it must use the same SHA-256 pinning as the payload
-path.
+Remote shared-object plugins: `plugin fetch <name> <url> <sha256>`
+downloads a plugin `.so`, verifies its SHA-256 against the operator pin
+(fail-closed, same trust model as `payload_sha256`), `dlopen()`s it, and
+registers it for the normal load/run/unload dispatch. The `.so` must
+export `int plugin_entry(const char *op, char *out, size_t out_sz)`
+(`op` is `"load"`/`"run"`/`"unload"`; return 0 on success). Fetched
+plugins are removed with `plugin drop <name>` (unload + dlclose + file
+removed). Fetches require the plugin name to be a single safe token and
+the URL to be `http://` (https is rejected by the download path).
 
 ### BYOVD (defense scaffold)
 

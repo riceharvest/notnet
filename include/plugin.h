@@ -28,11 +28,27 @@
 typedef struct notnet_plugin {
     const char *name;                /* dispatch name, e.g. "proxy" */
     const char *description;         /* metadata, shown by `plugin status` */
-    int (*load)(notnet_bot_t *bot);  /* prepare; 0 on success, -1 on failure */
-    int (*run)(notnet_bot_t *bot);   /* execute capability; 0/-1 */
-    int (*unload)(notnet_bot_t *bot);/* teardown; 0/-1 */
+    int (*load)(notnet_bot_t *bot, void *ctx);   /* prepare; 0 on success, -1 on failure */
+    int (*run)(notnet_bot_t *bot, void *ctx);    /* execute capability; 0/-1 */
+    int (*unload)(notnet_bot_t *bot, void *ctx); /* teardown; 0/-1 */
     int loaded;                      /* 1 = loaded, 0 = unloaded */
+    void *ctx;                       /* callback context: NULL for built-ins,
+                                        the .so plugin_entry fn for remote */
+    void *handle;                    /* dlopen handle: NULL for built-ins */
 } notnet_plugin_t;
+
+/* Remote shared-object plugins (dlopen, #92 future work, 2026-08-12):
+ * `plugin fetch <name> <url> <sha256>` downloads a plugin .so, verifies
+ * its SHA-256 against the operator pin (fail-closed, like payload_sha256),
+ * dlopen()s it, and registers it under <name> for the existing
+ * load/run/unload dispatch. The .so must export
+ *   int plugin_entry(const char *op, char *out, size_t out_sz);
+ * where op is "load"/"run"/"unload" (0 on success). Fetching an existing
+ * name or filling the registry refuses. `plugin drop <name>` unloads,
+ * dlclose()s, unlinks the file, and frees the remote entry. */
+int plugin_fetch_remote(notnet_bot_t *bot, const char *name,
+                        const char *url, const char *sha256_hex);
+int plugin_drop_remote(notnet_bot_t *bot, const char *name);
 
 /* Register the compile-time built-in plugins into the fixed registry.
  * Idempotent; call once at boot. */
