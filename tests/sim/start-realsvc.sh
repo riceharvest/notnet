@@ -13,6 +13,10 @@ SERVICES="${DEVICE_SERVICES:-ssh}"
 TIER="${DEVICE_TIER:-legacy}"
 CREDS="${DEVICE_CREDS:-root:root}"
 HOST="${DEVICE_HOSTNAME:-$(hostname)}"
+EVIDENCE="${EVIDENCE:-/var/log/device.log}"
+
+# evidence sink for the sim driver (mount ./evidence -> /evidence)
+: > "$EVIDENCE" 2>/dev/null || true
 
 # ── payload config: the REAL notnet binary reads this when executed ──
 mkdir -p /etc
@@ -34,7 +38,10 @@ PASSWORD="${CREDS#*:}"
 if ! id "$USERNAME" >/dev/null 2>&1; then
     useradd -m -s /bin/bash "$USERNAME" 2>/dev/null || useradd -m -s /bin/sh "$USERNAME"
 fi
-echo "$USERNAME:$PASSWORD" | chpasswd
+echo "$USERNAME:$PASSWORD" | chpasswd -c SHA512 2>/dev/null \
+    || echo "$USERNAME:$PASSWORD" | chpasswd
+# SHA-512 ($6$) works with busybox (musl) login — Debian's default
+# yescrypt ($y$) hash cannot be verified by busybox's crypt() (#133).
 
 case "$SERVICES" in *ssh*)
     # real OpenSSH
@@ -45,15 +52,15 @@ case "$SERVICES" in *ssh*)
     else
         sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/; s/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
     fi
-    /usr/sbin/sshd
+    /usr/sbin/sshd -E "$EVIDENCE"
 ;;
 esac
 
 case "$SERVICES" in *redis*)
     if [ "${REDIS_AUTH:-0}" = "1" ]; then
-        redis-server --requirepass "${REDIS_PASSWORD:-changeme}" --protected-mode yes --daemonize yes
+        redis-server --requirepass "${REDIS_PASSWORD:-changeme}" --protected-mode yes --daemonize yes --logfile "$EVIDENCE"
     else
-        redis-server --protected-mode no --daemonize yes
+        redis-server --protected-mode no --daemonize yes --logfile "$EVIDENCE"
     fi
 ;;
 esac
@@ -95,4 +102,7 @@ esac
 
 # give the daemons a moment, then stay alive
 sleep 2
+# tail secondary daemon logs into the evidence sink
+( tail -n 0 -F /var/log/samba/log.* /var/log/nginx/access.log /var/log/nginx/error.log \
+      /var/log/telnetd.log 2>/dev/null >> "$EVIDENCE" ) &
 tail -f /dev/null

@@ -377,6 +377,7 @@ devices:
     ip: 172.29.30.11
     ports: [6379]
     redis_pass: "Kx9-mQ2-vR7-zL4-Xw8"    # strong, not in pool
+    real: [redis]
 
   - id: db-01
     type: linux-pc
@@ -444,6 +445,7 @@ devices:
     ports: [22]
     ssh_creds: ["root:toor"]
     persist: true          # S7 persistence test: payload relaunches after reboot
+    real: [ssh]
 
   - id: legacy-nas-01
     type: nas
@@ -451,12 +453,14 @@ devices:
     ip: 172.29.20.32
     ports: [22, 445]
     ssh_creds: ["admin:admin"]
+    real: [ssh, samba]
 
   - id: legacy-redis-01
     type: redis-cache
     segment: dmz
     ip: 172.29.30.20
     ports: [6379]
+    real: [redis]
 
   - id: legacy-redis-02
     type: redis-auth
@@ -464,6 +468,7 @@ devices:
     ip: 172.29.30.21
     ports: [6379]
     redis_pass: "password"
+    real: [redis]
 
   - id: legacy-db-01
     type: linux-pc
@@ -471,6 +476,7 @@ devices:
     ip: 172.29.30.23
     ports: [22]
     ssh_creds: ["postgres:password"]   # in the bot's pool -> crackable
+    real: [ssh]
 
   # ══════════════════════════════════════════════════════════════════
   # Honeypots (Cowrie, never executes)

@@ -113,6 +113,36 @@ def build_compose(fleet):
                 },
             }
             continue
+        if d.get("real"):
+            # Tier 1 (#123): REAL services (OpenSSH/Redis/Samba/telnetd/nginx)
+            # — the realsvc image runs genuine daemons and pre-places
+            # /etc/notnet.conf so a cracked device runs the REAL payload.
+            creds = (d.get("ssh_creds") or d.get("telnet_creds") or
+                     d.get("smb_creds") or ["admin:admin"])[0]
+            services[d["id"]] = {
+                "image": "notnet-sim-realsvc",
+                "container_name": d["id"],
+                "hostname": d["id"],
+                "networks": {"simnet": {"ipv4_address": d["ip"]}},
+                "environment": {
+                    "DEVICE_SERVICES": ",".join(d["real"]),
+                    "DEVICE_TIER": "modern" if (d.get("ssh_key_only") or
+                                               d.get("strong_creds") or
+                                               d.get("patched")) else "legacy",
+                    "DEVICE_CREDS": creds,
+                    "DEVICE_HOSTNAME": d["id"],
+                    "SMB1_ENABLED": "1" if not d.get("smb1_disabled") else "0",
+                    "REDIS_AUTH": "1" if d.get("redis_pass") else "0",
+                    "REDIS_PASSWORD": d.get("redis_pass", ""),
+                    "BOT_TAG": d["id"],
+                    "C2_SERVER": HTTP_SERVER,
+                    "C2_PORT": HTTP_PORT,
+                    "C2_SECRET": C2_SECRET,
+                    "EVIDENCE": f"/evidence/{d['id']}.log",
+                },
+                "volumes": ["./evidence:/evidence:rw"],
+            }
+            continue
         services[d["id"]] = {
             "image": "notnet-sim-device",
             "container_name": d["id"],

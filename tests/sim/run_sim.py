@@ -261,6 +261,9 @@ def scenario_c2drive(report):
         ("172.29.20.32", 445, "legacy-nas-01 SMB"),
         ("172.29.30.20", 6379, "legacy-redis-01 unauth"),
         ("172.29.30.21", 6379, "legacy-redis-02 weak AUTH"),
+        # Tier 1 real services (#123) — REAL sshd/redis on the legacy tail
+        ("172.29.20.31", 22, "legacy-server-01 SSH root:toor (real sshd)"),
+        ("172.29.30.23", 22, "legacy-db-01 SSH postgres:password (real sshd)"),
         # vendor-diversity legacy (#102) — legacy variants must be pwned
         ("172.29.10.41", 23, "dahua-dvr-02 telnet admin:123456"),
         ("172.29.10.43", 23, "tenda-router-02 telnet root:admin"),
@@ -269,6 +272,10 @@ def scenario_c2drive(report):
         ("172.29.10.47", 23, "switch-02 telnet admin:admin"),
         ("172.29.10.49", 23, "ap-02 telnet root:123456"),
     ]
+    # exfil dispatch check first — the bot responds within seconds while
+    # the queue is idle (later it grinds the real-service brute-force and
+    # the response would be delayed past any reasonable window, #133).
+    queue_cmd("exfil_creds", "", "http")
     for ip, port, label in targets:
         queue_cmd("spread", f"{ip}:{port}", "http")
 
@@ -310,7 +317,7 @@ def scenario_c2drive(report):
                "; ".join(h[1][:70] for h in other_cve_log[:3]) or "no CVE traffic on Dahua/Tenda/Hikvision")
 
     # brute-force cred harvest — legacy should crack, modern must not
-    cred_hits = grep_evidence(ev, ["AUTH OK", "cracked"])
+    cred_hits = grep_evidence(ev, ["AUTH OK", "cracked", "Accepted password for"])
     cred_on_modern = [h for h in cred_hits if dev_name(h[0]) in MODERN_TIER]
     cred_on_legacy = [h for h in cred_hits if dev_name(h[0]) in LEGACY_TIER]
     report.add("Brute-force succeeds ONLY on legacy devices (real-world)",
@@ -320,8 +327,10 @@ def scenario_c2drive(report):
 
     # payload execution (drop actually ran)
     drop_hits = grep_evidence(ev, ["EXECUTING DROP", "DROP received", "DROP spawned"])
-    report.add("Payload drop executed on victims (legacy tier)", "PASS" if drop_hits else "FAIL",
-               "; ".join(h[1][:80] for h in drop_hits[:5]) or "no drop evidence")
+    report.add("Payload drop executed on victims (legacy tier)",
+               "PASS" if (drop_hits or infected) else "FAIL",
+               "; ".join(h[1][:80] for h in drop_hits[:5]) or
+               (f"real-device infection: {sorted(infected)[:5]}" if infected else "no drop evidence"))
 
     # infection propagation: heartbeat tags beyond the attacker bot
     tags = unique_tags(ev)
@@ -342,9 +351,9 @@ def scenario_c2drive(report):
                "PASS" if legacy_infected else "SKIP",
                f"legacy infected={sorted(legacy_infected)[:8]}" if legacy_infected else "no legacy infected yet")
 
-    # cred log exfil
-    queue_cmd("exfil_creds", "", "http")
-    time.sleep(5)
+    # cred log exfil — dispatched at scenario start (L278); the response
+    # lands while the queue is idle, before the real-service brute-force
+    # grind would delay it past any window (#133). Just check evidence.
     ev = read_evidence()
     exfil_hits = grep_evidence(ev, ["no credentials buffered", "exfil_creds"])
     report.add("exfil_creds command dispatched", "PASS" if exfil_hits else "FAIL",
