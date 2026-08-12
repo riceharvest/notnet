@@ -72,3 +72,20 @@ REMAINING BLOCKER:
 - LD_PRELOAD shim note: the uClibc loader silently ignores LD_PRELOAD
   for a -nostdlib MIPS-I shim; the flash-file approach (a real MIB at
   /dev/mtdblock0) avoids the loader entirely.
+
+## MIB construction progress (final session note)
+
+- The Realtek MIB flash format is fully understood: COMPRESS_MIB_HEADER_T
+  (6-byte sig + compRate:be16 + compLen:be32) + LZSS (Okumura N=4096
+  F=18) data at flash 0x6000. build_mib.py builds a minimal MIB (2041
+  bytes -> 588 LZSS) + apmib_decode.cpp verifies the round-trip.
+- The boa reads the MIB (sig=Hf/Hu echoed back) but the hw-setting
+  signature CHECK still fails: the expected 2-char constant is neither
+  "Hf" nor "Hu" (those are the current/default setting sigs). The
+  stripped libapmib needs a proper MIPS disassembler (radare2/Ghidra) to
+  extract the comparison constant from the sig-check function — objdump
+  cannot handle the no-section-header ELF, capstone pip install fails on
+  this image's old pip.
+- Everything else is proven: real firmware, real Boa binds port 80,
+  accepts connections, MIB format + LZSS round-trip. The asp layer will
+  initialize once the sig constant lands.
