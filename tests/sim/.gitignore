@@ -9,3 +9,4 @@ docker-compose.fleet.yml
 conf/generated/
 __pycache__/
 *.pyc
+state/

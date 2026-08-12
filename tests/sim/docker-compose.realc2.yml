@@ -1,0 +1,67 @@
+# notnet sim — run the fleet against the REAL C2 (c2-server/) instead of the
+# Python mocks. Merge on top of docker-compose.sim.yml:
+#   docker compose -f docker-compose.sim.yml -f docker-compose.realc2.yml up ...
+# (or ./run-sim.sh --c2 real)
+#
+# The three channel hostnames (c2 / c2-ws / c2-irc) each run a full real-C2
+# instance on the SAME fixed IPs the mocks used, so the bot/device configs
+# are unchanged. Each instance writes mock-format evidence lines to its own
+# file (the driver's grep-based checks) and only serves queued commands to
+# the attacker bot (172.29.0.9) — devices heartbeat to the same endpoints
+# and would otherwise steal commands (#119).
+name: notnet-sim
+
+services:
+  c2:
+    image: python:3.11-slim
+    command: ["python3", "/app/c2.py", "--secret", "mocksecret",
+              "--http-port", "8080", "--payload-port", "8443",
+              "--ws-port", "8081", "--irc-port", "6667",
+              "--console-port", "8090",
+              "--queue-dir", "/queue", "--payload-dir", "/payload",
+              "--db", "/state/c2.db"]
+    volumes:
+      - ../../c2-server:/app
+      - ./queue:/queue
+      - ./payload:/payload
+      - ./evidence:/evidence
+      - ./state:/state
+    environment:
+      SIM_EVIDENCE: /evidence/http.log
+      SIM_BOT_IP: "172.29.0.9"
+
+  c2-ws:
+    image: python:3.11-slim
+    command: ["python3", "/app/c2.py", "--secret", "mocksecret",
+              "--http-port", "8080", "--payload-port", "8443",
+              "--ws-port", "8081", "--irc-port", "6667",
+              "--console-port", "8090",
+              "--queue-dir", "/queue", "--payload-dir", "/payload",
+              "--db", "/state/ws.db"]
+    volumes:
+      - ../../c2-server:/app
+      - ./queue:/queue
+      - ./payload:/payload
+      - ./evidence:/evidence
+      - ./state:/state
+    environment:
+      SIM_EVIDENCE: /evidence/ws.log
+      SIM_BOT_IP: "172.29.0.9"
+
+  c2-irc:
+    image: python:3.11-slim
+    command: ["python3", "/app/c2.py", "--secret", "mocksecret",
+              "--http-port", "8080", "--payload-port", "8443",
+              "--ws-port", "8081", "--irc-port", "6667",
+              "--console-port", "8090",
+              "--queue-dir", "/queue", "--payload-dir", "/payload",
+              "--db", "/state/irc.db"]
+    volumes:
+      - ../../c2-server:/app
+      - ./queue:/queue
+      - ./payload:/payload
+      - ./evidence:/evidence
+      - ./state:/state
+    environment:
+      SIM_EVIDENCE: /evidence/irc.log
+      SIM_BOT_IP: "172.29.0.9"
