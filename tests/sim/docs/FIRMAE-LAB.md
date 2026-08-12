@@ -63,3 +63,15 @@ firmae-lab image):
   silently exits 0 in both the host AND the container with no output
   and no scratch files. Root cause not yet surfaced (likely an
   extractor/binwalk interaction); the log shows only the postgres init.
+
+## Extractor debug (final)
+
+- Root cause of the "silent exit": extractor.py:782 only runs when
+  `arg.debug` OR psql_check() passes. Without -d a failed DB check
+  silently exits 0. With -d the extractor runs.
+- The scan works (zip + inner bin found) but update_status() reports
+  "completed" and no kernel/rootfs is written; the recursion into the
+  inner firmware bin does not materialize the squashfs. Binwalk 2.3.3
+  needs sasquatch present (mount -v /usr/local/bin/sasquatch into the
+  container). Remaining unknown: the extractor's _check_recursive /
+  _check_rootfs path for the D-Link DLOB layout.
