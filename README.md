@@ -38,9 +38,11 @@ and PowerPC have no build targets.
 - IRC is kept for compatibility only. A bespoke channel is trivially
   sinkholed, so it provides no resilience. Re-enable with
   `irc_enabled=1`.
-- All channels support TLS 1.2+ when built with `make TLS=1` and a cert
-  pin is configured (`tls_cert_pin_sha256`). The default build is
-  cleartext.
+- All channels have TLS 1.2+ plumbing when built with `make TLS=1` and a
+  cert pin (`tls_cert_pin_sha256`). The handshake + pin verification are
+  verified (including fail-closed on mismatch); the TLS DATA path is
+  broken (the first read after the handshake wedges on pending handshake
+  data — issue #121). Cleartext remains the default and the verified path.
 
 ### Resilience
 

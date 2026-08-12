@@ -41,7 +41,7 @@ TARGET := notnet
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(LDFLAGS) -o $@ $^
+	$(CC) -o $@ $^ $(LDFLAGS)
 	@echo "Built $(TARGET) for $(ARCH)"
 	@echo "Version: $(shell grep 'define NOTNET_VERSION' include/config.h | awk -F'"' '{print $$2}')"
 

