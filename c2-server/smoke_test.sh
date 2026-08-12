@@ -115,13 +115,11 @@ bot_tag=smoke-ws-1
 EOF
 run_bot "$WORK/notnet.conf.ws" smoke-ws-1
 
-echo "[7/7] WS: inventory + heartbeat recording"
+echo "[7/7] WS: inventory + targeted command exec"
 ./c2ctl --api "$API" bots | grep -q "smoke-ws-1" || { echo "FAIL: no ws bot"; fail=1; }
 ./c2ctl --api "$API" bots | grep "smoke-ws-1" | grep -q "ws" || { echo "FAIL: ws channel not recorded"; fail=1; }
-# NOTE: WS command execution is a BOT gap, not a C2 gap — the bot's WS path
-# copies the raw JSON frame into cmd_queue, but dispatch matches command
-# prefixes, so JSON-form WS commands are never executed. Filed separately.
-# The C2's WS channel is verified for heartbeat/inventory here.
+./c2ctl --api "$API" queue --target smoke-ws-1 exec hostname
+wait_exec hostname smoke-ws-1 || fail=1
 
 # ── IRC channel (legacy) ───────────────────────────────────────────────
 cat > "$WORK/notnet.conf.irc" <<EOF
