@@ -15,14 +15,16 @@ Listeners:
 
 - `8080`  HTTP C2 — heartbeat/response POST `<http_path>` (default
   `/api/v1/bot`), exfil POST `<http_path>/exfil`, payload GET `/bot/<name>`,
-  source bundle GET `/notnet-src.tar`
+  source bundle GET `/notnet-src.tar`. HTTPS when `NOTNET_C2_TLS_CERT` +
+  `NOTNET_C2_TLS_KEY` are set (bot pins the cert via
+  `tls_cert_pin_sha256`)
 - `8443`  payload download port (same handler)
-- `8081`  WebSocket C2 (RFC 6455) — heartbeat/inventory; commands served but
-  the BOT cannot execute WS frames yet (see issue #120 — the bot's WS path
-  stores the raw JSON frame but dispatch matches command prefixes)
+- `8081`  WebSocket C2 (RFC 6455) — heartbeat/inventory + targeted and
+  untargeted command delivery
 - `6667`  IRC C2 (legacy channel) — welcome burst, heartbeat/inventory,
   targeted + untargeted command delivery
 - `8090`  operator console — HTML dashboard + JSON API + queue endpoint
+  (see the exposure note below)
 
 The bot connects with `http_server=<c2 host>`, `http_port=8080`,
 `http_path=/api/v1/bot`, `c2_secret=<same secret>`. The bot auto-enables the
@@ -41,6 +43,12 @@ the dashboard's form or:
     c2-server/c2ctl bots
     c2-server/c2ctl creds
     c2-server/c2ctl commands
+    c2-server/c2ctl killall    # broadcast kill to EVERY bot on every channel
+
+Queue entries may set `"broadcast": true` (or use `c2ctl killall`): the C2
+writes a `bc-`-prefixed file that is PEEKED, never consumed, so every bot
+on every channel receives it on its next poll. The only sane broadcast
+payload is `kill` — it is one-way and the bot exits before re-polling.
 
 ## Security notes
 
@@ -53,6 +61,15 @@ the dashboard's form or:
   the TLS data path are verified end-to-end.
 - SQLite state lives in `--db` (bots, commands, creds, exfil, events).
 
+### Exposure warning
+
+All listeners bind `0.0.0.0` and the console API has NO authentication.
+Anyone who can reach port `8090` can POST
+`{"cmd":"kill","broadcast":true}` to `/api/queue` and kill the whole fleet,
+or read `/api/creds` (harvested credentials) and `/api/exfil`. Firewall the
+console and C2 ports, or bind the console to loopback, for anything beyond
+a lab run.
+
 ## Verification
 
 `tests/` / the sim fleet can point at this server instead of the mocks: set
@@ -62,8 +79,7 @@ are served exactly like the sim mocks'.
 
 Current status: HTTP + WebSocket + IRC channels, payload + exfil + console
 implemented and verified end-to-end with the real binary
-(`c2-server/smoke_test.sh`, 8 checks). The sim fleet runs against this
-server: `./tests/sim/run-sim.sh --scenario all --posture standard --c2 real`
-→ 21/21 parity PASS. Known bot gap: WS-served commands are never executed
-(issue #120 — the bot queues the raw JSON frame but the dispatch matches
-command prefixes).
+(`c2-server/smoke_test.sh`, 9 checks incl. the killall broadcast). The sim
+fleet runs against this server:
+`./tests/sim/run-sim.sh --scenario all --posture standard --c2 real`
+→ 21/21 parity PASS.

@@ -237,7 +237,7 @@ dropped.
 | relay | `relay on [port]` / `relay off` / `relay <target> <port> [via <host>:<port>]` | Start/stop relay, or probe a target's reachability/RTT |
 | plugin | `plugin status` / `plugin <name> load\|run\|unload\|status` | Dispatch built-in plugins by name |
 | rotate | `rotate` | Advance the C2 rotation chain manually |
-| kill | `kill` | Wipe state, stop modules, exit 0 |
+| kill | `kill` | Wipe state, stop modules, remove persistence, exit 0 |
 | status | — | Heartbeat: version, hostname, uptime, scan count, cred count, proxy/relay status, tag |
 
 ## Configuration
@@ -361,6 +361,14 @@ auth gate, the exec allowlist, and spread dispatch. Rebuild the Docker
 image after any source change:
 `docker compose -f docker-compose.test.yml build bot-mock-c2`.
 
+### Local CI (ci-local.sh)
+
+`./ci-local.sh` runs the same gates as the CI workflow without spending on
+runners: zero-warning static build, zero-warning TLS build, TLS smoke,
+sim c2-drive, and the killswitch scenario. `./ci-local.sh --full` adds the
+21-check sim regressions (mock + real C2). Exit code = number of failed
+gates.
+
 ### Full-network simulation (tests/sim)
 
 `tests/sim/` runs the real compiled binary against a heterogeneous fleet
@@ -423,15 +431,35 @@ detail and repro in `tests/sim/docs/FIRMAE-LAB.md`,
 
 `c2-server/` is the production C2 (Python, stdlib-only). It implements the
 same wire contract the sim mocks define — HTTP heartbeat/command channel
-(`POST /api/v1/bot`), exfil ingest, payload hosting — plus an SQLite state
-store and an operator console (HTML dashboard + JSON API + `c2ctl` CLI).
-Commands are queued per bot (optional target tag) and served on the next
-heartbeat. All three channels are implemented and the sim fleet runs against
-it end-to-end: `./tests/sim/run-sim.sh --scenario all --posture standard
---c2 real` → 21/21 parity PASS with the real binary fleet
-(`c2-server/smoke_test.sh` covers the standalone HTTP/WS/IRC checks). Known
-bot gap: WS-served commands are never executed (issue #120). See
-`c2-server/README.md`.
+(`POST /api/v1/bot`), WebSocket, legacy IRC, exfil ingest, payload
+hosting — plus an SQLite state store and an operator console.
+
+- **Channels**: HTTP, WS, IRC. The HTTP listener takes an optional TLS
+  wrapper when `NOTNET_C2_TLS_CERT`/`NOTNET_C2_TLS_KEY` are set (the bot
+  side is verified with the cert pin from `make TLS=1` builds).
+- **Console**: HTML dashboard + JSON API on port `8090` (`/api/bots`,
+  `/api/creds`, `/api/commands`, `/api/exfil`, `/api/queue`).
+- **`c2ctl` CLI**: `bots`, `creds`, `commands`,
+  `queue <cmd> [args...] [--target TAG]`, `killall` (broadcast `kill` to
+  every bot on every channel — the operator-side global kill switch).
+- **Targeting**: commands are queued per bot (optional target tag) and
+  served on the next heartbeat; untargeted commands go to any bot on a
+  channel; `bc-` broadcast files are peeked (never consumed) so every bot
+  receives them.
+- **Verified end-to-end**: the sim fleet runs against it —
+  `./tests/sim/run-sim.sh --scenario all --posture standard --c2 real`
+  → 21/21 parity PASS with the real binary fleet; `c2-server/smoke_test.sh`
+  covers HTTP/WS/IRC delivery plus the killall broadcast (9 checks).
+  `ci-local.sh` runs the same gates locally.
+
+**Known limitation — operator exposure.** All listeners bind `0.0.0.0`
+and the console API has no authentication. Anyone who can reach port
+`8090` can `POST /api/queue {"cmd":"kill","broadcast":true}` and kill the
+fleet, or read `/api/creds` and `/api/exfil`. Do not expose the console
+(or the C2 ports) beyond your trusted network; a firewall rule or binding
+the console to loopback is required for anything beyond a lab run.
+
+See `c2-server/README.md`.
 
 ## License
 
