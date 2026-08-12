@@ -176,13 +176,25 @@ def wait_for(predicate, timeout, what):
 
 
 def recreate_bot(conf):
-    """Force-recreate the bot service with a different config mount."""
+    """Force-recreate the bot service with a different config mount.
+
+    `--force-recreate` also recreates the bot's depends_on services (c2,
+    c2-ws), so when the fleet runs against the real C2 (--c2 real, sets
+    SIM_C2_REAL=1) the override file must be included — otherwise every
+    recreate clobbers the real C2 back to the Python mock (#S6, 2026-08).
+    """
     env = dict(os.environ)
     env["SIM_BOT_CONF"] = conf
-    subprocess.run(
-        ["docker", "compose", "-f", "docker-compose.sim.yml",
-         "-f", "docker-compose.fleet.yml", "up", "-d", "--force-recreate", "bot"],
-        cwd=BASE, env=env, capture_output=True, text=True, timeout=120)
+    files = ["docker-compose.sim.yml"]
+    if env.get("SIM_C2_REAL") == "1":
+        files.append("docker-compose.realc2.yml")
+    files.append("docker-compose.fleet.yml")
+    args = ["docker", "compose"]
+    for f in files:
+        args += ["-f", f]
+    args += ["up", "-d", "--force-recreate", "bot"]
+    subprocess.run(args, cwd=BASE, env=env, capture_output=True, text=True,
+                   timeout=120)
     log(f"bot recreated with config {conf}")
 
 

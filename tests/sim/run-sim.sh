@@ -27,6 +27,7 @@ export SUDO_PW="${SUDO_PW:-}"
 C2_OVERRIDE=""
 if [ "$C2_MODE" = "real" ]; then
   C2_OVERRIDE="-f docker-compose.realc2.yml"
+  export SIM_C2_REAL=1
   echo "C2: REAL (c2-server) — mocks replaced"
 fi
 COMPOSE_BASE="docker compose -f docker-compose.sim.yml $C2_OVERRIDE"
