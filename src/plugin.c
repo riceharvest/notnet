@@ -11,8 +11,8 @@
  * entry points (spread_local, proxy_start/stop, relay_start/stop).
  *
  * Remote fetch of shared-object plugins (the full Bredolab/Emotet
- * pattern) is planned future work — see README. It must reuse the
- * fail-closed SHA-256 pinning of the payload path (payload_sha256).
+ * pattern) is implemented — `plugin fetch <name> <url> <sha256>` — using
+ * the fail-closed SHA-256 pinning of the payload path (payload_sha256).
  *
  * Research purposes only.
  */

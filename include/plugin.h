@@ -6,9 +6,9 @@
  * capabilities are pushed post-infection, dispatched by name from the
  * C2. v1 implements the built-in plugin registry — spread, proxy,
  * relay, and cred-log are compile-time linked plugins whose lifecycle
- * the C2 manages via the `plugin` command. Remote fetch of
- * shared-object plugins (dlopen) is planned future work and must reuse
- * the fail-closed SHA-256 pinning of the payload path (payload_sha256).
+ * the C2 manages via the `plugin` command. Remote shared-object
+ * plugins (dlopen, `plugin fetch`) reuse the fail-closed SHA-256
+ * pinning of the payload path (payload_sha256).
  *
  * Research purposes only.
  */
