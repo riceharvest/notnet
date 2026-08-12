@@ -17,6 +17,11 @@ Listeners:
   `/api/v1/bot`), exfil POST `<http_path>/exfil`, payload GET `/bot/<name>`,
   source bundle GET `/notnet-src.tar`
 - `8443`  payload download port (same handler)
+- `8081`  WebSocket C2 (RFC 6455) — heartbeat/inventory; commands served but
+  the BOT cannot execute WS frames yet (see issue #120 — the bot's WS path
+  stores the raw JSON frame but dispatch matches command prefixes)
+- `6667`  IRC C2 (legacy channel) — welcome burst, heartbeat/inventory,
+  targeted + untargeted command delivery
 - `8090`  operator console — HTML dashboard + JSON API + queue endpoint
 
 The bot connects with `http_server=<c2 host>`, `http_port=8080`,
@@ -53,6 +58,9 @@ the dashboard's form or:
 `http_server` to the server host. The driver's queue files (channel-tagged)
 are served exactly like the sim mocks'.
 
-Current status: HTTP channel + payload + exfil + console implemented and
-verified end-to-end with the real binary. WebSocket + IRC channels and the
-sim-integration harness are next (planned).
+Current status: HTTP + WebSocket + IRC channels, payload + exfil + console
+implemented and verified end-to-end with the real binary
+(`c2-server/smoke_test.sh`, 8 checks). Known bot gap: WS-served commands
+are never executed (issue #120 — the bot queues the raw JSON frame but the
+dispatch matches command prefixes). Sim-integration harness is next
+(planned).
