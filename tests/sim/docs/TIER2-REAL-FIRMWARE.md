@@ -121,7 +121,17 @@ qemu-mips-static -L to resolve); identify nvram dependency.
   daemon DISABLED or a patched build (or the same firmware with a firewall
   rule blocking the port) — keeps the modern/legacy tier split honest.
 
-## 6. Recommendation
+## Decision (2026-08-12)
+
+The user chose **Option B — FirmAE full system emulation** as the primary
+path: boot the ENTIRE real firmware (kernel, init, all services) so the
+bot talks to the actual device, not just its web daemon. Option A
+(qemu-user-static) remains a documented fallback for devices that boot
+poorly. Work is tracked as GitHub issues in this repo:
+- #122 program issue (make everything real)
+- #123 Tier 1 real services · #124-#129 Tier 2 real firmware (FirmAE lab,
+  HG532 / Realtek / TBK DVR targets, network bridge, evidence checks)
+- #130-#131 Tier 3 real topology + Suricata · #132 emulator safety net
 
 1. Do a 1-day spike: acquire HG532 firmware + one Realtek-SDK firmware,
    extract, get the real httpd/ctrlt running under qemu-mips-static in a
