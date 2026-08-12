@@ -423,11 +423,9 @@ int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *use
     }
     if (!(strstr(banner, "login:") || strstr(banner, "Login:") ||
           strstr(banner, "Username") || strstr(banner, "username"))) {
-        log_info("TELNETDBG: no login prompt (got %.60s)", banner);
         close(sock);
         return -1;
     }
-    log_info("TELNETDBG: prompt ok (%.50s)", banner);
 
     /* Send username */
     char cmd[512];
@@ -461,7 +459,6 @@ int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *use
     /* Send password */
     snprintf(cmd, sizeof(cmd), "%s\r\n", pass);
     send(sock, cmd, strlen(cmd), 0);
-    log_info("TELNETDBG: sent pass, pwprompt=%.40s", resp);
 
     /* Read response — accumulate until a shell marker appears. Real
      * telnetd sends a LONG MOTD (the Debian copyright notice exceeds 256
@@ -508,16 +505,6 @@ int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *use
 
     /* SECURITY FIX (#15): Return socket fd on success instead of closing */
     if (success) return sock;
-    {
-        char esc[160] = {0};
-        int ei = 0;
-        for (int i = 0; resp[i] && ei < 155; i++) {
-            if (resp[i] == '\r') { esc[ei++] = '\\'; esc[ei++] = 'r'; }
-            else if (resp[i] == '\n') { esc[ei++] = '\\'; esc[ei++] = 'n'; }
-            else esc[ei++] = resp[i];
-        }
-        log_info("TELNETDBG: %s:%s failed (resp=%s)", user, pass, esc);
-    }
     close(sock);
     return -1;
 }

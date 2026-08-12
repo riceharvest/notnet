@@ -33,3 +33,9 @@ compile_commands.json
 # python
 __pycache__/
 *.pyc
+
+# Hermes agent working files
+.hermes/
+
+# C2 runtime state
+c2.db
