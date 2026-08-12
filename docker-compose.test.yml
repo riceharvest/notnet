@@ -79,6 +79,48 @@ services:
     networks:
       - testnet
 
+  # ── Scenario C: Global killswitch test (#130) ──
+  # Armed: the image is built with KILLSWITCH_DOMAIN=killswitch.test baked
+  # in (compile-time, no runtime config), and /etc/hosts maps the domain
+  # to 127.0.0.1 → the bot must self-destruct at boot (exit 0, no C2
+  # connect, no persistence, no spread).
+  bot-killswitch-armed:
+    build:
+      context: .
+      args:
+        KILLSWITCH_DOMAIN: killswitch.test
+    container_name: notnet-killswitch-armed
+    command: ["notnet"]
+    network_mode: none
+    extra_hosts:
+      - "killswitch.test:127.0.0.1"
+    volumes:
+      - ./tests/notnet.conf.no-net:/etc/notnet.conf:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    stop_grace_period: 5s
+
+  # Inert control: same baked domain, but /etc/hosts maps it to a normal
+  # address (TEST-NET-1) → the bot must boot and run normally, no
+  # self-destruct.
+  bot-killswitch-inert:
+    build:
+      context: .
+      args:
+        KILLSWITCH_DOMAIN: killswitch.test
+    container_name: notnet-killswitch-inert
+    command: ["notnet"]
+    network_mode: none
+    extra_hosts:
+      - "killswitch.test:192.0.2.1"
+    volumes:
+      - ./tests/notnet.conf.no-net:/etc/notnet.conf:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    stop_grace_period: 5s
+
 networks:
   testnet:
     driver: bridge

@@ -19,6 +19,10 @@ void log_warn(const char *fmt, ...);
 void log_error(const char *fmt, ...);
 void log_debug(const char *fmt, ...);
 
+/* Best-effort memory wipe the optimizer cannot elide. Shared by the
+ * C2 `kill` path (protocol.c) and the global killswitch (killswitch.c). */
+void wipe_volatile(volatile char *p, size_t n);
+
 /* ── Random Helpers ─────────────────────────────────────────────── */
 uint32_t random_uint32(void);
 void random_string(char *buf, int len);

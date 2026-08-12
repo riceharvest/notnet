@@ -408,3 +408,85 @@ int persist_install(notnet_bot_t *bot) {
 }
 
 /* ── Remove Persistence ──────────────────────────────────── */
+/* SECURITY FIX (#130): uninstall every launch point installed by
+ * persist_install() — systemd unit, cron entries, SysV init script —
+ * and delete the disk-backed binary. Best-effort: callers must treat
+ * a non-zero return as "incomplete", never as a hard failure of the
+ * kill itself. Returns 0 if at least one artifact was removed, -1 if
+ * nothing was found or removal is not possible. */
+int persist_remove(notnet_bot_t *bot) {
+    (void)bot;
+    int removed = 0;
+
+    if (geteuid() != 0) {
+        log_warn("persist_remove: not running as root, cannot uninstall");
+        return -1;
+    }
+
+    char bin_path[256];
+    get_persist_path(bin_path, sizeof(bin_path));
+
+    /* systemd unit */
+    if (access("/etc/systemd/system/notnet.service", F_OK) == 0) {
+        system("systemctl disable notnet.service 2>/dev/null");
+        system("systemctl stop notnet.service 2>/dev/null");
+        unlink("/etc/systemd/system/notnet.service");
+        system("systemctl daemon-reload 2>/dev/null");
+        log_info("persist_remove: removed systemd unit");
+        removed = 1;
+    }
+
+    /* cron entries mentioning our binary. Same temp-file pattern as
+     * install_cron — no shell interpolation of the cron line (CWE-78). */
+    char existing[4096];
+    existing[0] = '\0';
+    FILE *f = popen("crontab -l 2>/dev/null", "r");
+    if (f) {
+        fread(existing, 1, sizeof(existing) - 1, f);
+        existing[sizeof(existing) - 1] = '\0';
+        pclose(f);
+    }
+    if (existing[0] && strstr(existing, bin_path)) {
+        char tmp_path[] = "/tmp/notnet.cron.XXXXXX";
+        int fd = mkstemp(tmp_path);
+        if (fd >= 0) {
+            FILE *tf = fdopen(fd, "w");
+            if (tf) {
+                /* Copy every line except ones containing our binary. */
+                char *saveptr = NULL;
+                for (char *line = strtok_r(existing, "\n", &saveptr);
+                     line; line = strtok_r(NULL, "\n", &saveptr)) {
+                    if (strstr(line, bin_path)) continue;
+                    fprintf(tf, "%s\n", line);
+                }
+                fclose(tf);
+                char cmd[512];
+                snprintf(cmd, sizeof(cmd), "crontab %s", tmp_path);
+                system(cmd);
+                unlink(tmp_path);
+                log_info("persist_remove: removed cron entries for %s", bin_path);
+                removed = 1;
+            } else {
+                close(fd);
+                unlink(tmp_path);
+            }
+        }
+    }
+
+    /* SysV init script */
+    if (access("/etc/init.d/notnet", F_OK) == 0) {
+        unlink("/etc/init.d/notnet");
+        system("update-rc.d -f notnet remove 2>/dev/null");
+        system("chkconfig --del notnet 2>/dev/null");
+        log_info("persist_remove: removed SysV init script");
+        removed = 1;
+    }
+
+    /* The disk-backed binary itself. */
+    if (unlink(bin_path) == 0) {
+        log_info("persist_remove: removed binary %s", bin_path);
+        removed = 1;
+    }
+
+    return removed ? 0 : -1;
+}

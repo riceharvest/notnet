@@ -144,8 +144,20 @@ echo "[8/7] IRC: inventory + targeted command"
 ./c2ctl --api "$API" queue --target smoke-irc-1 exec hostname
 wait_exec hostname smoke-irc-1 || fail=1
 
+# ── Global kill broadcast (killall) ────────────────────────────────────
+echo "[9/7] killall: broadcast kill reaches the connected bot"
+./c2ctl --api "$API" killall
+# The bot's kill response arrives at the C2 ("wiping state"). The bot
+# container is --rm'd on exit, so the C2 log is the reliable evidence.
+for i in $(seq 1 25); do
+  grep -q "wiping state" "$C2LOG" && break
+  sleep 1
+done
+grep -q "wiping state" "$C2LOG" \
+  || { echo "FAIL: bot did not process broadcast kill"; fail=1; }
+
 if [ "$fail" = "0" ]; then
-  echo "C2 SMOKE (http+ws+irc): PASS"
+  echo "C2 SMOKE (http+ws+irc+killall): PASS"
   exit 0
 else
   echo "C2 SMOKE: FAIL"

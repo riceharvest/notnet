@@ -198,7 +198,21 @@ note and a Windows defender checklist.
 - **`bot_tag`** — affiliate/operator identifier (max 64 chars), reported
   in every heartbeat so the C2 can attribute bots to affiliates.
 - **`kill`** — one-way door. Wipes the credential buffer, stops
-  proxy/relay/plugins, exits 0.
+  proxy/relay/plugins, removes persistence, exits 0.
+- **Global killswitch (#130)** — DNS-based author killswitch, compile-time
+  only. The bot resolves the baked-in `killswitch_domain` at boot and
+  every 300s; if it resolves to `127.0.0.1` (or `0.0.0.0`) the bot
+  self-destructs (wipe creds, stop modules, remove persistence, exit 0)
+  *before* it connects to the C2 or spreads. There is NO config key and
+  NO environment variable — the operator cannot disarm a stock binary.
+  Arm it by building with `-DKILLSWITCH_DOMAIN_DEFAULT="your.domain"`
+  (or `docker build --build-arg KILLSWITCH_DOMAIN=your.domain`), then
+  kill a leaked fleet any time by pointing that domain at `127.0.0.1`.
+  Default domain is the reserved `.invalid` TLD — inert unless the
+  author ships an armed build. Only a fork that recompiles the source
+  can remove the check.
+- **`killall` (C2)** — operator-side global kill: `c2ctl killall`
+  broadcasts `kill` to every bot on every channel.
 
 ## Commands
 
@@ -336,9 +350,10 @@ effect on the next persistence install (e.g. a payload update).
 ### Docker mock harness
 
 ```sh
-./tests/run-tests.sh no-net     # init + loop + shutdown, no network
-./tests/run-tests.sh mock-c2    # IRC + HTTP C2 against local mocks
-./tests/run-tests.sh all        # both scenarios
+./tests/run-tests.sh no-net       # init + loop + shutdown, no network
+./tests/run-tests.sh mock-c2      # IRC + HTTP C2 against local mocks
+./tests/run-tests.sh killswitch   # global killswitch: armed dies at boot, inert runs
+./tests/run-tests.sh all          # all scenarios
 ```
 
 The mock scenario verifies IRC/HTTP command extraction, the shared-secret

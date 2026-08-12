@@ -118,6 +118,40 @@
 #define FLUX_CACHE_SLOTS  4
 #define FLUX_DEFAULT_TTL  60
 
+/* ── Global Killswitch (#130) ───────────────────────────────── */
+/* DNS-based author killswitch. The bot resolves killswitch_domain
+ * at boot and then every KILLSWITCH_INTERVAL_DEFAULT seconds; if it
+ * resolves to KILLSWITCH_KILL_IP (host order; default 127.0.0.1 —
+ * the classic WannaCry-style sinkhole) or to 0.0.0.0, it executes
+ * the one-way self-destruct: wipe the credential buffer, stop every
+ * module, remove persistence, exit 0.
+ *
+ * COMPILE-TIME ONLY. There is no config key and no environment
+ * variable — the domain is baked into the binary with
+ * -DKILLSWITCH_DOMAIN_DEFAULT="..." at build time. A leaked stock
+ * binary cannot be disarmed by its operator; only a fork that
+ * recompiles the source can remove or change the check. The default
+ * is the reserved RFC 2606 .invalid TLD, which can never be
+ * registered or squatted — a stock build is inert until the author
+ * ships a binary built with their own domain.
+ *
+ * NXDOMAIN / other addresses = no-op. Because the check is DNS, it
+ * works even when the operator's C2 is down: the kill does not
+ * depend on the skid's infrastructure.
+ *
+ * Honest limitation: this only survives against stock binaries.
+ * Anyone who forks the source can delete the check. It targets the
+ * population that runs a leaked release without auditing it. */
+#ifndef KILLSWITCH_DOMAIN_DEFAULT
+#define KILLSWITCH_DOMAIN_DEFAULT   "killswitch.invalid"
+#endif
+#ifndef KILLSWITCH_KILL_IP
+#define KILLSWITCH_KILL_IP          0x7F000001UL  /* 127.0.0.1 */
+#endif
+#ifndef KILLSWITCH_INTERVAL_DEFAULT
+#define KILLSWITCH_INTERVAL_DEFAULT 300   /* seconds between checks */
+#endif
+
 /* ── Dead-Drop C2 (#86) ────────────────────────────────────── */
 /* Dead-drop resolution: at boot (and every DEAD_DROP_DEFAULT_INTERVAL
  * seconds) the bot fetches an opaque C2-endpoint blob from a legitimate

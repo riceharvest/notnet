@@ -30,7 +30,8 @@ SRCS := notnet.c \
         src/deaddrop.c \
         src/proxy.c \
         src/relay.c \
-        src/plugin.c
+        src/plugin.c \
+        src/killswitch.c
 
 OBJS := $(SRCS:.c=.o)
 

