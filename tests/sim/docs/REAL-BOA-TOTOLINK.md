@@ -89,3 +89,15 @@ REMAINING BLOCKER:
 - Everything else is proven: real firmware, real Boa binds port 80,
   accepts connections, MIB format + LZSS round-trip. The asp layer will
   initialize once the sig constant lands.
+
+## Final state (MIB decompress wall)
+
+Disassembly (radare2 + raw MIPS decode) shows the "Invalid hw setting
+signature" error is actually the **LZSS decompress failure** — there is NO
+signature constant. Flow: mtd_read(6 bytes @ 0x6000) → decompress(src=
+buf+2, dst=buf+0xd14, 0x24, 1) → if result != 1 → "Invalid hw setting
+signature". The lib's LZSS variant differs from the decode-repo's classic
+Okumura (N=4096/F=18/TH=2): the a2=0x24 arg hints at different ring
+params. Fix: reverse the lib's decompress parameters (src/dst/size/flag
+layout at the 0x8028 gp offsets) or obtain a real config.dat from a
+TOTOLINK device.
