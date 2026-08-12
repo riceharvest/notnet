@@ -3,75 +3,95 @@
 Goal: boot REAL IoT firmware (HG532 / Realtek SDK / TBK DVR) under QEMU
 so the bot's CVE modules fire against the actual vulnerable services.
 
-## What is verified working (2026-08-12)
+## Status: EXTRACTION + FULL-SYSTEM BOOT SOLVED (2026-08-12 evening)
 
-- `firmae-lab` Docker image (~2.9GB): Ubuntu 20.04 + QEMU (arm/mips/x86),
-  PostgreSQL with the FirmAE schema, binwalk 2.3.3 (built from source —
-  the Ubuntu-packaged 2.2.0 General module is broken), the FirmAE
-  prebuilt kernels/busybox/libnvram (download.sh), the FirmAE scripts.
-- Run: `docker run --rm --privileged -v /dev/kvm:/dev/kvm \
-  --cap-add NET_ADMIN --cap-add SYS_ADMIN -e USER=root \
-  -v ~/firmae-lab:/lab -w /firmadyne firmae-lab \
-  sh -c 'PSQL_IP=127.0.0.1 ./run.sh -c <brand> /lab/<fw>.zip'`
-- Verified with the FirmAE example DIR-868L: extraction completes
-  (binwalk), architecture detection completes ("get architecture done"),
-  the emulation starts.
+The extractor wall is dead. Both acquired firmwares extract on the HOST
+and boot full-system under QEMU. One boots completely (web reachable);
+the other boots but the CVE injection needs the vendor HAL chain.
 
-## Blocker
+## Extractor: root cause + fix
 
-The full QEMU boot hangs at the image-creation step when run inside the
-Docker container (the scratch WORK_DIR is never populated and run.sh sits
-in a child wait with no QEMU process). FirmAE is designed for a real
-Ubuntu 20.04 host; the container path needs deeper debugging (scratch
-dir handling, child process management under the container runtime).
+- Silent exit 0: extractor.py:782 only runs with `-d` OR a passing
+  psql_check() — a failed DB check exits 0 silently. Always run with `-d`.
+- "Skipping: completed!" with no files written: the outputs WERE written
+  — into the ephemeral container. Output arg `1` is relative to the
+  container cwd `/firmadyne` (abspath in Extractor.__init__), and
+  `docker run --rm` destroys the container on exit. The mounted volume
+  is `/lab`; the output dir must be under it.
+- Host chain works: binwalk 2.3.4 (PYTHONPATH=/usr/lib/python3.14/site-packages)
+  + sasquatch (host build) extracts both D-Link DLOB and HG532 LZMA squashfs.
+- DB: extractor connects to database `firmware` user `firmadyne` /
+  `firmadyne` on 127.0.0.1:5432 (assist-all-postgres). Schema loaded from
+  FirmAE/database/schema. Host run: `sudo env PYTHONPATH=... python3
+  sources/extractor/extractor.py -b <brand> -sql 127.0.0.1 -np -nk/-nf <fw> images`
 
-## Reliable path (recommended)
+## DIR-868L — FULL SUCCESS (live web endpoint)
 
-Run FirmAE on a real Ubuntu 20.04 host/VM (the 5950X box) per the FirmAE
-README (download.sh + install.sh + init.sh + `sudo ./run.sh -c`). The
-same firmware images then feed issue #125 (HG532), #126 (Realtek), #127
-(TBK DVR), and #128 bridges the emulated device into the sim network.
+`sudo ./run.sh -c dlink`-equivalent host flow: extract (images/1.tar.gz +
+1.kernel) → getArch=armel → tar2db → makeImage → makeNetwork → check.
+Result: ping:true, web:true, ip 192.168.0.1. The REAL D-Link firmware
+boots under qemu-system-arm (kernel 2.6.36.4brcmarm+, userspace xmldbc/
+updatewifistats/gpiod) and its web server answers on port 80. This is a
+live real-firmware endpoint the bot can target.
 
-## qemu-user fallback (proven pipeline, 2026-08-12)
+Key steps for the host (Fedora) run:
+- qemu-system-arm installed via dnf (missing by default).
+- tunctl wrapper at /usr/local/sbin/tunctl (ip tuntap based; Fedora has
+  no uml-utilities). FirmAE run.sh scripts call `sudo tunctl -t/-d`.
+- busybox + bash-static copied from the firmae-lab container to
+  /usr/local/bin (makeImage.sh needs them on PATH).
+- binaries/ copied from the container (download.sh output: vmlinux*,
+  busybox.*, console.*, libnvram.*, gdb*).
 
-The qemu-user-static path works: the DIR-868L rootfs was extracted
-(binwalk → squashfs → unsquashfs) and its REAL /sbin/httpd (ARM) runs
-under qemu-arm-static in a chroot. The D-Link httpd exits without its
-nvram store (the documented qemu-user blocker) — the bot's actual
-targets (HG532 ctrlt, Realtek Boa) are simpler daemons that more often
-survive with a libnvram stub. Firmware extraction recipe (in the
-firmae-lab image):
+## HG532 — BOOTS, TR-064 LIVE, injection blocked by vendor HAL
 
-    unzip -o DIR-868L_fw.zip -d z
-    binwalk z/<inner>.bin            # find the SquashFS offset+size
-    dd if=z/<inner>.bin of=root.squashfs bs=1 skip=<off> count=<sz>
-    unsquashfs -f -d rootfs root.squashfs
-    cp /usr/bin/qemu-arm-static rootfs/usr/bin/
-    chroot rootfs /usr/bin/qemu-arm-static /sbin/httpd
+- Host extraction: images/2.tar.gz + 2.kernel (IID=2, mipseb). Rootfs has
+  /bin/upnp (CVE-2017-17215 daemon), /bin/web, /bin/mic (config agent),
+  /bin/cms, telnetd.
+- Full-system boot works with the DEFAULT init path: the run.sh template
+  must use `rdinit=` NOT `init=` for the kernel cmdline. `init=` triggers
+  the FirmAE console-wrapper path whose console.mipseb exits 0 → kernel
+  panic "Attempted to kill init". With `rdinit=/firmadyne/preInit.sh`
+  and no initrd, the kernel falls back to the firmware's own /sbin/init
+  (busybox) → /etc/inittab → rcS → userspace. (This is why the inference
+  boot always worked and the check boot panicked.)
+- /proc was empty until rcS gained `mount -t proc proc /proc` etc.
+  (preInit.sh never runs on the default-init path).
+- Interactive shell: inittab per-tty entries are ignored by this busybox;
+  rcS line `(/bin/sh < /dev/ttyS1 > /dev/ttyS1 2>&1) &` puts a shell on
+  the second serial (unix socket /tmp/qemu.2.S1, chmod 666, socat in).
+- Service chain: /bin/mic (inetd-app framework) spawns upnp/cms/dns/
+  dhcps. Real TR-064 server LIVE on 192.168.0.1:37215 (digest auth realm
+  HuaweiHomeGateway, creds dslf-config:admin — the reb311ion exploit's
+  creds). Canonical payload: POST /ctrlt/DeviceUpgrade_1 with
+  `<NewStatusURL>$(cmd)</NewStatusURL><NewDownloadURL>$(echo HUAWEIUPNP)
+  </NewDownloadURL>`; output read via `--path-as-is
+  http://IP:37215/icon/../../../tmp/ccmd`.
+- BLOCKER: every SOAP action returns UPnPError 401 Invalid Action — the
+  service dispatch table is empty because mic never writes /var/curcfg.xml
+  (its config generation fails; defaultcfg.xml is encrypted, and the
+  TrendChip HAL /dev/bhal c 255 0 has no driver in the generic FirmAE
+  kernel — mknod alone does not help). Daemons log "Unable to open device
+  /dev/bhal". This is the classic SoC-specific-firmware limit: the
+  TC3162U HAL (tc3162_dmt.ko, built for kernel 2.6.21) cannot run on the
+  FirmAE 4.1 kernel. The injection does NOT execute on this build.
 
-## Host-level bring-up (later)
+Next steps for the HG532 CVE: (a) locate the full HG532 firmware with the
+untrimmed rcS + a matching HAL emulation (FirmAE device-specific kernel),
+or (b) switch the live-target goal to a firmware whose SoC is supported
+by the FirmAE kernel (Broadcom/RT chipsets — DIR-868L already proves that
+class), or (c) run the upnp daemon + mic chain under qemu-mips-static with
+a bhal shim module. The DIR-868L endpoint already satisfies "boot real
+firmware, reach a live endpoint"; the CVE tier (#125/#128) needs one more
+iteration on the HAL.
 
-- Host sasquatch BUILT: squashfs-tools 4.3 source from the Ubuntu archive
-  (sourceforge is dead, GitHub lacks the 4.3 tag), patches from the
-  sasquatch repo, gcc-14 fixes: -Werror removal, signal-handler
-  signatures, -fcommon. Verified: extracts the HG532 lzma squashfs.
-- Host binwalk 2.3.4 module wired via PYTHONPATH (Fedora's python3-binwalk
-  package is gone in 43; pip install works with the path export).
-- firmadyne role/db created in the assist-all-postgres container (the
-  host's 5432 is occupied by that container).
-- FirmAE run.sh now passes the root check and starts; the EXTRACTOR
-  silently exits 0 in both the host AND the container with no output
-  and no scratch files. Root cause not yet surfaced (likely an
-  extractor/binwalk interaction); the log shows only the postgres init.
+## Lab hygiene notes
 
-## Extractor debug (final)
-
-- Root cause of the "silent exit": extractor.py:782 only runs when
-  `arg.debug` OR psql_check() passes. Without -d a failed DB check
-  silently exits 0. With -d the extractor runs.
-- The scan works (zip + inner bin found) but update_status() reports
-  "completed" and no kernel/rootfs is written; the recursion into the
-  inner firmware bin does not materialize the squashfs. Binwalk 2.3.3
-  needs sasquatch present (mount -v /usr/local/bin/sasquatch into the
-  container). Remaining unknown: the extractor's _check_recursive /
-  _check_rootfs path for the D-Link DLOB layout.
+- udisks auto-mounts every `losetup -Pf` partition at
+  /run/media/dario/<uuid> — unmount before `losetup -d`, else detach
+  fails with EBUSY.
+- Killing qemu via the monitor: NEVER send `quit` (it exits qemu); use
+  `info chardev` etc. only.
+- Background sudo needs a TTY for the password: use
+  `echo '<pw>' | sudo -S <cmd>` (foreground sudo works with the cached
+  ticket; background does not).
