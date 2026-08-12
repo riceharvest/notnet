@@ -1,0 +1,23 @@
+# notnet sim — REAL mainstream services image (Tier 1, issue #123).
+# One image, env-configurable: real OpenSSH, Redis, Samba, telnetd, nginx.
+# The container also pre-places /etc/notnet.conf so the REAL payload runs
+# and joins the C2 when the device is cracked (real end-to-end infection).
+FROM debian:bookworm-slim
+# official busybox carries the telnetd + login applets; use the static
+# musl build so it runs on bookworm (the glibc build needs GLIBC 2.38+)
+COPY --from=busybox:1.36-musl /bin/busybox /usr/local/bin/busybox-iot
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      openssh-server openssh-client redis-server samba inetutils-telnetd \
+      nginx wget ca-certificates procps iproute2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /data/share /var/www/html \
+    && echo "notnet realsvc" > /var/www/html/index.html \
+    && rm -f /bin/login /usr/bin/login \
+    && ln -s /usr/local/bin/busybox-iot /bin/login
+
+COPY start-realsvc.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh
+
+EXPOSE 22 23 80 445 6379
+ENTRYPOINT ["/usr/local/bin/start.sh"]
