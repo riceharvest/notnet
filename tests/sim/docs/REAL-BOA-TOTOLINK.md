@@ -53,3 +53,22 @@ REMAINING BLOCKER:
 - tests/sim/docs/REAL-BOA-TOTOLINK.md (this file)
 - ~/firmae-lab/fw-totolink/apmib_shim.c, boa.conf, Dockerfile.boa
 - ~/firmae-lab/fw-totolink/fullroot/ (the extracted rootfs)
+
+## Status update (later same day)
+
+- The boa RUNS + binds port 80 under qemu-mips-static and ACCEPTS
+  connections. The crash triggers on the FIRST REQUEST: the asp request
+  handler dereferences the uninitialized MIB state ("Initialize AP MIB
+  failed!asp_init:1001" → SIGSEGV on the first accept).
+- The remaining work: provide a REAL MIB flash image at 0x6000 — the
+  LZSS-compressed config blob (COMPRESS_MIB_HEADER_T sig=Hf ver=0 len=N
+  + the LZSS data). The decode.cpp from chuangshizhiqiang/
+  apmibConfigFileDecode documents the format; a minimal valid MIB (model
+  name, sys version, wan ip) would let asp_init succeed and the request
+  handler survive.
+- Alternative: patch the libapmib so apmib_get falls back to
+  apmib_getDef (the compiled-in SDK defaults) — the asp would use the
+  defaults instead of the empty flash values.
+- LD_PRELOAD shim note: the uClibc loader silently ignores LD_PRELOAD
+  for a -nostdlib MIPS-I shim; the flash-file approach (a real MIB at
+  /dev/mtdblock0) avoids the loader entirely.
