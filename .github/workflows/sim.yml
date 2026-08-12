@@ -66,6 +66,16 @@ jobs:
           test -n "$(ls tests/sim/reports/parity-*.md 2>/dev/null | head -1)" \
             || { echo "no parity report produced — run-sim.sh failed early"; exit 1; }
 
+  tls:
+    name: TLS build + smoke (TLS=1, pinned cert)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: TLS smoke (build TLS=1, handshake, pin, data path, fail-closed)
+        run: ./c2-server/tls_smoke.sh
+
   full:
     name: sim full regression (all scenarios)
     runs-on: ubuntu-latest

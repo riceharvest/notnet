@@ -282,13 +282,14 @@ static int tar_extract_safe(const char *tar_path, const char *dest_dir) {
                 size_t rd = fread(buf, 1, chunk, f);
                 if (rd != chunk) {
                     fclose(out);
+                    out = NULL;
                     ret = -1;
                     break;
                 }
                 fwrite(buf, 1, rd, out);
                 left -= (unsigned long)rd;
             }
-            fclose(out);
+            if (out) fclose(out);
             if (ret != 0) break;
         }
 
