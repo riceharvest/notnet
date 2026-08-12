@@ -82,4 +82,11 @@ int relay_connect(notnet_bot_t *bot, const char *via_host, uint16_t via_port,
 int relay_probe(notnet_bot_t *bot, const char *target_host, uint16_t target_port,
                 const char *via_host, uint16_t via_port, long *rtt_ms);
 
+/* Chain-aware reachability probe: `chain` is the multi-hop suffix
+ * (`" VIA <host>:<port>[ VIA ...]"`, leading space required); the probe
+ * dials the FIRST hop and forwards the remaining chain. NULL/empty = direct.
+ * Returns 0 on success, -1 on failure; *rtt_ms receives the handshake RTT. */
+int relay_probe_chain(notnet_bot_t *bot, const char *target_host,
+                      uint16_t target_port, const char *chain, long *rtt_ms);
+
 #endif /* NOTNET_RELAY_H */

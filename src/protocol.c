@@ -2942,19 +2942,46 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 }
             } else {
                 /* Per-target path probe. Split at " via " first so the
-                 * target half is independent of the via syntax. */
+                 * target half is independent of the via syntax. The via
+                 * half may itself contain more " via " hops (multi-hop
+                 * chains, #relay-multihop). */
                 char *via_arg = strstr(args, " via ");
                 char *via_host = NULL;
-                char via[256] = {0};
-                unsigned int via_port = 0;
+                char chain[512] = {0};
+                int nchain = 0;
+                int via_bad = 0;
                 if (via_arg) {
                     *via_arg = '\0';    /* args now ends at " via " */
                     via_host = via_arg + 5;
                     while (*via_host == ' ' || *via_host == '\t') via_host++;
-                    if (sscanf(via_host, "%255[^:]:%u", via, &via_port) != 2 ||
-                        via_port < 1 || via_port > 65535) {
+                    /* Parse every hop in the via half into one chain
+                     * suffix (" VIA h1:p1 VIA h2:p2 ..."). */
+                    char *vp = via_host;
+                    while (vp && *vp) {
+                        char *next_via = strstr(vp, " via ");
+                        if (next_via) *next_via = '\0';
+                        char vh[256] = {0};
+                        unsigned int vport = 0;
+                        if (sscanf(vp, "%255[^:]:%u", vh, &vport) != 2 ||
+                            vport < 1 || vport > 65535) {
+                            via_bad = 1;
+                            break;
+                        }
+                        int n = snprintf(chain + nchain,
+                                         sizeof(chain) - (size_t)nchain,
+                                         " VIA %s:%u", vh, vport);
+                        if (n < 0 || (size_t)n >= sizeof(chain) - (size_t)nchain) {
+                            via_bad = 1;
+                            break;
+                        }
+                        nchain += n;
+                        if (!next_via) break;
+                        vp = next_via + 5;
+                        while (*vp == ' ' || *vp == '\t') vp++;
+                    }
+                    if (via_bad) {
                         protocol_send_response(bot, CMD_RELAY,
-                            "relay: bad via, use via <host>:<port>");
+                            "relay: bad via, use via <host>:<port> [via <host>:<port> ...]");
                         continue;
                     }
                 }
@@ -2963,17 +2990,17 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 if (sscanf(args, "%255s %u", host, &port) != 2 ||
                     port < 1 || port > 65535) {
                     protocol_send_response(bot, CMD_RELAY,
-                        "relay: usage relay <target> <port> [via <host>:<port>] | relay on [port] | relay off");
+                        "relay: usage relay <target> <port> [via <host>:<port> ...] | relay on [port] | relay off");
                     continue;
                 }
                 long rtt = 0;
                 char rbuf[640];
-                if (relay_probe(bot, host, (uint16_t)port,
-                                via_host, (uint16_t)via_port, &rtt) == 0) {
-                    if (via_host) {
+                if (relay_probe_chain(bot, host, (uint16_t)port,
+                                      nchain ? chain : NULL, &rtt) == 0) {
+                    if (nchain) {
                         snprintf(rbuf, sizeof(rbuf),
-                                 "relay: %s:%u reachable via %s:%u in %ldms",
-                                 host, port, via, via_port, rtt);
+                                 "relay: %s:%u reachable via%s in %ldms",
+                                 host, port, chain, rtt);
                     } else {
                         snprintf(rbuf, sizeof(rbuf),
                                  "relay: %s:%u reachable directly in %ldms",
@@ -2981,10 +3008,10 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     }
                     log_info("CMD: %s", rbuf);
                 } else {
-                    if (via_host) {
+                    if (nchain) {
                         snprintf(rbuf, sizeof(rbuf),
-                                 "relay: %s:%u unreachable via %s:%u",
-                                 host, port, via, via_port);
+                                 "relay: %s:%u unreachable via%s",
+                                 host, port, chain);
                     } else {
                         snprintf(rbuf, sizeof(rbuf),
                                  "relay: %s:%u unreachable", host, port);

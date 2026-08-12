@@ -574,3 +574,74 @@ int relay_probe(notnet_bot_t *bot, const char *target_host, uint16_t target_port
     close(fd);
     return 0;
 }
+
+/* Chain-aware reachability probe: `chain` is the multi-hop suffix the
+ * operator specified, e.g. " VIA 1.2.3.4:1081 VIA 5.6.7.8:1081" (leading
+ * space required). The probe connects to the FIRST hop (the entry relay)
+ * and forwards the remaining chain, matching relay_handle_client's
+ * semantics; NULL/empty chain = direct probe. Returns 0 on success (the
+ * full chain answered OK), -1 on any failure; *rtt_ms receives the
+ * handshake round-trip. */
+int relay_probe_chain(notnet_bot_t *bot, const char *target_host,
+                      uint16_t target_port, const char *chain, long *rtt_ms) {
+    if (!bot || !target_host || target_port == 0) return -1;
+    if (rtt_ms) *rtt_ms = 0;
+    if (bot->relay_token[0] == '\0') {
+        log_warn("RELAY: client refused — no relay_token configured");
+        return -1;
+    }
+
+    uint64_t t0 = get_timestamp_ms();
+    if (!chain || chain[0] == '\0') {
+        int fd = relay_tcp_connect(target_host, target_port, RELAY_HANDSHAKE_TIMEOUT);
+        if (fd < 0) return -1;
+        if (rtt_ms) *rtt_ms = (long)(get_timestamp_ms() - t0);
+        close(fd);
+        return 0;
+    }
+
+    /* First hop = the entry relay this bot dials directly. */
+    char *p = strstr(chain, " VIA ");
+    if (!p) return -1;
+    char *h = p + 5;
+    while (*h == ' ' || *h == '\t') h++;
+    char hv[256] = {0};
+    unsigned int hp = 0;
+    if (sscanf(h, "%255[^:]:%u", hv, &hp) != 2 || hp < 1 || hp > 65535) return -1;
+
+    int fd = relay_tcp_connect(hv, (uint16_t)hp, RELAY_HANDSHAKE_TIMEOUT);
+    if (fd < 0) return -1;
+
+    /* Forward the REMAINING chain (hops after the first). */
+    char *rest = strstr(h, " VIA ");
+    char req[RELAY_HANDSHAKE_MAX];
+    int n;
+    if (rest) {
+        n = snprintf(req, sizeof(req), "RELAY %s %s %u%s\r\n",
+                     bot->relay_token, target_host, (unsigned)target_port, rest);
+    } else {
+        n = snprintf(req, sizeof(req), "RELAY %s %s %u\r\n",
+                     bot->relay_token, target_host, (unsigned)target_port);
+    }
+    if (n < 0 || (size_t)n >= sizeof(req)) {
+        close(fd);
+        return -1;
+    }
+    if (relay_send_all(fd, req, n) != 0) {
+        close(fd);
+        return -1;
+    }
+    char resp[RELAY_HANDSHAKE_MAX];
+    if (relay_recv_line(fd, resp, sizeof(resp), RELAY_HANDSHAKE_TIMEOUT) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (strncmp(resp, "OK", 2) != 0) {
+        log_warn("RELAY: chain refused: %s", resp[0] ? resp : "no reply");
+        close(fd);
+        return -1;
+    }
+    if (rtt_ms) *rtt_ms = (long)(get_timestamp_ms() - t0);
+    close(fd);
+    return 0;
+}
