@@ -22,6 +22,7 @@ services:
               "--db", "/state/c2.db"]
     volumes:
       - ../../c2-server:/app
+      - ./c2/socks5_client.py:/app/socks5_client.py:ro
       - ./queue:/queue
       - ./payload:/payload
       - ./evidence:/evidence
