@@ -36,6 +36,36 @@ jobs:
           name: parity-smoke
           path: tests/sim/reports/
 
+  c2-real:
+    name: sim c2-drive against the real C2 (c2-server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the real binary (host gate)
+        run: make
+
+      - name: Sim c2-drive — real C2 (fleet contract against c2-server)
+        run: |
+          cd tests/sim
+          ./run-sim.sh --scenario c2-drive --posture lax --c2 real
+        env:
+          SUDO_PW: ""
+
+      - name: Upload parity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-c2-real
+          path: tests/sim/reports/
+
+      - name: Fail on silent no-report
+        if: always()
+        run: |
+          test -n "$(ls tests/sim/reports/parity-*.md 2>/dev/null | head -1)" \
+            || { echo "no parity report produced — run-sim.sh failed early"; exit 1; }
+
   full:
     name: sim full regression (all scenarios)
     runs-on: ubuntu-latest
