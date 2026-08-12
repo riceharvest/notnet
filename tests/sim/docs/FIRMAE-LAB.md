@@ -48,3 +48,18 @@ firmae-lab image):
     unsquashfs -f -d rootfs root.squashfs
     cp /usr/bin/qemu-arm-static rootfs/usr/bin/
     chroot rootfs /usr/bin/qemu-arm-static /sbin/httpd
+
+## Host-level bring-up (later)
+
+- Host sasquatch BUILT: squashfs-tools 4.3 source from the Ubuntu archive
+  (sourceforge is dead, GitHub lacks the 4.3 tag), patches from the
+  sasquatch repo, gcc-14 fixes: -Werror removal, signal-handler
+  signatures, -fcommon. Verified: extracts the HG532 lzma squashfs.
+- Host binwalk 2.3.4 module wired via PYTHONPATH (Fedora's python3-binwalk
+  package is gone in 43; pip install works with the path export).
+- firmadyne role/db created in the assist-all-postgres container (the
+  host's 5432 is occupied by that container).
+- FirmAE run.sh now passes the root check and starts; the EXTRACTOR
+  silently exits 0 in both the host AND the container with no output
+  and no scratch files. Root cause not yet surfaced (likely an
+  extractor/binwalk interaction); the log shows only the postgres init.
