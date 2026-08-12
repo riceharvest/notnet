@@ -60,6 +60,17 @@ flush_ours() {
             n=$((n - 1))  # chain shrank by one
         fi
     done < <(iptables -S DOCKER-USER 2>/dev/null | tail -n +2)
+    # FORWARD-chain rules (the base chain — nftables `accept` only
+    # terminates there; in DOCKER-USER it returns and Docker's isolation
+    # chains still drop cross-bridge traffic, #130)
+    n=0
+    while IFS= read -r line; do
+        n=$((n + 1))
+        if echo "$line" | grep -q "$MARK"; then
+            iptables -D FORWARD "$n" 2>/dev/null
+            n=$((n - 1))
+        fi
+    done < <(iptables -S FORWARD 2>/dev/null | tail -n +2)
 }
 
 has_rule() {
@@ -72,13 +83,26 @@ add_rule() {
     fi
 }
 
+# insert at the TOP of the FORWARD base chain (before the DOCKER-USER jump)
+add_rule_fwd() {
+    iptables -I FORWARD 1 "$@" -m comment --comment "$MARK" 2>/dev/null
+}
+
 install() {
     local posture="${1:-lax}" ips="${2:-0}"
     echo "[host_firewall] install posture=$posture ips=$ips"
     flush_ours
 
     if [ "$posture" = "lax" ]; then
-        echo "[host_firewall] lax: no segmentation rules"
+        # Docker isolates custom bridges from each other by default
+        # (container-originated cross-bridge traffic is dropped). The sim
+        # segments are REAL L3 networks (#130): lax = route everything
+        # through the host. The ACCEPT must live in the FORWARD base
+        # chain — in nftables an `accept` inside DOCKER-USER only returns
+        # to the caller, and Docker's chains then drop cross-bridge
+        # traffic.
+        add_rule_fwd -j ACCEPT
+        echo "[host_firewall] lax: no segmentation rules (cross-bridge ACCEPT)"
         return 0
     fi
 
@@ -104,6 +128,15 @@ install() {
         # Office may reach DMZ services (normal internal->DMZ), and IoT admin
         add_rule -s "$NET_OFFICE" -d "$NET_DMZ" -j ACCEPT
         add_rule -s "$NET_OFFICE" -d "$NET_IOT" -j ACCEPT
+        # FORWARD-chain equivalents (#130): these terminate the hook (an
+        # accept in DOCKER-USER would return to FORWARD and Docker's
+        # isolation chains would still drop the allowed cross-bridge
+        # traffic). Order: base ACCEPT first, DROPs inserted above it.
+        add_rule_fwd -j ACCEPT
+        add_rule_fwd -s "$NET_IOT" -d "$NET_OFFICE" -j DROP
+        add_rule_fwd -s "$NET_IOT" -d "$NET_DMZ" -j DROP
+        add_rule_fwd -s "$NET_DMZ" -d "$NET_OFFICE" -j DROP
+        add_rule_fwd -s "$NET_DMZ" -d "$NET_IOT" -j DROP
     fi
 
     if [ "$posture" = "hardened" ]; then
@@ -111,6 +144,12 @@ install() {
         add_rule -s "$SIM_NET" -m conntrack --ctstate NEW -m recent \
             --name notnet_brute --set
         add_rule -s "$SIM_NET" -m conntrack --ctstate NEW -m recent \
+            --name notnet_brute --update --seconds "$BRUTE_WINDOW" \
+            --hitcount "$BRUTE_MAX_NEW" -j DROP
+        # FORWARD-chain equivalents (inserted above the base ACCEPT)
+        add_rule_fwd -s "$SIM_NET" -m conntrack --ctstate NEW -m recent \
+            --name notnet_brute --set
+        add_rule_fwd -s "$SIM_NET" -m conntrack --ctstate NEW -m recent \
             --name notnet_brute --update --seconds "$BRUTE_WINDOW" \
             --hitcount "$BRUTE_MAX_NEW" -j DROP
     fi

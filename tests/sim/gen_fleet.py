@@ -86,6 +86,13 @@ def device_env(d):
     return env
 
 
+
+
+def seg_net(d):
+    """Map a fleet segment to its compose network (#130)."""
+    return {"iot": "simnet-iot", "office": "simnet-office",
+            "dmz": "simnet-dmz"}.get(d.get("segment", "iot"), "simnet-iot")
+
 def build_compose(fleet):
     services = {}
     for d in fleet["devices"]:
