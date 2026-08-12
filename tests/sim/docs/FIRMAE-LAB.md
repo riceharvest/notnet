@@ -31,3 +31,20 @@ Run FirmAE on a real Ubuntu 20.04 host/VM (the 5950X box) per the FirmAE
 README (download.sh + install.sh + init.sh + `sudo ./run.sh -c`). The
 same firmware images then feed issue #125 (HG532), #126 (Realtek), #127
 (TBK DVR), and #128 bridges the emulated device into the sim network.
+
+## qemu-user fallback (proven pipeline, 2026-08-12)
+
+The qemu-user-static path works: the DIR-868L rootfs was extracted
+(binwalk → squashfs → unsquashfs) and its REAL /sbin/httpd (ARM) runs
+under qemu-arm-static in a chroot. The D-Link httpd exits without its
+nvram store (the documented qemu-user blocker) — the bot's actual
+targets (HG532 ctrlt, Realtek Boa) are simpler daemons that more often
+survive with a libnvram stub. Firmware extraction recipe (in the
+firmae-lab image):
+
+    unzip -o DIR-868L_fw.zip -d z
+    binwalk z/<inner>.bin            # find the SquashFS offset+size
+    dd if=z/<inner>.bin of=root.squashfs bs=1 skip=<off> count=<sz>
+    unsquashfs -f -d rootfs root.squashfs
+    cp /usr/bin/qemu-arm-static rootfs/usr/bin/
+    chroot rootfs /usr/bin/qemu-arm-static /sbin/httpd
