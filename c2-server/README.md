@@ -48,9 +48,9 @@ the dashboard's form or:
   logged (`AUTH-FAIL`) and never served commands.
 - Responses echo the secret (the bot verifies it; see #35).
 - TLS: the HTTP listener can serve HTTPS when `NOTNET_C2_TLS_CERT` +
-  `NOTNET_C2_TLS_KEY` point at a PEM cert/key pair (the bot pins the
-  certificate via `tls_cert_pin_sha256`; the bot's TLS handshake + pin
-  verification are verified, its TLS DATA path is broken — issue #121).
+  `NOTNET_C2_TLS_KEY` point at a PEM cert/key pair. The bot pins the
+  certificate via `tls_cert_pin_sha256`; handshake, pin verification and
+  the TLS data path are verified end-to-end.
 - SQLite state lives in `--db` (bots, commands, creds, exfil, events).
 
 ## Verification
