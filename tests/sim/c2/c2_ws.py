@@ -46,6 +46,10 @@ def log(line):
 
 
 CHANNEL = "ws"
+# Only the sim's attacker bot (docker-compose.sim.yml fixed IP) may receive
+# queued driver commands; devices also connect over WS (device.tpl has
+# ws_enabled=1) and would otherwise win the queue claim race.
+BOT_IP = "172.29.0.9"
 
 
 def _for_me(fn):
@@ -182,7 +186,7 @@ def handle_client(conn, addr):
                 j = json.loads(text)
             except json.JSONDecodeError:
                 j = {}
-            if j.get("cmd") == "status":
+            if j.get("cmd") == "status" and addr[0] == BOT_IP:
                 q = next_command()
                 if q is not None:
                     with lock:

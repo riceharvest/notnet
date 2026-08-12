@@ -49,6 +49,11 @@ def log(line):
 
 
 CHANNEL = "http"
+# Only the sim's attacker bot (docker-compose.sim.yml fixed IP) may receive
+# queued driver commands. Devices (infected in earlier scenarios) heartbeat
+# to this mock too — without this gate they win the queue claim race and
+# commands meant for the bot are lost (CI SOCKS5/pin flakes, 2026-08-12).
+BOT_IP = "172.29.0.9"
 
 
 def _for_me(fn):
@@ -173,7 +178,11 @@ def handle_request(method, path, body, addr, port_label, conn):
             stats["heartbeats" if kind == "heartbeat" else "responses"] += 1
         log(f"{port_label} {kind} from {addr[0]} body={text[:300]}")
         if kind == "heartbeat":
-            payload = command_response(j)
+            if addr[0] == BOT_IP:
+                payload = command_response(j)
+            else:
+                # device heartbeat — never serve driver commands to devices
+                payload = json.dumps({"status": "ok", "secret": C2_SECRET})
         else:
             # command response from bot — acknowledge only
             payload = json.dumps({"status": "ok", "secret": C2_SECRET})
