@@ -84,7 +84,10 @@ docker compose -f docker-compose.sim.yml -f docker-compose.fleet.yml up -d --rem
 # 4. Wait for services to be ready
 echo "[4/6] Waiting for services..."
 sleep 8
-docker compose -f docker-compose.sim.yml -f docker-compose.fleet.yml ps --format 'table {{.Name}}\t{{.Status}}' | head -45
+# No `| head` here — under `set -euo pipefail` a slow `ps` on a cold fleet
+# (55+ containers still starting) gets SIGPIPE when head closes the pipe
+# early, and the whole script dies with 255 before the driver runs.
+docker compose -f docker-compose.sim.yml -f docker-compose.fleet.yml ps --format 'table {{.Name}}\t{{.Status}}'
 
 # 5. Run driver
 echo "[5/6] Running driver (scenario=$SCENARIO posture=$POSTURE)..."
