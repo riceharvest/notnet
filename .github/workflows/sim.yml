@@ -37,7 +37,7 @@ jobs:
           path: tests/sim/reports/
 
   c2-real:
-    name: sim c2-drive against the real C2 (c2-server)
+    name: sim full suite against the real C2 (c2-server)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -46,10 +46,10 @@ jobs:
       - name: Build the real binary (host gate)
         run: make
 
-      - name: Sim c2-drive — real C2 (fleet contract against c2-server)
+      - name: Sim full suite — real C2 (all 21 parity checks against c2-server)
         run: |
           cd tests/sim
-          ./run-sim.sh --scenario c2-drive --posture lax --c2 real
+          ./run-sim.sh --scenario all --posture standard --c2 real
         env:
           SUDO_PW: ""
 
