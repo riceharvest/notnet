@@ -369,9 +369,12 @@ same wire contract the sim mocks define — HTTP heartbeat/command channel
 (`POST /api/v1/bot`), exfil ingest, payload hosting — plus an SQLite state
 store and an operator console (HTML dashboard + JSON API + `c2ctl` CLI).
 Commands are queued per bot (optional target tag) and served on the next
-heartbeat. Status: HTTP channel implemented and verified end-to-end against
-the real binary (`c2-server/smoke_test.sh`); WebSocket + IRC channels and
-the sim-integration harness are planned. See `c2-server/README.md`.
+heartbeat. All three channels are implemented and the sim fleet runs against
+it end-to-end: `./tests/sim/run-sim.sh --scenario all --posture standard
+--c2 real` → 21/21 parity PASS with the real binary fleet
+(`c2-server/smoke_test.sh` covers the standalone HTTP/WS/IRC checks). Known
+bot gap: WS-served commands are never executed (issue #120). See
+`c2-server/README.md`.
 
 ## License
 

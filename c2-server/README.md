@@ -60,7 +60,8 @@ are served exactly like the sim mocks'.
 
 Current status: HTTP + WebSocket + IRC channels, payload + exfil + console
 implemented and verified end-to-end with the real binary
-(`c2-server/smoke_test.sh`, 8 checks). Known bot gap: WS-served commands
-are never executed (issue #120 — the bot queues the raw JSON frame but the
-dispatch matches command prefixes). Sim-integration harness is next
-(planned).
+(`c2-server/smoke_test.sh`, 8 checks). The sim fleet runs against this
+server: `./tests/sim/run-sim.sh --scenario all --posture standard --c2 real`
+→ 21/21 parity PASS. Known bot gap: WS-served commands are never executed
+(issue #120 — the bot queues the raw JSON frame but the dispatch matches
+command prefixes).
