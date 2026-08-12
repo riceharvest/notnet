@@ -374,6 +374,36 @@ The driver exits non-zero on any FAIL row. `.github/workflows/sim.yml`
 runs a c2-drive smoke job on every PR and the full suite nightly, so a
 regressed README claim fails the build.
 
+### Real-firmware tier (FirmAE, #124/#125/#126/#128)
+
+Beyond the dockerized emulators, the CVE stack is exercised against REAL
+vendor firmware booted full-system under QEMU (FirmAE) on the host tap
+network:
+
+```sh
+# extract (host): binwalk 2.3.4 + sasquatch, DB = firmware/firmadyne
+sudo env PYTHONPATH=/usr/lib/python3.14/site-packages \
+  python3 sources/extractor/extractor.py -b <brand> -sql 127.0.0.1 \
+  -np -nk/-nf <fw> images
+# boot: scratch/<iid>/run.sh (rdinit= fix, tunctl wrapper, per-iid tap)
+```
+
+| Firmware | Endpoint | Status |
+|---|---|---|
+| D-Link DIR-868L | 192.168.0.1:80 | boots, real web server, web:true |
+| Huawei HG532 | 192.168.0.1:37215 | boots, real TR-064 + digest auth; injection blocked by TrendChip HAL |
+| TOTOLINK N300RT (2025) | 192.168.1.1:80 | boots, real Boa/0.94.14rc21 — bot CVE-2021-35395 probe HIT |
+| 11× TOTOLINK 2017-2018 builds | — | formSysCmd present; boa blocked by apmib shmget (SDK flash format decoded) |
+
+The bot's local spread scans the tap /24 and its CVE probes fire against
+the live devices (observed: `CVE-2021-35395 probe hit on
+192.168.1.1:80 — Server: Boa/0.94.14rc21`). Verify/drop on the live
+endpoints requires a build whose handler/auth matches the module
+(older Jungle SDK with unauth formSysCmd, or an HG532 HAL shim). Full
+detail and repro in `tests/sim/docs/FIRMAE-LAB.md`,
+`tests/sim/docs/REAL-FIRMWARE-LIVE.md`,
+`tests/sim/docs/REALTEK-FIRMWARE-HUNT.md`.
+
 ## Operator console (C2 server)
 
 `c2-server/` is the production C2 (Python, stdlib-only). It implements the
