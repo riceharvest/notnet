@@ -147,11 +147,15 @@ traffic through a compromised device near the target.
 - `relay_enabled=1` + `relay_token` (fail-closed).
 - Client sends `RELAY <token> <target_host> <target_port>`; the bot
   connects to the target and splices bytes bidirectionally.
+- Multi-hop chains: the request line may carry ` VIA <host>:<port>` hops
+  (`RELAY <token> <target> <port> VIA <h1>:<p1> ...`); each relay forwards
+  the remaining chain to the next hop's listener and the last hop connects
+  to the target. Same shared fleet token authenticates every hop. Bounded
+  to 8 hops. This is not a DHT.
 - Same threading/buffer structure as the SOCKS5 proxy.
 - `relay <target> <port> [via <host>:<port>]` probes reachability and
   RTT directly vs. through a relay bot.
 - Heartbeat reports `relay_on` and `relay_port`.
-- Multi-hop chaining is planned, not implemented. This is not a DHT.
 
 ### Plugins
 

@@ -10,7 +10,12 @@
  * longer originates from the bot's own IP. This module is the minimal
  * single-hop building block:
  *
- *   client --RELAY req--> bot:relay_port --> target host:port
+ * client --RELAY req--> bot:relay_port --> target host:port
+ *
+ * Multi-hop: the request line may carry ` VIA <host>:<port>` hops
+ * (`RELAY <token> <target> <port> VIA <h1>:<p1> ...`). Each relay forwards
+ * the remaining chain to the next hop's listener; the last hop connects to
+ * the target. Same shared token authenticates every hop.
  *
  * Flow per connection:
  *   1. Client sends one CRLF-terminated line:
@@ -205,10 +210,24 @@ static void relay_tunnel(int a, int b) {
 }
 
 /* ── Per-connection protocol handler ───────────────────────── */
+/* Multi-hop chain support: the handshake accepts optional `VIA <host>:<port>`
+ * hops after the target. The entry relay connects to the FIRST hop's relay
+ * listener and forwards the REMAINING chain (`RELAY <token> <target> <port>
+ * VIA <h2>:<p2> ...`); the last hop connects to the target. The same shared
+ * fleet relay_token authenticates every hop (fail-closed). Bounded to
+ * RELAY_MAX_HOPS hops; the chain line must fit RELAY_HANDSHAKE_MAX. */
+#define RELAY_MAX_HOPS 8
+
+typedef struct {
+    char host[256];
+    uint16_t port;
+} relay_hop_t;
+
 static void relay_handle_client(int client) {
     char line[RELAY_HANDSHAKE_MAX];
 
-    /* 1. Request line: `RELAY <token> <target_host> <target_port>`. */
+    /* 1. Request line: `RELAY <token> <target_host> <target_port>`
+     *    optionally followed by ` VIA <host>:<port>` hops. */
     if (relay_recv_line(client, line, sizeof(line), RELAY_HANDSHAKE_TIMEOUT) != 0) {
         return;
     }
@@ -229,12 +248,86 @@ static void relay_handle_client(int client) {
         return;
     }
 
-    /* 3. Connect to the target. */
-    int upstream = relay_tcp_connect(host, (uint16_t)port, RELAY_HANDSHAKE_TIMEOUT);
-    if (upstream < 0) {
-        static const char err[] = "ERR UNREACH\r\n";
-        relay_send_all(client, err, sizeof(err) - 1);
-        return;
+    /* 3. Parse the VIA chain (bounded). */
+    relay_hop_t hops[RELAY_MAX_HOPS];
+    int nhops = 0;
+    char *scan = strstr(line, " VIA ");
+    while (scan && nhops < RELAY_MAX_HOPS) {
+        char *h = scan + 5;
+        while (*h == ' ' || *h == '\t') h++;
+        char hv[256] = {0};
+        unsigned int hp = 0;
+        if (sscanf(h, "%255[^:]:%u", hv, &hp) != 2 || hp < 1 || hp > 65535) {
+            break;   /* malformed hop: treat the rest as not part of the chain */
+        }
+        snprintf(hops[nhops].host, sizeof(hops[nhops].host), "%s", hv);
+        hops[nhops].port = (uint16_t)hp;
+        nhops++;
+        scan = strstr(h, " VIA ");
+    }
+
+    int upstream;
+    if (nhops == 0) {
+        /* 3a. Direct: connect to the target. */
+        upstream = relay_tcp_connect(host, (uint16_t)port, RELAY_HANDSHAKE_TIMEOUT);
+        if (upstream < 0) {
+            static const char err[] = "ERR UNREACH\r\n";
+            relay_send_all(client, err, sizeof(err) - 1);
+            return;
+        }
+    } else {
+        /* 3b. Chain: connect to the FIRST hop's relay listener. */
+        upstream = relay_tcp_connect(hops[0].host, hops[0].port,
+                                     RELAY_HANDSHAKE_TIMEOUT);
+        if (upstream < 0) {
+            static const char err[] = "ERR UNREACH\r\n";
+            relay_send_all(client, err, sizeof(err) - 1);
+            return;
+        }
+        /* Forward the REMAINING chain; the target stays the original one
+         * (the last hop connects to it). */
+        char fwd[RELAY_HANDSHAKE_MAX];
+        int flen = snprintf(fwd, sizeof(fwd), "RELAY %s %s %u", tok, host, port);
+        for (int i = 1; i < nhops; i++) {
+            int n = snprintf(fwd + flen, sizeof(fwd) - (size_t)flen,
+                             " VIA %s:%u", hops[i].host, hops[i].port);
+            if (n < 0 || (size_t)n >= sizeof(fwd) - (size_t)flen) {
+                flen = -1;   /* chain line too long */
+                break;
+            }
+            flen += n;
+        }
+        if (flen < 0 || (size_t)flen >= sizeof(fwd) - 2) {
+            static const char err[] = "ERR BADREQ\r\n";
+            relay_send_all(client, err, sizeof(err) - 1);
+            close(upstream);
+            return;
+        }
+        snprintf(fwd + flen, sizeof(fwd) - (size_t)flen, "\r\n");
+
+        if (relay_send_all(upstream, fwd, (int)strlen(fwd)) != 0) {
+            static const char err[] = "ERR UNREACH\r\n";
+            relay_send_all(client, err, sizeof(err) - 1);
+            close(upstream);
+            return;
+        }
+        /* Read the next hop's reply and mirror it (OK -> splice; ERR ->
+         * forward the reason verbatim). */
+        char reply[RELAY_HANDSHAKE_MAX];
+        if (relay_recv_line(upstream, reply, sizeof(reply),
+                            RELAY_HANDSHAKE_TIMEOUT) != 0) {
+            static const char err[] = "ERR UNREACH\r\n";
+            relay_send_all(client, err, sizeof(err) - 1);
+            close(upstream);
+            return;
+        }
+        if (strncmp(reply, "OK", 2) != 0) {
+            char rerr[RELAY_HANDSHAKE_MAX + 4];
+            snprintf(rerr, sizeof(rerr), "%s\r\n", reply);
+            relay_send_all(client, rerr, (int)strlen(rerr));
+            close(upstream);
+            return;
+        }
     }
 
     /* 4. Success reply, then splice raw bytes until EOF/timeout. */

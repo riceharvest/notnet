@@ -32,10 +32,14 @@
  *     shared fleet relay_token authenticates both halves, mirroring the
  *     SOCKS5 proxy token pattern.
  *
- * Single-hop only in this version. Multi-hop chains compose by pointing
- * one hop's target at the next relay bot's listener; that wiring is
- * future work. This is explicitly NOT a DHT — there is no peer
- * discovery, no overlay, nothing to crawl or pollute (#88).
+ * Multi-hop chaining is supported on the server side: the handshake line
+ * accepts ` VIA <host>:<port>` hops after the target
+ * (`RELAY <token> <target> <port> VIA <h1>:<p1> VIA <h2>:<p2> ...`). The
+ * entry relay connects to the FIRST hop's relay listener and forwards the
+ * REMAINING chain; the last hop connects to the target. Every hop shares
+ * the fleet relay_token (fail-closed). Bounded to RELAY_MAX_HOPS hops and
+ * RELAY_HANDSHAKE_MAX bytes. This is explicitly NOT a DHT — there is no
+ * peer discovery, no overlay, nothing to crawl or pollute (#88).
  *
  * Security posture (mirrors proxy.c):
  *  - Auth is mandatory and FAIL-CLOSED: relay_start() refuses to bind
