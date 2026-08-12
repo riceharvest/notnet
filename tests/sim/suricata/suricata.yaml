@@ -1,0 +1,30 @@
+# notnet sim — Suricata config (#131). Capture the container's interface
+# (the sim bridge) with AF_PACKET in promiscuous mode; alert to eve.json.
+%YAML 1.1
+---
+
+default-rule-path: /etc/suricata/rules
+rule-files:
+  - notnet.rules
+
+af-packet:
+  - interface: eth0
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    use-mmap: yes
+    tpacket-v3: yes
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      types:
+        - alert:
+            payload: yes
+
+# disable the default ruleset (only the sim rules)
+classification-file: /etc/suricata/classification.config
+reference-config-file: /etc/suricata/reference.config
+threshold-file: /etc/suricata/threshold.config

@@ -1,0 +1,10 @@
+# notnet sim — real network IDS (#131): Suricata with packet capture on
+# the sim bridge (jasonish/suricata base — OISF repo is unreachable from
+# this host, Debian bookworm has no suricata package).
+FROM jasonish/suricata:7.0
+COPY suricata/suricata.yaml /etc/suricata/suricata.yaml
+COPY suricata/notnet.rules /etc/suricata/rules/notnet.rules
+COPY suricata/start.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh \
+    && mkdir -p /var/log/suricata /var/lib/suricata/rules
+ENTRYPOINT ["/usr/local/bin/start.sh"]

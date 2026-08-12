@@ -121,6 +121,17 @@ services:
         ipv4_address: 172.29.0.7
 
   # ── Defence layer ──
+  suricata:
+    build:
+      context: .
+      dockerfile: Dockerfile.suricata
+    image: notnet-sim-suricata
+    container_name: sim-suricata
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW]
+    volumes:
+      - ./evidence:/var/log/suricata:rw
+
   ids-monitor:
     build:
       context: ../..
