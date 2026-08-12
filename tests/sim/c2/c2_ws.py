@@ -45,6 +45,17 @@ def log(line):
         print(f"[{ts}] {line}", flush=True)
 
 
+CHANNEL = "ws"
+
+
+def _for_me(fn):
+    """True if a queued command file is meant for THIS C2 mock (see c2_http)."""
+    for ch in ("http-", "ws-", "irc-"):
+        if fn.startswith(ch):
+            return ch[:-1] == CHANNEL
+    return True
+
+
 def next_command():
     """Pop the oldest queued command file and return its JSON content, or None.
 
@@ -56,6 +67,8 @@ def next_command():
         return None
     for fn in files:
         if not fn.endswith(".json"):
+            continue
+        if not _for_me(fn):
             continue
         src = os.path.join(QUEUE_DIR, fn)
         claimed = src + ".claimed"

