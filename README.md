@@ -362,6 +362,17 @@ The driver exits non-zero on any FAIL row. `.github/workflows/sim.yml`
 runs a c2-drive smoke job on every PR and the full suite nightly, so a
 regressed README claim fails the build.
 
+## Operator console (C2 server)
+
+`c2-server/` is the production C2 (Python, stdlib-only). It implements the
+same wire contract the sim mocks define — HTTP heartbeat/command channel
+(`POST /api/v1/bot`), exfil ingest, payload hosting — plus an SQLite state
+store and an operator console (HTML dashboard + JSON API + `c2ctl` CLI).
+Commands are queued per bot (optional target tag) and served on the next
+heartbeat. Status: HTTP channel implemented and verified end-to-end against
+the real binary (`c2-server/smoke_test.sh`); WebSocket + IRC channels and
+the sim-integration harness are planned. See `c2-server/README.md`.
+
 ## License
 
 MIT

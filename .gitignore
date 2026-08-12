@@ -29,3 +29,7 @@ compile_commands.json
 # Secrets
 .secrets/
 .env
+
+# python
+__pycache__/
+*.pyc
