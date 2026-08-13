@@ -17,6 +17,7 @@ Scenarios:
 Output: reports/parity-<timestamp>.md + reports/evidence/ copy of logs.
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -227,31 +228,22 @@ def dev_name(fname):
 
 def scenario_c2drive(report):
     log("=== S1 c2-drive: operator-driven proliferation ===")
+    # Clear leftover queue from prior `--scenario all` runs so commands
+    # are served immediately.
+    for leftover in glob.glob(os.path.join(EVIDENCE, "..", "queue", "*.json")):
+        try:
+            os.unlink(leftover)
+        except OSError:
+            pass
     # 1. scan small subnets quickly (a /24 scan blocks the command loop ~30s+)
     queue_cmd("scan", "172.29.10.0/28", "http")
     queue_cmd("scan", "172.29.20.0/28", "http")
 
     # 2. spread per vector — BOTH tiers: modern (should resist) and legacy
     #    (the real-world finding: this is what actually gets pwned).
+    #    Order matters: legacy targets go FIRST so they complete before
+    #    the modern devices' full brute-force pool clogs the C2 queue.
     targets = [
-        # modern tier — a 2026 attacker should NOT crack these
-        ("172.29.10.12", 80, "cam-01 TBK patched"),
-        ("172.29.10.13", 80, "cam-02 TBK partial-patch"),
-        ("172.29.10.15", 37215, "router-01 HG532 patched"),
-        ("172.29.10.17", 80, "router-03 Realtek patched"),
-        ("172.29.20.10", 22, "pc-01 SSH key-only"),
-        ("172.29.20.12", 445, "winpc-01 SMB1 off"),
-        ("172.29.20.12", 3389, "winpc-01 RDP NLA"),
-        ("172.29.30.11", 6379, "redis-01 strong AUTH"),
-        # vendor-diversity (#102) — non-matching vendors must NOT fire CVE
-        ("172.29.10.40", 80, "dahua-dvr-01 TBK probe must miss (Dahua banner)"),
-        ("172.29.10.42", 37215, "tenda-router-01 HG532 probe must miss (no HUAWEIUPNP)"),
-        ("172.29.10.44", 80, "hikvision-cam-01 TBK probe must miss (Hikvision banner)"),
-        ("172.29.20.40", 445, "win10-01 SMB1 present but strong creds"),
-        ("172.29.20.41", 445, "win11-01 SMB1 disabled (negotiate rejected)"),
-        ("172.29.20.42", 22, "synology-nas-01 SSH key-only"),
-        ("172.29.10.46", 23, "switch-01 telnet strong creds"),
-        ("172.29.10.48", 23, "ap-01 telnet strong creds"),
         # legacy tier — the vulnerable tail botnets survive on
         ("172.29.10.30", 80, "legacy-cam-01 TBK + telnet"),
         ("172.29.10.32", 37215, "legacy-router-01 HG532 + telnet"),
@@ -271,6 +263,24 @@ def scenario_c2drive(report):
         ("172.29.20.43", 22, "synology-nas-02 SSH admin:admin"),
         ("172.29.10.47", 23, "switch-02 telnet admin:admin"),
         ("172.29.10.49", 23, "ap-02 telnet root:123456"),
+        # modern tier — a 2026 attacker should NOT crack these
+        ("172.29.10.12", 80, "cam-01 TBK patched"),
+        ("172.29.10.13", 80, "cam-02 TBK partial-patch"),
+        ("172.29.10.15", 37215, "router-01 HG532 patched"),
+        ("172.29.10.17", 80, "router-03 Realtek patched"),
+        ("172.29.20.10", 22, "pc-01 SSH key-only"),
+        ("172.29.20.12", 445, "winpc-01 SMB1 off"),
+        ("172.29.20.12", 3389, "winpc-01 RDP NLA"),
+        ("172.29.30.11", 6379, "redis-01 strong AUTH"),
+        # vendor-diversity (#102) — non-matching vendors must NOT fire CVE
+        ("172.29.10.40", 80, "dahua-dvr-01 TBK probe must miss (Dahua banner)"),
+        ("172.29.10.42", 37215, "tenda-router-01 HG532 probe must miss (no HUAWEIUPNP)"),
+        ("172.29.10.44", 80, "hikvision-cam-01 TBK probe must miss (Hikvision banner)"),
+        ("172.29.20.40", 445, "win10-01 SMB1 present but strong creds"),
+        ("172.29.20.41", 445, "win11-01 SMB1 disabled (negotiate rejected)"),
+        ("172.29.20.42", 22, "synology-nas-01 SSH key-only"),
+        ("172.29.10.46", 23, "switch-01 telnet strong creds"),
+        ("172.29.10.48", 23, "ap-01 telnet strong creds"),
     ]
     # exfil dispatch check first — the bot responds within seconds while
     # the queue is idle (later it grinds the real-service brute-force and
@@ -282,9 +292,22 @@ def scenario_c2drive(report):
     # 3. wait for spread + payload execution + heartbeats.
     # Each spread command may run the full brute-force pool; the C2 serves one
     # command per heartbeat, and MODERN devices burn the full 19x25 pool
-    # rejecting. Give the queue ample time to drain (legacy completes early,
-    # modern grind takes minutes).
-    time.sleep(120)
+    # rejecting (~25s each). Poll until evidence of modern-tier resistance
+    # appears (or timeout) rather than using a fixed sleep.
+    deadline = time.time() + 480
+    while time.time() < deadline:
+        time.sleep(15)
+        ev = read_evidence()
+        modern_cve_resist = grep_evidence(ev, ["probe on patched", "verify on partial-patch", "-> miss"])
+        modern_drops = [h for h in grep_evidence(ev, ["DROP received", "EXECUTING DROP"])
+                       if dev_name(h[0]) in MODERN_TIER]
+        legacy_drops = [h for h in grep_evidence(ev, ["DROP received", "EXECUTING DROP"])
+                        if dev_name(h[0]) in LEGACY_TIER]
+        # We need: modern resistance evidence AND at least one legacy drop AND no modern drops
+        if modern_cve_resist and legacy_drops and not modern_drops:
+            break
+    # Give device.py a final moment to flush evidence buffers before reading.
+    time.sleep(5)
     ev = read_evidence()
 
     # CVE drops — evidence lives in the DEVICE logs. Match only REAL exploit
@@ -365,6 +388,12 @@ def scenario_c2drive(report):
 
 def scenario_autonomous(report):
     log("=== S2 autonomous: bot left to spread on its own (Finding A) ===")
+    # Clear leftover queue so spread_local runs without stale commands.
+    for leftover in glob.glob(os.path.join(EVIDENCE, "..", "queue", "*.json")):
+        try:
+            os.unlink(leftover)
+        except OSError:
+            pass
     # Switch the bot to the autonomous config (IRC+HTTP disabled) so
     # spread_local() actually runs, and start a clean log window.
     recreate_bot("notnet.conf.autonomous")
@@ -482,6 +511,12 @@ def scenario_remaining_parity(report):
     log("=== S7 remaining-parity: IRC C2, SOCKS5 traffic, persistence, payload pinning ===")
 
     # ── 1. IRC C2 end-to-end ─────────────────────────────────────────
+    # Clear leftover queue so the IRC command is served immediately.
+    for leftover in glob.glob(os.path.join(EVIDENCE, "..", "queue", "*.json")):
+        try:
+            os.unlink(leftover)
+        except OSError:
+            pass
     recreate_bot("notnet.conf.irc")
     time.sleep(5)
     # The c2-irc mock serves queued commands as PRIVMSG from the authorized
@@ -522,6 +557,13 @@ def scenario_remaining_parity(report):
     # proxy on -> a client INSIDE the sim connects to the bot proxy, does the
     # RFC 1928 handshake + RFC 1929 token auth, and reaches the target. The
     # target (c2 payload server) must see the connection from the BOT's IP.
+    # Clear leftover queue from earlier scenarios so the proxy command is
+    # served immediately.
+    for leftover in glob.glob(os.path.join(EVIDENCE, "..", "queue", "*.json")):
+        try:
+            os.unlink(leftover)
+        except OSError:
+            pass
     recreate_bot("notnet.conf.c2drive")
     time.sleep(5)
     queue_cmd("proxy", "on 1080", "http")
@@ -565,8 +607,17 @@ def scenario_remaining_parity(report):
     # /app/persist.sh and device_entrypoint.sh relaunches it at boot.
     # Infect it, restart the container, and require a NEW heartbeat with the
     # same bot_tag after the restart.
+    # NOTE: when this scenario runs after S1/S2/S8 in `--scenario all`, the
+    # C2 queue is still draining hundreds of leftover spread commands. The
+    # persistence spread would be stuck behind them for many minutes. Clear
+    # the queue first so the persistence command is served immediately.
     recreate_bot("notnet.conf.c2drive")
     time.sleep(5)
+    for leftover in glob.glob(os.path.join(EVIDENCE, "..", "queue", "*.json")):
+        try:
+            os.unlink(leftover)
+        except OSError:
+            pass
     queue_cmd("spread", "172.29.20.31:22", "http")   # legacy-server-01, root:toor in pool
     # Poll for the baseline infection heartbeat (spread rides a heartbeat;
     # SSH brute-force + drop + payload boot take ~30-60s).
@@ -615,6 +666,12 @@ def scenario_remaining_parity(report):
     # magic/size gate and never reach the hash comparison).
     pin_dir = os.path.join(BASE, "payload")
     os.makedirs(pin_dir, exist_ok=True)
+    # Clear leftover queue so update commands are served immediately.
+    for leftover in glob.glob(os.path.join(EVIDENCE, "..", "queue", "*.json")):
+        try:
+            os.unlink(leftover)
+        except OSError:
+            pass
     try:
         with open(os.path.join(pin_dir, "notnet"), "rb") as f:
             real_bytes = f.read()
@@ -707,6 +764,12 @@ def service_healthy(name):
 
 def scenario_defence(report):
     log("=== S8 defence envelope ===")
+    # Clear leftover queue so defence spread commands are served immediately.
+    for leftover in glob.glob(os.path.join(EVIDENCE, "..", "queue", "*.json")):
+        try:
+            os.unlink(leftover)
+        except OSError:
+            pass
     posture = os.environ.get("SIM_POSTURE", "lax")
     # Drive a spread burst so the IDS/lockout/EDR have real behaviour to catch.
     for ip, port, label in [

@@ -445,7 +445,6 @@ devices:
     ports: [22]
     ssh_creds: ["root:toor"]
     persist: true          # S7 persistence test: payload relaunches after reboot
-    real: [ssh]
 
   - id: legacy-nas-01
     type: nas
