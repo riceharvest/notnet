@@ -2,8 +2,10 @@
 # Pure C, cross-platform, multi-architecture
 
 CC ?= gcc
-CFLAGS := -Wall -Wextra -O2 -static
-LDFLAGS := -lpthread
+# Hardening: stack protector, FORTIFY_SOURCE (needs -O1+), RELRO+now at link.
+# TLS builds strip -static (below) but keep the hardening flags.
+CFLAGS := -Wall -Wextra -O2 -static -fstack-protector-strong -D_FORTIFY_SOURCE=2
+LDFLAGS := -lpthread -Wl,-z,relro,-z,now
 
 # TLS support: make TLS=1 to enable OpenSSL
 ifdef TLS
