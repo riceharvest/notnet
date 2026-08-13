@@ -383,6 +383,8 @@ cd tests/sim
 ./run-sim.sh --scenario remaining-parity            # IRC, SOCKS5, persistence, pinning
 ./run-sim.sh --scenario monetization                # proxy + relay
 ./run-sim.sh --scenario defence --posture hardened  # IDS/lockout/EDR + host firewall
+./run-sim.sh --scenario honeytoken                   # deception: honey creds + relay tripwire (#148)
+./run-sim.sh --scenario all --profile credential-hygiene  # named posture catalog (#153)
 ```
 
 Coverage (see `tests/sim/PARITY-MATRIX.md`): CVE modules against legacy

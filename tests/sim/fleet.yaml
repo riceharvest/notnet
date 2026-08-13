@@ -492,3 +492,34 @@ devices:
     segment: dmz
     ip: 172.29.30.60
     ports: [22]
+
+  # ══════════════════════════════════════════════════════════════════
+  # Honeytoken seeds (#148) — real-format decoy creds that no legitimate
+  # admin would ever configure (NOT in the bot's spread.c pool). When the
+  # bot brute-forces and harvests one, the tripwire fires a zero-FP alert.
+  # These services run as normal device.py containers so the bot actually
+  # reaches them and harvests the decoy.
+  # ══════════════════════════════════════════════════════════════════
+  - id: honey-ssh-01
+    type: linux-pc
+    segment: office
+    ip: 172.29.20.80
+    ports: [22]
+    ssh_creds: ["honey-ssh:CANARY-7f3a9b2c"]
+    honeytoken: true
+
+  - id: honey-smb-01
+    type: nas
+    segment: office
+    ip: 172.29.20.81
+    ports: [445]
+    smb_creds: ["HONEY$:CANARY-1d4e8f0a"]
+    honeytoken: true
+
+  - id: honey-redis-01
+    type: redis-auth
+    segment: dmz
+    ip: 172.29.30.80
+    ports: [6379]
+    redis_pass: "CANARY-redis-9c2b6e55"
+    honeytoken: true

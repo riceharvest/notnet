@@ -1,0 +1,15 @@
+{
+  "creds": [
+    {
+      "user": "honey-ssh",
+      "pass": "CANARY-7f3a9b2c",
+      "proto": "linux-pc"
+    },
+    {
+      "user": "HONEY$",
+      "pass": "CANARY-1d4e8f0a",
+      "proto": "nas"
+    }
+  ],
+  "relay_token": "HONEYRELAY-deadbeef00"
+}

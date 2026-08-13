@@ -739,11 +739,46 @@ def copy_evidence():
     return d
 
 
+def scenario_honeytoken(report):
+    """#148 — honeytoken tripwire. Drive the bot at the decoy services so it
+    brute-forces + harvests the honey creds, then assert the tripwire
+    (defence/honeytoken.py -> evidence/honeytoken_alerts.log) fired and that a
+    non-honey cred did NOT."""
+    log("=== S9 honeytoken tripwire ===")
+    # Honey devices (fleet.yaml, honeytoken: true)
+    queue_cmd("spread", "172.29.20.80:22", "http")   # honey-ssh-01
+    queue_cmd("spread", "172.29.20.81:445", "http")  # honey-smb-01
+    queue_cmd("spread", "172.29.30.80:6379", "http") # honey-redis-01
+    # a non-honey legacy device for the false-positive check
+    queue_cmd("spread", "172.29.20.30:22", "http")    # legacy-pc-01 (pi:password)
+
+    time.sleep(60)
+    alert_log = os.path.join(EVIDENCE, "honeytoken_alerts.log")
+    honey_hits = 0
+    fp_hits = 0
+    try:
+        with open(alert_log, errors="replace") as f:
+            for ln in f:
+                if "HONEYTOKEN" in ln:
+                    if "honey-ssh" in ln or "honey" in ln.lower() or "HONEYTOKEN-RELAY" in ln:
+                        honey_hits += 1
+                    if "pi" in ln and "password" in ln:
+                        fp_hits += 1
+    except OSError:
+        pass
+    report.add("Honeytoken alert fires when bot harvests a decoy cred (zero-FP)",
+               "PASS" if honey_hits else "FAIL",
+               f"honey alerts={honey_hits}; " + (open(alert_log).read()[:200] if os.path.exists(alert_log) else "no alert file"))
+    report.add("No false-positive honeytoken alert on a non-honey cred",
+               "PASS" if fp_hits == 0 else "FAIL",
+               f"false-positives={fp_hits}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default="all",
                     choices=["all", "c2-drive", "autonomous", "resilience", "flux",
-                             "monetization", "defence", "remaining-parity"])
+                             "monetization", "defence", "honeytoken", "remaining-parity"])
     ap.add_argument("--posture", default=os.environ.get("SIM_POSTURE", "lax"),
                     choices=["lax", "standard", "hardened"])
     args = ap.parse_args()
@@ -766,6 +801,8 @@ def main():
         scenario_monetization(report)
     if args.scenario in ("defence",):
         scenario_defence(report)
+    if args.scenario in ("honeytoken",):
+        scenario_honeytoken(report)
     if args.scenario in ("all", "remaining-parity"):
         scenario_remaining_parity(report)
 

@@ -12,6 +12,7 @@ C2 with bot_tag=<device-id>, which is how the driver tracks infection.
 """
 import os
 import sys
+import json
 
 try:
     import yaml
@@ -163,9 +164,16 @@ def build_compose(fleet):
 
 def write_confs(fleet):
     os.makedirs(OUT_CONF_DIR, exist_ok=True)
+    honey = {"creds": [], "relay_token": os.environ.get("SIM_HONEY_RELAY_TOKEN", "HONEYRELAY-deadbeef00")}
     for d in fleet["devices"]:
         if d.get("type", "").startswith("honeypot"):
             continue
+        # collect honeytoken seeds (#148): any device carrying a `honeytoken` flag
+        if d.get("honeytoken"):
+            for spec in (d.get("ssh_creds") or d.get("smb_creds") or []):
+                if ":" in spec:
+                    u, p = spec.split(":", 1)
+                    honey["creds"].append({"user": u, "pass": p, "proto": d.get("type")})
         conf = CONF_TPL.format(
             http_server=HTTP_SERVER,
             http_port=HTTP_PORT,
@@ -179,7 +187,13 @@ def write_confs(fleet):
         )
         with open(os.path.join(OUT_CONF_DIR, f"notnet-{d['id']}.conf"), "w") as f:
             f.write(conf)
+    # write the honeytoken set the tripwire (defence/honeytoken.py) consumes
+    honey_path = os.path.join(BASE, "conf", "honeytokens.json")
+    os.makedirs(os.path.dirname(honey_path), exist_ok=True)
+    with open(honey_path, "w") as f:
+        json.dump(honey, f, indent=2)
     print(f"[gen_fleet] wrote {len(fleet['devices'])} device configs to {OUT_CONF_DIR}")
+    print(f"[gen_fleet] honeytokens: {len(honey['creds'])} creds, relay_token={'set' if honey['relay_token'] else 'none'}")
 
 
 def main():

@@ -149,6 +149,26 @@ services:
       simnet:
         ipv4_address: 172.29.0.8
 
+  # ── Honeytoken tripwire (#148) ──
+  honeytoken:
+    build:
+      context: ../..
+      dockerfile: tests/sim/Dockerfile.ids
+    image: notnet-sim-ids
+    container_name: sim-honeytoken
+    command: ["python3", "/app/defence/honeytoken.py"]
+    environment:
+      SIM_EVIDENCE: /evidence
+      HONEY_FILE: /app/conf/honeytokens.json
+      HONEY_ALERT: /evidence/honeytoken_alerts.log
+    volumes:
+      - ./evidence:/evidence:rw
+      - ./conf/honeytokens.json:/app/conf/honeytokens.json:ro
+      - ./defence:/app/defence:ro
+    networks:
+      simnet:
+        ipv4_address: 172.29.0.10
+
   # ── Bot (the attacker's payload) ──
   bot:
     build:
