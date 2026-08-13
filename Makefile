@@ -106,6 +106,16 @@ dist-src:
 	@echo "SHA-256 pin for payload_source_sha256:"
 	@sha256sum dist/notnet-src.tar
 
+# ── Build attestation (#154) ───────────────────────────
+# Record who/what/which-commit produced the binary + its SHA-256 so a leaked
+# artifact is traceable. Signer defaults to NOTNET_BUILD_SIGNER (CI sets this);
+# real *integrity* verification is the signed-disarm problem (#140).
+attest: $(TARGET)
+	python3 attest.py $(TARGET) --signer "$${NOTNET_BUILD_SIGNER:-local}"
+
+# Release artifact: binary + attestation + source bundle.
+release: all attest dist-src
+
 # ── Help ─────────────────────────────────────────────────
 help:
 	@echo "notnet build system"
@@ -115,6 +125,8 @@ help:
 	@echo "  clean        Remove build artifacts"
 	@echo "  dist         Create distribution archive"
 	@echo "  dist-src     Create on-target compilation source bundle + pin"
+	@echo "  attest       Write BUILD-ATTESTATION.json for the built binary (#154)"
+	@echo "  release      all + attest + dist-src (release artifact)"
 	@echo "  help         Show this help"
 	@echo ""
 	@echo "Architecture-specific targets:"
@@ -127,4 +139,4 @@ help:
 	@echo "Cross-compilation requires target toolchains"
 	@echo "Example: make build-x86_64"
 
-.PHONY: all clean dist help
+.PHONY: all clean dist help attest release

@@ -471,3 +471,35 @@ MIT
 > uses a 30-second sleep between scans to avoid aggressive network
 > behavior. It is not intended for unsanctioned deployment on third-party
 > systems.
+
+## Responsible Use & Disclosure (#154)
+
+notnet ships **as a research instrument, not malware for deployment**. Every
+offensive capability in this repo is paired, in the same repository, with the
+means to detect and block it:
+
+- **Detections** — `detections/` ships the standard triad (YARA + Sigma +
+  Suricata) per offensive module, gated by CI (#151) so a rule cannot rot.
+- **Threat intel** — `intel/` publishes a STIX 2.1 / TAXII feed of the C2
+  domains, the killswitch domain (a sinkhole-able IOC), the CVE modules, and
+  the wire-format fingerprints (#152).
+- **ATT&CK matrix** — `detections/ATTACK-COVERAGE.md` maps every technique to
+  its detection and a sim scenario (#147).
+- **Guardrails** — the compile-time DNS killswitch (#130) makes a stock build
+  inert until the author arms it; signed-disarm (#140) makes a leak
+  *recoverable*. Build attestation (`make attest`, `BUILD-ATTESTATION.json`,
+  #154) makes every artifact traceable to who built it.
+
+**Do not** deploy notnet on systems you do not own or are not authorized to
+test. Unsanctioned deployment is unauthorized access and is illegal in most
+jurisdictions.
+
+**Disclosure contact / policy:** see [`SECURITY.md`](SECURITY.md). Report
+detection gaps and intel drift as issues — those are the highest-priority
+findings because they weaken the repo's stated purpose.
+
+**Why the guardrails live here.** A repository that visibly ships detections
+(#146), IOCs (#152), and guardrails is far harder to characterize as
+"operational malware" than one that ships only the bot. The defenses and the
+offense are the same argument to two audiences: defenders (block this) and
+platforms (this is research). Keep them in lockstep.

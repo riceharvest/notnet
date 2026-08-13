@@ -52,3 +52,33 @@ jobs:
         run: |
           python3 intel/build_intel.py
           python3 intel/build_intel.py --check
+
+  guardrails:
+    name: guardrails (#154) — disclosure + attestation presence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: README carries responsible-use/disclosure section
+        run: |
+          grep -q "Responsible Use & Disclosure" README.md \
+            || { echo "README missing Responsible Use & Disclosure section (#154)"; exit 1; }
+          grep -q "SECURITY.md" README.md \
+            || { echo "README does not point at SECURITY.md (#154)"; exit 1; }
+
+      - name: SECURITY.md present with disclosure contact + intended use
+        run: |
+          test -f SECURITY.md || { echo "SECURITY.md missing (#154)"; exit 1; }
+          grep -qi "Responsible disclosure" SECURITY.md \
+            || { echo "SECURITY.md missing disclosure policy"; exit 1; }
+
+      - name: Killswitch is non-default (compile-time only, .invalid default)
+        run: |
+          grep -q 'KILLSWITCH_DOMAIN_DEFAULT   "killswitch.invalid"' include/config.h \
+            || { echo "killswitch default must remain .invalid (non-defaultable, #130/#154)"; exit 1; }
+
+      - name: Build attestation tool present
+        run: |
+          test -f attest.py || { echo "attest.py missing (#154)"; exit 1; }
+          python3 attest.py --help >/dev/null 2>&1 || { echo "attest.py broken"; exit 1; }
