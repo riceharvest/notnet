@@ -709,21 +709,23 @@ def scenario_defence(report):
     log("=== S8 defence envelope ===")
     posture = os.environ.get("SIM_POSTURE", "lax")
     # Drive a spread burst so the IDS/lockout/EDR have real behaviour to catch.
-    # pc-02 has lockout=true (SSH creds in pool → many failures first),
-    # pc-01 + winpc-01 have edr_block=true, fridge-01 triggers brute-burst.
     for ip, port, label in [
-        ("172.29.20.11", 22, "pc-02 SSH lockout (fails 5x -> lockout)"),
-        ("172.29.10.10", 23, "fridge-01 telnet brute (8x -> IDS BRUTE-BURST)"),
-        ("172.29.20.30", 22, "legacy-pc-01 SSH crack -> EDR blocks exec"),
+        ("172.29.20.11", 22, "pc-02 SSH lockout"),
+        ("172.29.10.10", 23, "fridge-01 telnet brute"),
+        ("172.29.20.30", 22, "legacy-pc-01 SSH crack -> EDR blocks"),
         ("172.29.20.10", 22, "pc-01 SSH EDR"),
         ("172.29.20.12", 445, "winpc-01 SMB EDR"),
         ("172.29.10.12", 80, "cam-01 CVE"),
     ]:
         queue_cmd("spread", f"{ip}:{port}", "http")
-    # The bot serves one command per heartbeat; brute-force pools take time.
     time.sleep(200)
     ev = read_evidence()
-    alert_hits = grep_evidence(ev, ["ALERT sig="], files=["ids_alerts.log"])
+    # Suricata (#131) writes eve.json alerts; the log-watcher writes ids_alerts.log.
+    # Both count as IDS alerts — the defence scenario accepts either source.
+    from_suricata = grep_evidence(ev, ["CVE-EXPLOIT", "BRUTE-BURST"],
+                                  files=["eve.json"])
+    from_logwatch = grep_evidence(ev, ["ALERT sig="], files=["ids_alerts.log"])
+    alert_hits = from_suricata + from_logwatch
     if posture == "hardened":
         # In hardened the host firewall's brute-force protection often drops the
         # attacker's connection burst BEFORE it reaches devices, so the IDS (which
