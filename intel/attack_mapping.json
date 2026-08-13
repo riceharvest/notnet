@@ -1,0 +1,73 @@
+{
+  "version": "0.1.0-dev",
+  "generated": "2026-08-13",
+  "techniques": [
+    {
+      "technique": "T1190",
+      "covered_by": [
+        "suricata:cve_2017_17215_hg532",
+        "suricata:cve_2021_35395_realtek",
+        "suricata:cve_2024_3721_tbk"
+      ]
+    },
+    {
+      "technique": "T1110",
+      "covered_by": [
+        "sigma:brute_force_ssh_smb_redis"
+      ]
+    },
+    {
+      "technique": "T1005",
+      "covered_by": [
+        "sigma:exfil_creds",
+        "yara:notnet_cred_log_format"
+      ]
+    },
+    {
+      "technique": "T1020",
+      "covered_by": [
+        "sigma:exfil_creds"
+      ]
+    },
+    {
+      "technique": "T1572",
+      "covered_by": [
+        "suricata:c2_heartbeat_bot_paths",
+        "sigma:proxy_tunnel"
+      ]
+    },
+    {
+      "technique": "T1090",
+      "covered_by": [
+        "suricata:relay_via_chain",
+        "sigma:proxy_tunnel"
+      ]
+    },
+    {
+      "technique": "T1021",
+      "covered_by": [
+        "sigma:admin_share_write",
+        "sigma:redis_config_set_authorized_keys"
+      ]
+    },
+    {
+      "technique": "T1543",
+      "covered_by": [
+        "sigma:persistence_cron_systemd_sysv"
+      ]
+    },
+    {
+      "technique": "T1027",
+      "covered_by": [
+        "yara:notnet_fileless_memfd_fexecve",
+        "sigma:fileless_memfd_fexecve"
+      ]
+    },
+    {
+      "technique": "T1489",
+      "covered_by": [
+        "sigma:self_destruct_killswitch"
+      ]
+    }
+  ]
+}

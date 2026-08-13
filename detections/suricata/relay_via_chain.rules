@@ -1,0 +1,3 @@
+# notnet ORB relay multi-hop VIA chain (src/relay.c, config.h #91, RELAY_DEFAULT_PORT 1081)
+alert tcp any any -> any 1081 (msg:"notnet ORB relay VIA multi-hop chain"; flow:to_server,established; content:"RELAY "; content:" VIA "; reference:url,https://github.com/riceharvest/notnet; classtype:command-and-control; sid:910108; rev:1;)
+alert tcp any any -> any 1081 (msg:"notnet ORB relay token-gated listener open"; flow:to_server,established; content:"RELAY "; reference:url,https://github.com/riceharvest/notnet; classtype:command-and-control; sid:910109; rev:1;)

@@ -1,0 +1,5 @@
+# notnet C2 heartbeat / command channel on /api/v1/bot (HTTP) and /ws/v1/bot (WS)
+# include/config.h:47-55 ; HTTP_USER_AGENT "notnet/"
+alert http any any -> any any (msg:"notnet C2 HTTP heartbeat POST /api/v1/bot"; flow:to_server,established; http.method; content:"POST"; http.uri; content:"/api/v1/bot"; reference:url,https://github.com/riceharvest/notnet; classtype:command-and-control; sid:910000; rev:1;)
+alert http any any -> any any (msg:"notnet C2 WS upgrade /ws/v1/bot"; flow:to_server,established; http.uri; content:"/ws/v1/bot"; reference:url,https://github.com/riceharvest/notnet; classtype:command-and-control; sid:910001; rev:1;)
+alert http any any -> any any (msg:"notnet C2 User-Agent notnet/"; flow:to_server,established; http.header_name; content:"User-Agent"; http.header; content:"notnet/"; reference:url,https://github.com/riceharvest/notnet; classtype:command-and-control; sid:910002; rev:1;)

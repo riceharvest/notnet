@@ -1,0 +1,3 @@
+# notnet CVE-2021-35395 Realtek SDK formSysCmd unauth OS command injection
+# src/spread.c cve_realtek_* ; TOTOLINK Boa
+alert tcp any any -> any 80 (msg:"notnet ET CVE-2021-35395 Realtek SDK formSysCmd injection"; flow:to_server,established; content:"formSysCmd"; nocase; reference:cve,2021-35395; classtype:attempted-admin; sid:912139; rev:1;)

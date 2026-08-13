@@ -1,0 +1,29 @@
+title: notnet Credential Exfiltration (exfil_creds)
+id: 8f0e2d2c-5a64-43cf-a19a-c19cc9a0d7bb
+status: experimental
+description: >
+  notnet streams its harvested credential buffer (proto|ip|port|user|pass) to the
+  C2 via the 'exfil_creds' command, then clears the buffer. Detect the C2 command
+  and the chunked outbound stream.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-08-13
+tags:
+  - attack.collection
+  - attack.t1005
+  - attack.exfiltration
+  - attack.t1020
+logsource:
+  product: notnet
+  service: c2
+detection:
+  selection_cmd:
+    command: 'exfil_creds'
+  selection_net:
+    http.uri|contains: '/api/v1/bot'
+    http.request_body|contains: 'exfil_creds'
+  condition: selection_cmd or selection_net
+falsepositives:
+  - Authorized blue-team emulation of the notnet bot
+level: critical

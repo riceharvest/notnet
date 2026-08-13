@@ -1,0 +1,381 @@
+{
+  "id": "bundle--e8f4b280-cc50-51ab-bc60-0b8bdf97026f",
+  "objects": [
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "notnet",
+          "url": "https://github.com/riceharvest/notnet"
+        }
+      ],
+      "id": "indicator--f1234913-846a-52b2-a91f-667baf96ad0c",
+      "labels": [
+        "malicious-activity"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet C2 domain irc.notnet.net",
+      "pattern": "[domain-name:value = 'irc.notnet.net']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "notnet",
+          "url": "https://github.com/riceharvest/notnet"
+        }
+      ],
+      "id": "indicator--eef58399-43c3-57c6-b1ef-de174fc96f0a",
+      "labels": [
+        "malicious-activity"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet C2 domain api.notnet.net",
+      "pattern": "[domain-name:value = 'api.notnet.net']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "notnet",
+          "url": "https://github.com/riceharvest/notnet"
+        }
+      ],
+      "id": "indicator--8d612dfa-810d-5de5-b4b6-8f994ed0533c",
+      "labels": [
+        "malicious-activity"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet C2 domain ws.notnet.net",
+      "pattern": "[domain-name:value = 'ws.notnet.net']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "notnet",
+          "url": "https://github.com/riceharvest/notnet"
+        }
+      ],
+      "id": "indicator--7d818f67-68ca-549a-908f-27c4048b28c9",
+      "labels": [
+        "malicious-activity"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet C2 domain peers.notnet.net",
+      "pattern": "[domain-name:value = 'peers.notnet.net']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "description": "Defender-sinkholeable author killswitch. Pointing this domain at 127.0.0.1 disarms any STOCK-built leaked fleet (#130).",
+      "external_references": [
+        {
+          "source_name": "notnet #130",
+          "url": "https://github.com/riceharvest/notnet"
+        }
+      ],
+      "id": "indicator--f84ffc78-5a5d-5ffa-b58a-a4a1fac6264d",
+      "labels": [
+        "malicious-activity",
+        "kill-switch"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet killswitch domain killswitch.invalid",
+      "pattern": "[domain-name:value = 'killswitch.invalid']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "CVE-2017-17215",
+          "url": "https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-17215"
+        }
+      ],
+      "id": "indicator--87a62a73-7134-513a-8aaa-bfd0e737821a",
+      "labels": [
+        "malicious-activity",
+        "exploit"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet CVE module CVE-2017-17215",
+      "pattern": "[x-notnet:cve = 'CVE-2017-17215']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "CVE-2021-35395",
+          "url": "https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-35395"
+        }
+      ],
+      "id": "indicator--0fa70b43-4fbf-5d23-9aad-32cc5f370ba0",
+      "labels": [
+        "malicious-activity",
+        "exploit"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet CVE module CVE-2021-35395",
+      "pattern": "[x-notnet:cve = 'CVE-2021-35395']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "CVE-2024-3721",
+          "url": "https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-3721"
+        }
+      ],
+      "id": "indicator--01c9a837-ebc6-5c10-982b-50f8ebd34244",
+      "labels": [
+        "malicious-activity",
+        "exploit"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet CVE module CVE-2024-3721",
+      "pattern": "[x-notnet:cve = 'CVE-2024-3721']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "notnet",
+          "url": "https://github.com/riceharvest/notnet"
+        }
+      ],
+      "id": "indicator--9065b009-e2c6-5705-a1df-b91c1b9ab89e",
+      "labels": [
+        "malicious-activity"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet HTTP C2 path",
+      "pattern": "[url:value matches '.*/api/v1/bot.*']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "notnet",
+          "url": "https://github.com/riceharvest/notnet"
+        }
+      ],
+      "id": "indicator--f5d28631-de59-50f3-b82b-359efa75b40e",
+      "labels": [
+        "malicious-activity"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet WS C2 path",
+      "pattern": "[url:value matches '.*/ws/v1/bot.*']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "source_name": "notnet",
+          "url": "https://github.com/riceharvest/notnet"
+        }
+      ],
+      "id": "indicator--f9b96aa0-a32a-529c-91a2-d82f4f33b2d5",
+      "labels": [
+        "malicious-activity"
+      ],
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "notnet ORB relay VIA chain wire format",
+      "pattern": "[network-traffic:extensions.'notnet-relay'.via MATCHES '.*VIA.*']",
+      "pattern_type": "stix",
+      "spec_version": "2.1",
+      "type": "indicator",
+      "valid_from": "2026-08-13T00:00:00.000Z"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1190",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ],
+      "id": "attack-pattern--1ee933ef-fc7d-5b97-b1f1-f860406189fe",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Exploit Public-Facing Application",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1110",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1110/"
+        }
+      ],
+      "id": "attack-pattern--1cd26f21-ed0d-5f36-8d58-3b13513afbcb",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Brute Force",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1005",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1005/"
+        }
+      ],
+      "id": "attack-pattern--ae0ee416-ec29-5e48-9b62-80c0dde45fe9",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Data from Local System",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1020",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1020/"
+        }
+      ],
+      "id": "attack-pattern--00596532-bb83-5bda-9763-80c65a82de5f",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Automated Exfiltration",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1572",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1572/"
+        }
+      ],
+      "id": "attack-pattern--bcd89466-7542-5cd7-a860-f6349cf20025",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Protocol Tunneling",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1090",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1090/"
+        }
+      ],
+      "id": "attack-pattern--93b0c630-70fe-5979-b2f6-cd1d011e8aaa",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Proxy",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1021",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1021/"
+        }
+      ],
+      "id": "attack-pattern--c8e2c5b8-bca3-5099-9512-06dbdaeaf401",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Remote Services",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1543",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1543/"
+        }
+      ],
+      "id": "attack-pattern--eb0889a2-d1e9-5848-bb84-f43d87de8c7c",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Create or Modify System Process",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1027",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1027/"
+        }
+      ],
+      "id": "attack-pattern--02e84dfc-b56a-51e7-956d-7410987cfde1",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Obfuscated Files or Information",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1489",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1489/"
+        }
+      ],
+      "id": "attack-pattern--d51076c2-2e3c-566d-ae4e-36a87f6bbb5d",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Service Stop",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    }
+  ],
+  "type": "bundle"
+}

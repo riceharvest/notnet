@@ -1,0 +1,24 @@
+title: notnet SMB ADMIN$ Payload Write
+id: 8cac5eaa-9011-42be-971e-937924608835
+status: experimental
+description: >
+  notnet drops its payload to the SMB ADMIN$ share (smb1_write_file in src/spread.c).
+  Detect write/create access to ADMIN$ from a non-admin host.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-08-13
+tags:
+  - attack.lateral_movement
+  - attack.t1021.002
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 5145
+    ShareName|contains: 'ADMIN$'
+  condition: selection
+falsepositives:
+  - Legitimate admin tooling writing to ADMIN$
+level: high

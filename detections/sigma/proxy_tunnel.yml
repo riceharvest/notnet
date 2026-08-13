@@ -1,0 +1,30 @@
+title: notnet SOCKS5 Proxy / ORB Relay Tunnel
+id: 15876eb7-e79c-45f9-845e-89cc0cc41c4f
+status: experimental
+description: >
+  notnet runs a SOCKS5 proxy (port 1080) and an ORB relay (port 1081) for
+  Volt-Typhoon-style traffic forwarding. Detect the token-gated listeners and the
+  ' VIA ' relay chain string on the wire.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-08-13
+tags:
+  - attack.command_and_control
+  - attack.t1572
+  - attack.t1090
+logsource:
+  product: linux
+  service: auditd
+detection:
+  selection_listen:
+    type: 'listen'
+    Port:
+      - 1080
+      - 1081
+  selection_relay:
+    NetworkConnection|contains: ' VIA '
+  condition: selection_listen or selection_relay
+falsepositives:
+  - Other SOCKS proxies / relays on 1080/1081
+level: medium

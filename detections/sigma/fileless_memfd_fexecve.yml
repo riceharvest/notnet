@@ -1,0 +1,27 @@
+title: notnet Fileless Execution via memfd_create + fexecve
+id: f084cbf9-c793-4fc7-b3a3-4612017355f5
+status: experimental
+description: >
+  notnet's RAM-only mode (persist_enabled=0) relaunches from an anonymous
+  memfd_create() file via fexecve(), leaving no on-disk executable. Detect a
+  process whose image path is a memfd and whose parent is the bot.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-08-13
+tags:
+  - attack.defense_evasion
+  - attack.t1027
+  - attack.t1620
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    Image|startswith: '/memfd:'
+  selection_parent:
+    ParentImage|endswith: '.notnet'
+  condition: selection or selection_parent
+falsepositives:
+  - Legitimate in-memory loaders (rare on Linux)
+level: high

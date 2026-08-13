@@ -1,0 +1,26 @@
+title: notnet Self-Destruct / Killswitch (T1489)
+id: fe343a10-7306-4713-8574-364bc91fe60e
+status: experimental
+description: >
+  notnet's 'kill' command wipes state and exits 0; the compile-time DNS killswitch
+  (#130) self-destructs when KILLSWITCH_DOMAIN resolves to 127.0.0.1/0.0.0.0.
+  Detect the C2 kill command and any DNS query to a killswitch domain.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-08-13
+tags:
+  - attack.impact
+  - attack.t1489
+logsource:
+  product: notnet
+  service: c2
+detection:
+  selection_cmd:
+    command: 'kill'
+  selection_ks:
+    dns.query|contains: 'killswitch'
+  condition: selection_cmd or selection_ks
+falsepositives:
+  - Authorized operator kill during a lab exercise
+level: critical

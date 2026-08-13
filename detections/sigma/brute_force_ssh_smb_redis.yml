@@ -1,0 +1,29 @@
+title: notnet SSH/SMB/Redis Credential Brute-Force Burst
+id: 59109a82-00f0-4c67-8f82-55ea8900d08a
+status: experimental
+description: >
+  notnet hammers SSH (22), Telnet (23), SMB (445), Redis (6379) and RDP (3389)
+  from a single source. Detect bursts of auth failures and anonymous Redis
+  CONFIG SET from one host. Split per backend (sshd / windows-security / redis)
+  before production use.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-08-13
+tags:
+  - attack.credential_access
+  - attack.t1110
+  - attack.t1110.001
+logsource:
+  product: linux
+  service: auth
+detection:
+  selection_ssh:
+    message|contains: 'Failed password'
+  selection_redis:
+    message|contains: 'CONFIG SET'
+  condition: selection_ssh or selection_redis
+falsepositives:
+  - Legitimate password-guessing tooling in a lab
+  - Penetration testing
+level: high

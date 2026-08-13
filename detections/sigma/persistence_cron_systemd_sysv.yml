@@ -1,0 +1,30 @@
+title: notnet Persistence Install (cron / systemd / SysV)
+id: 56cd2aee-4ad5-4ae0-9832-96cef94c1bf8
+status: experimental
+description: >
+  notnet detects the init system and installs a systemd unit, cron job, or SysV
+  init script (PERSIST_BIN_NAME ".notnet", include/config.h:81). Detect the
+  .notnet binary or drops into the standard persistence paths.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-08-13
+tags:
+  - attack.persistence
+  - attack.t1543
+  - attack.t1053
+logsource:
+  product: linux
+  service: auditd
+detection:
+  selection_bin:
+    Image|endswith: '.notnet'
+  selection_unit:
+    TargetFilename|contains:
+      - '/etc/systemd/system/'
+      - '/etc/init.d/'
+      - '/etc/cron'
+  condition: selection_bin or selection_unit
+falsepositives:
+  - A legitimately named binary ending in .notnet (unlikely)
+level: high

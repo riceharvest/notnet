@@ -1,0 +1,26 @@
+title: notnet Redis CONFIG SET dir + authorized_keys Injection
+id: 40c7ebaa-a490-4e3a-90ad-2b902e16db26
+status: experimental
+description: >
+  notnet's Redis vector runs CONFIG SET dir + CONFIG SET dbfilename then writes an
+  SSH authorized_keys blob. Detect the CONFIG SET dir to a .ssh path.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-08-13
+tags:
+  - attack.persistence
+  - attack.t1505
+  - attack.t1190
+logsource:
+  product: linux
+  service: redis
+detection:
+  selection:
+    command|contains: 'CONFIG SET dir'
+  selection_key:
+    command|contains: 'authorized_keys'
+  condition: selection and selection_key
+falsepositives:
+  - Legitimate Redis persistence tuning (rare on a .ssh path)
+level: high
