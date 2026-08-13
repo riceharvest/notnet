@@ -290,8 +290,8 @@ int plugin_fetch_remote(notnet_bot_t *bot, const char *name,
         log_warn("PLUGIN: fetch refused — bad plugin name");
         return -1;
     }
-    if (!url || strncmp(url, "http://", 7) != 0) {
-        log_warn("PLUGIN: fetch refused — url must be http://");
+    if (!url || (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)) {
+        log_warn("PLUGIN: fetch refused — url must be http:// or https://");
         return -1;
     }
     if (!valid_sha256(sha256_pin)) {
@@ -311,7 +311,8 @@ int plugin_fetch_remote(notnet_bot_t *bot, const char *name,
     char path[512];
     remote_path(name, path, sizeof(path));
 
-    /* 1. Download (streamed; http_download rejects https and non-2xx).
+    /* 1. Download (streamed; http_download handles http:// and https://,
+     * the latter upgrading to TLS when pinned). Rejects non-2xx.
      * Returns the body length on success (> 0), -1 on failure. */
     int dlrc = http_download(bot, url, path);
     if (dlrc < 0) {

