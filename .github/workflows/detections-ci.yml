@@ -1,0 +1,54 @@
+name: detections
+
+# Mirrors .github/workflows/sim.yml but gates the DEFENSIVE artifacts
+# (detections/ + intel/), the other half of the project. A Sigma/Suricata/YARA
+# rule can rot and no build used to fail; now it does. See issue #151.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  validate:
+    name: detection-as-code — schema + drift + replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate detections (schema, source-drift, replay)
+        run: |
+          python3 detections/validate.py --strict
+
+      - name: Fail on silent no-rule
+        if: always()
+        run: |
+          test -n "$(ls detections/sigma/*.yml detections/suricata/*.rules detections/yara/*.yar 2>/dev/null)" \
+            || { echo "no detection rules present"; exit 1; }
+
+  stix:
+    name: STIX 2.1 intel — schema + drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Optional stix2 schema validation
+        run: pip install --quiet stix2 || true
+
+      - name: Build + assert intel bundle matches source (no drift)
+        run: |
+          python3 intel/build_intel.py
+          python3 intel/build_intel.py --check
