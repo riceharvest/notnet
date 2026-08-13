@@ -90,6 +90,12 @@ typedef struct {
 int cve_run_modules(notnet_bot_t *bot, const char *ip, uint16_t port);
 int cve_module_count(void);
 const cve_module_t *cve_module_at(int idx);
+int cve_module_enable(const char *id);
+int cve_module_disable(const char *id);
+int lotl_run_cycle(notnet_bot_t *bot);
+
+/* #143: render CVE registry status for the C2 `cve list` command. */
+void cve_registry_status(char *buf, size_t len);
 
 /* ── Service Helpers ────────────────────────────────────────── */
 /* Timeout-aware login variants are the LIVE paths (the non-timeout

