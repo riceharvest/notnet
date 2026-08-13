@@ -228,9 +228,10 @@ static void proxy_handle_client(int client) {
         return;
     }
     int ok = proxy_const_cmp(pass, plen, g_proxy_token);
-    unsigned char arep[2] = { 0x01, ok ? 0x01 : 0x00 };
+    /* RFC 1929: VER=1, STATUS=0 (success) or 1 (failure). */
+    unsigned char arep[2] = { 0x01, ok ? 0x00 : 0x01 };
     if (proxy_send_all(client, arep, 2) != 0) return;
-    if (ok) return;                             /* auth failed: close */
+    if (!ok) return;                            /* auth failed: close */
 
     /* 3. CONNECT request: VER CMD RSV ATYP */
     if (proxy_recv_all(client, buf, 4, PROXY_HANDSHAKE_TIMEOUT) != 0) return;
