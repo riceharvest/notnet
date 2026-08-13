@@ -169,6 +169,73 @@ services:
       simnet:
         ipv4_address: 172.29.0.10
 
+  # ── T-Pot-style honeypot tier (#149) ──
+  # Cowrie (SSH/Telnet) is defined in docker-compose.fleet.yml (honeypot-ssh-01 /
+  # honeypot-telnet-01). Here we add Dionaea for SMB (catches the bot's
+  # smb1_write_file path, src/spread.c), plus the ELK stack + Filebeat that
+  # give the captured TTPs one pane and feed them back into the Sigma/YARA
+  # rules (detections/) and the ATT&CK matrix (#147).
+  dionaea:
+    image: honeynet/dionaea:latest
+    container_name: sim-dionaea
+    environment:
+      DIONAEA_LOG: /opt/dionaea/var/log
+    volumes:
+      - ./evidence/dionaea:/opt/dionaea/var/log:rw
+    networks:
+      simnet:
+        ipv4_address: 172.29.30.70
+    ports:
+      - "445:445"   # SMB — catches the bot's ADMIN$ drop
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: sim-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    networks:
+      simnet:
+        ipv4_address: 172.29.0.11
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.4
+    container_name: sim-kibana
+    environment:
+      ELASTICSEARCH_HOSTS: http://172.29.0.11:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      simnet:
+        ipv4_address: 172.29.0.12
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.13.4
+    container_name: sim-filebeat
+    user: root
+    command: ["filebeat", "-e", "-c", "/etc/filebeat.yml"]
+    volumes:
+      - ./defence/filebeat.yml:/etc/filebeat.yml:ro
+      - ./evidence:/evidence:rw
+      - ./evidence/dionaea:/opt/dionaea/var/log:rw
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      simnet:
+        ipv4_address: 172.29.0.13
+
   # ── Bot (the attacker's payload) ──
   bot:
     build:
@@ -198,3 +265,6 @@ networks:
     ipam:
       config:
         - subnet: 172.29.0.0/16
+
+volumes:
+  es-data:

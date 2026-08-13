@@ -1,0 +1,53 @@
+# Filebeat — forwards notnet sim honeypot logs into Elasticsearch (#149).
+# Cowrie (SSH/Telnet) and Dionaea (SMB) TTPs land in ./evidence; Filebeat tails
+# them so the captured behaviour gets ONE pane (Kibana) and can be fed back into
+# the Sigma/YARA rules (detections/) and the ATT&CK matrix (#147).
+filebeat.inputs:
+  - type: filestream
+    id: cowrie-json
+    enabled: true
+    paths:
+      - /evidence/cowrie.json
+    fields:
+      sim_source: cowrie
+      sim_attack: ssh_telnet
+    fields_under_root: false
+
+  - type: filestream
+    id: cowrie-log
+    enabled: true
+    paths:
+      - /evidence/cowrie.log
+    fields:
+      sim_source: cowrie
+      sim_attack: ssh_telnet
+
+  - type: filestream
+    id: dionaea
+    enabled: true
+    paths:
+      - /opt/dionaea/var/log/dionaea*.log
+    fields:
+      sim_source: dionaea
+      sim_attack: smb
+
+  - type: filestream
+    id: ids-alerts
+    enabled: true
+    paths:
+      - /evidence/ids_alerts.log
+      - /evidence/honeytoken_alerts.log
+    fields:
+      sim_source: sim-detection
+      sim_attack: detection
+
+output.elasticsearch:
+  hosts: ["http://172.29.0.11:9200"]
+  index: "notnet-sim-%{+yyyy.MM.dd}"
+
+setup.template:
+  name: "notnet-sim"
+  pattern: "notnet-sim-*"
+
+# Light tag so a Kibana analyst can pivot on "this is the notnet sim feed".
+tags: ["notnet-sim"]

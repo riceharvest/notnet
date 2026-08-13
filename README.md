@@ -384,6 +384,7 @@ cd tests/sim
 ./run-sim.sh --scenario monetization                # proxy + relay
 ./run-sim.sh --scenario defence --posture hardened  # IDS/lockout/EDR + host firewall
 ./run-sim.sh --scenario honeytoken                   # deception: honey creds + relay tripwire (#148)
+./run-sim.sh --scenario honeypot-tier                # T-Pot tier: Cowrie + Dionaea + ELK (#149)
 ./run-sim.sh --scenario all --profile credential-hygiene  # named posture catalog (#153)
 ```
 
