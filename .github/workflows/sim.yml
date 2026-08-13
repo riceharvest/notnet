@@ -66,6 +66,19 @@ jobs:
           test -n "$(ls tests/sim/reports/parity-*.md 2>/dev/null | head -1)" \
             || { echo "no parity report produced — run-sim.sh failed early"; exit 1; }
 
+  dist-src:
+    name: dist-src completeness + compile gate (#138 / #133)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Verify dist-src bundle is complete and on-target-compilable
+        run: ./c2-server/verify_dist_src.sh
+
   tls:
     name: TLS build + smoke (TLS=1, pinned cert)
     runs-on: ubuntu-latest
