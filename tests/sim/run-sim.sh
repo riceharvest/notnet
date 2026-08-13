@@ -1,23 +1,46 @@
 #!/usr/bin/env bash
 # notnet sim runner — up -> driver -> down
-# Usage: ./tests/sim/run-sim.sh [--scenario all|c2-drive|autonomous|resilience|monetization|defence|remaining-parity] [--posture lax|standard|hardened] [--keep]
+# Usage: ./tests/sim/run-sim.sh [--scenario all|c2-drive|autonomous|resilience|monetization|defence|remaining-parity] [--posture lax|standard|hardened] [--profile <name>] [--keep]
+#   --profile <name>  (#153) expands a named defensive profile to its posture:
+#       legacy-unpatched  -> posture lax     (legacy tier: default creds, unpatched CVEs)
+#       patched-firmware   -> posture standard (modern tier: CVEs patched, SMB1 off)
+#       edr-on            -> posture hardened  (modern tier + Wazuh/Sysmon/osquery, #150)
+#       credential-hygiene -> posture standard (modern tier: key-only SSH, no default creds)
+#       segmented         -> posture hardened  (legacy tier isolated from office/dmz)
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
 SCENARIO="all"
 POSTURE="lax"
+PROFILE=""
 KEEP=0
 C2_MODE="mock"
 while [ $# -gt 0 ]; do
   case "$1" in
     --scenario) SCENARIO="${2:-all}"; shift 2 ;;
     --posture) POSTURE="${2:-lax}"; shift 2 ;;
+    --profile) PROFILE="${2:-}"; shift 2 ;;
     --c2) C2_MODE="${2:-real}"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     *) shift ;;
   esac
 done
+
+# Expand a named profile (#153) to its posture. The mapping mirrors
+# defence/posture.yaml `profiles:`. Keep the two in sync.
+if [ -n "$PROFILE" ]; then
+  case "$PROFILE" in
+    legacy-unpatched)  POSTURE="lax" ;;
+    patched-firmware)  POSTURE="standard" ;;
+    edr-on)            POSTURE="hardened" ;;
+    credential-hygiene) POSTURE="standard" ;;
+    segmented)         POSTURE="hardened" ;;
+    *) echo "ERROR: unknown --profile '$PROFILE' (see defence/posture.yaml)"; exit 1 ;;
+  esac
+  echo "PROFILE: $PROFILE -> posture=$POSTURE"
+  export SIM_PROFILE="$PROFILE"
+fi
 
 export SIM_POSTURE="$POSTURE"
 export SUDO_PW="${SUDO_PW:-}"

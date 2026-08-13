@@ -1,5 +1,6 @@
 # notnet sim — defence posture knobs
 # Selected by run_sim.py --posture lax|standard|hardened
+# or by the named profile catalog (run_sim.py --profile <name>, #153).
 lax:
   lockout: false
   ids_block: false
@@ -23,3 +24,35 @@ hardened:
   segmentation: true
   scan_threshold: 20
   brute_threshold: 8
+
+# ── Named defensive-profile catalog (#153) ───────────────────────────────
+# Each profile is a DETERMINISTIC combination of device tier + network posture
+# + host controls. Run with `./run-sim.sh --profile <name>`; the driver expands
+# the name to the (device_tier, posture) pair below and asserts the coverage
+# expectation in detections/POSTURE-COVERAGE.md.
+#
+#   name               device_tier   posture     meaning
+#   legacy-unpatched   legacy        lax         today's `legacy` tier: default creds, unpatched CVEs, telnet on
+#   patched-firmware    modern        standard    CVEs patched, SMB1 off, sits behind segmentation
+#   edr-on            modern        hardened     Sysmon/osquery + Wazuh present (#150) — host layer catches fileless/LOTL
+#   credential-hygiene modern        standard    no default creds, key-based SSH only — zeroes SSH/Telnet brute rows
+#   segmented         legacy        hardened     IoT network isolated from office/dmz (the `hardened` router policy)
+profiles:
+  legacy-unpatched:
+    device_tier: legacy
+    posture: lax
+  patched-firmware:
+    device_tier: modern
+    posture: standard
+  edr-on:
+    device_tier: modern
+    posture: hardened
+    host_telemetry: wazuh+sysmon+osquery
+  credential-hygiene:
+    device_tier: modern
+    posture: standard
+    no_default_creds: true
+    ssh_key_only: true
+  segmented:
+    device_tier: legacy
+    posture: hardened
