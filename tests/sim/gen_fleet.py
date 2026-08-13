@@ -112,7 +112,10 @@ def build_compose(fleet):
                 "networks": {"simnet": {"ipv4_address": d["ip"]}},
                 "expose": [f"{host_port}/tcp"],
                 "volumes": [
-                    f"./evidence:/cowrie/log:rw",
+                    # Cowrie writes its jsonlog to var/log/cowrie inside its git
+                    # tree (not /cowrie/log); mount that exact path so the bot's
+                    # genuine honeypot sessions land in the shared evidence dir.
+                    "./evidence:/cowrie/cowrie-git/var/log/cowrie:rw",
                     "./cowrie/cowrie.cfg:/cowrie/cowrie.cfg:ro",
                 ],
                 "environment": {

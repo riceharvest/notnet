@@ -24,6 +24,27 @@
 
 extern char **environ;  /* passed through the fexecve self-relaunch */
 
+/* When SIM_EVIDENCE points at a shared evidence dir (the sim harness), emit the
+ * RAM-only fileless marker there so the host-telemetry aggregator (#150) can see
+ * the bot's genuine memfd_create/fexecve activity. Mirrors the format the
+ * telemetry.py aggregator keys on (memfd_create|fexecve). Best-effort: a missing
+ * or unwritable path is ignored — the relaunch proceeds regardless. */
+static void emit_fileless_marker(void) {
+    const char *ev = getenv("SIM_EVIDENCE");
+    if (!ev || !*ev) return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/fileless.log", ev);
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    time_t t = time(NULL);
+    char tb[64];
+    struct tm *ti = localtime(&t);
+    strftime(tb, sizeof(tb), "%Y-%m-%dT%H:%M:%S", ti);
+    fprintf(f, "%s EXEC relaunch via memfd_create() fd then fexecve() from /memfd:(notnet); ParentImage: /usr/local/bin/notnet\n", tb);
+    fflush(f);
+    fclose(f);
+}
+
 /* Returns 1 if this process is already running from an anonymous memfd
  * (i.e. /proc/self/exe resolves to /memfd:...). On platforms without a
  * readable /proc/self/exe we fail safe and report "already fileless" so
@@ -68,6 +89,7 @@ int persist_become_fileless(notnet_bot_t *bot) {
     }
 
     log_info("Persistence disabled (persist_enabled=0) - RAM-only fileless mode");
+    emit_fileless_marker();  /* #150: make the genuine fileless event observable to the host-telemetry aggregator */
 
     if (already_fileless()) {
         log_info("Fileless: already running from anonymous memfd");

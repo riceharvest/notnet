@@ -282,6 +282,11 @@ services:
     command: ["notnet"]
     volumes:
       - ./conf/${SIM_BOT_CONF:-notnet.conf.c2drive}:/etc/notnet.conf:ro
+      # Shared evidence dir so the bot's RAM-only fileless marker (persist.c
+      # emit_fileless_marker, #150) lands where the Wazuh aggregator watches it.
+      - ./evidence:/evidence:rw
+    environment:
+      SIM_EVIDENCE: /evidence
     networks:
       simnet:
         ipv4_address: 172.29.0.9

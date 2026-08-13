@@ -325,6 +325,11 @@ def scenario_c2drive(report):
                f"legacy={len(cred_on_legacy)} modern={len(cred_on_modern)}; " +
                "; ".join(h[1][:70] for h in cred_on_legacy[:3]))
 
+    # infection propagation: heartbeat tags beyond the attacker bot. Compute
+    # before any report.add that references `infected` (below + its detail).
+    tags = unique_tags(ev)
+    infected = tags - {"sim-attacker-1"}
+
     # payload execution (drop actually ran)
     drop_hits = grep_evidence(ev, ["EXECUTING DROP", "DROP received", "DROP spawned"])
     report.add("Payload drop executed on victims (legacy tier)",
@@ -333,8 +338,6 @@ def scenario_c2drive(report):
                (f"real-device infection: {sorted(infected)[:5]}" if infected else "no drop evidence"))
 
     # infection propagation: heartbeat tags beyond the attacker bot
-    tags = unique_tags(ev)
-    infected = tags - {"sim-attacker-1"}
     report.add("Infected devices join C2 with own bot_tag (propagation)",
                "PASS" if infected else "FAIL",
                f"tags={sorted(infected)[:12]}" if infected else "no infected tags",
@@ -804,30 +807,33 @@ def scenario_telemetry(report):
     fileless / LOTL path (memfd_create -> fexecve, RAM-only mode) and assert the
     host-telemetry layer (defence/telemetry.py -> Wazuh) raises the Sigma hit
     (detections/sigma/fileless_memfd_fexecve.yml) WHILE Suricata (network) stays
-    silent — proving the host layer adds coverage the wire lacks."""
+    silent — proving the host layer adds coverage the wire lacks.
+
+    Genuine end-to-end (no seed): the bot's config_set persist_enabled=0 handler
+    calls persist_become_fileless(), which relaunches via memfd_create/fexecve and
+    — when SIM_EVIDENCE is set — emits /evidence/fileless.log (emit_fileless_marker,
+    persist.c). The Wazuh aggregator tails that log and emits Sysmon Event ID 1 /
+    osquery on_disk=0 equivalent JSON. So a real bot action drives the whole chain."""
     log("=== S11 host telemetry (fileless/LOTL) ===")
     # Drive a fileless infection: the bot relaunches via memfd_create+fexecve.
-    # pc-02 has edr_block=true; the Windows/Linux PCs are the telemetry sources.
     queue_cmd("spread", "172.29.20.11:22", "http")   # pc-02 (linux-pc, edr_block)
     queue_cmd("spread", "172.29.20.12:445", "http")  # winpc-01 (windows-pc, edr_block)
     queue_cmd("config_set", "persist_enabled=0", "http")
 
-    # The bot's RAM-only fileless mode emits a memfd_create/fexecve marker in its
-    # evidence when it relaunches in-memory. To prove the host-telemetry pipeline
-    # end-to-end (aggregator -> Wazuh -> Sigma) we seed that exact marker into a
-    # host evidence log in the real bot format; the telemetry aggregator tails it
-    # and emits the Sysmon Event ID 1 / osquery on_disk=0 equivalents. (This mirrors
-    # the detection validator's seeded-evidence replay: it verifies the pipeline,
-    # not a luck-based bot crash.) Seeded into a dedicated dario-owned file because
-    # the device containers write root-owned *.log that the host driver can't append to.
-    seed = os.path.join(EVIDENCE, "host_telemetry_seed.log")
+    # The bot (sim-bot, with /evidence mounted + SIM_EVIDENCE=/evidence) writes
+    # /evidence/fileless.log when it enters RAM-only mode. No host seed — this is
+    # the bot's own genuine output. Give it time to connect, parse, and relaunch.
+    time.sleep(60)
+    fileless_log = os.path.join(EVIDENCE, "fileless.log")
+    bot_emitted = 0
     try:
-        with open(seed, "a") as f:
-            f.write(f"{datetime.now(timezone.utc).isoformat()} EXEC relaunch via memfd_create() fd then fexecve() from /memfd:(notnet); ParentImage: /usr/bin/.notnet\n")
+        with open(fileless_log, errors="replace") as f:
+            for ln in f:
+                if "memfd_create" in ln and "fexecve" in ln:
+                    bot_emitted += 1
     except OSError:
         pass
-
-    time.sleep(45)
+    # The telemetry aggregator tails fileless.log and emits sysmon/osquery JSON.
     tel_log = os.path.join(EVIDENCE, "telemetry_wazuh.log")
     host_hit = 0
     try:
@@ -841,9 +847,9 @@ def scenario_telemetry(report):
         pass
     # The network IDS (Suricata) has no file/on-disk signal for memfd exec, so it
     # stays silent — that is the whole point of the host layer.
-    report.add("Host telemetry (Wazuh) raises fileless/LOTL Sigma hit (memfd/fexecve)",
+    report.add("Host telemetry (Wazuh) raises fileless/LOTL Sigma hit (memfd/fexecve) from genuine bot event",
                "PASS" if host_hit else "SKIP",
-               f"host telemetry events={host_hit}; "
+               f"bot fileless markers={bot_emitted}; host telemetry events={host_hit}; "
                + (open(tel_log).read()[:200] if os.path.exists(tel_log) else "no telemetry log"))
     report.add("Network IDS (Suricata) is blind to fileless exec (expected: host-only gap)",
                "PASS" if True else "FAIL",
@@ -854,41 +860,45 @@ def scenario_honeypot_tier(report):
     """#149 — T-Pot-style honeypot tier. Drive the bot at the honeypots (Cowrie
     SSH/Telnet + Dionaea SMB) so the capture lands in the evidence dir (and, with
     the full stack up, in ELK via Filebeat). Assert the capture files are
-    written and map to the Sigma/YARA matrix."""
+    written and map to the Sigma/YARA matrix.
+
+    Genuine end-to-end (no seed): the bot's spreader connects to honeypot-ssh-01
+    (172.29.30.60:22) and honeypot-telnet-01 (172.29.10.60:23) for real; Cowrie
+    writes /evidence/cowrie.json on the host (cowrie.cfg -> /evidence, mounted rw).
+    We assert a real session/connect event with a non-loopback src_ip — not a
+    driver-written artifact."""
     log("=== S10 honeypot tier (Cowrie + Dionaea + ELK/Filebeat) ===")
-    # Cowrie SSH/Telnet (honeypot-ssh-01 / honeypot-telnet-01)
-    queue_cmd("spread", "172.29.30.60:22", "http")   # honeypot-ssh-01
-    queue_cmd("spread", "172.29.10.60:23", "http")   # honeypot-telnet-01
+    # Cowrie listens on its native ports 2222 (SSH) / 2223 (Telnet) inside the
+    # simnet (the cowrie/cowrie image binds 2222/2223; remapping to 22/23 is not
+    # supported without root, which Cowrie refuses). The bot's spreader hits those
+    # real listening ports on the honeypot IPs — a genuine connection + capture.
+    queue_cmd("spread", "172.29.30.60:2222", "http")   # honeypot-ssh-01 (ssh)
+    queue_cmd("spread", "172.29.10.60:2223", "http")   # honeypot-telnet-01 (telnet)
     # Dionaea SMB (catches smb1_write_file) on 172.29.30.70:445
     queue_cmd("spread", "172.29.30.70:445", "http")
     # Relay a hit through the honeypot tier to exercise the VIA capture too
-    queue_cmd("relay", "172.29.30.60 22", "http")
+    queue_cmd("relay", "172.29.30.60 2222", "http")
 
     time.sleep(60)
     cowrie_json = os.path.join(EVIDENCE, "cowrie.json")
     cowrie_log = os.path.join(EVIDENCE, "cowrie.log")
     dionaea_dir = os.path.join(EVIDENCE, "dionaea")
-    # Cowrie may not capture a full TTP in the window (the bot's SSH/Telnet creds
-    # aren't in its pool, so it logs attempts but rarely a full session). To prove
-    # the capture->Filebeat->ELK pipeline end-to-end we seed one representative
-    # Cowrie JSON line in Cowrie's real format; Filebeat tails it (defence/
-    # filebeat.yml) and ships it to the notnet-sim-* index. This verifies the
-    # feedback loop (#149) without a luck-based full bot session.
-    cowrie_seed = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "eventid": "cowrie.session.connect",
-        "src_ip": "172.29.0.9",
-        "dst_ip": "172.29.30.60",
-        "dst_port": 22,
-        "protocol": "ssh",
-        "message": "New connection: ssh (honeypot-ssh-01) from bot 172.29.0.9",
-    }
+    # Genuine Cowrie capture: a real connection event from the bot (src_ip on the
+    # simnet bot subnet 172.29.0.x), not a driver seed.
+    cowrie_hit = 0
     try:
-        with open(cowrie_json, "a") as f:
-            f.write(json.dumps(cowrie_seed) + "\n")
+        with open(cowrie_json, errors="replace") as f:
+            for ln in f:
+                try:
+                    rec = json.loads(ln)
+                except Exception:
+                    continue
+                if rec.get("eventid") in ("cowrie.session.connect", "cowrie.login.failed",
+                                          "cowrie.command.input") and \
+                   str(rec.get("src_ip", "")).startswith("172.29"):
+                    cowrie_hit += 1
     except OSError:
         pass
-    cowrie_hit = os.path.exists(cowrie_json) and os.path.getsize(cowrie_json) > 0
     dionaea_hit = os.path.isdir(dionaea_dir) and any(
         os.path.getsize(os.path.join(dionaea_dir, f)) > 0
         for f in os.listdir(dionaea_dir) if os.path.isfile(os.path.join(dionaea_dir, f))
@@ -896,9 +906,9 @@ def scenario_honeypot_tier(report):
     # Filebeat must be up + the ELK index reachable for the capture to land in one
     # pane. We assert the Filebeat service is healthy (it tails cowrie.json).
     fb_healthy = service_healthy("sim-filebeat")
-    report.add("Cowrie captured the bot's SSH/Telnet TTPs (cowrie.json non-empty)",
+    report.add("Cowrie captured the bot's SSH/Telnet TTPs (genuine cowrie.json session from bot src_ip)",
                "PASS" if cowrie_hit else "SKIP",
-               f"cowrie.json exists={os.path.exists(cowrie_json)}")
+               f"genuine cowrie events={cowrie_hit}; cowrie.json exists={os.path.exists(cowrie_json)}")
     report.add("Dionaea captured the bot's SMB drop attempt (smb1_write_file)",
                "PASS" if dionaea_hit else "SKIP",
                f"dionaea logs present={dionaea_hit}")

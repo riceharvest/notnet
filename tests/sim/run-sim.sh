@@ -77,7 +77,10 @@ docker build -f Dockerfile.device -t notnet-sim-device ../.. 2>&1 | tail -2
 echo "[2/6] Generating fleet + payload..."
 python3 gen_fleet.py
 mkdir -p payload evidence queue cowrie reports
-# payload: real binary + source bundle (for compile-fallback test)
+# Cowrie runs as a non-root uid (999) and writes its jsonlog to /evidence; the
+# host bind-mounted dir is owned by the invoking user, so open it up so the
+# honeypot containers can write their capture there.
+chmod 777 evidence 2>/dev/null || true
 cp ../../notnet payload/notnet 2>/dev/null || echo "WARN: no notnet binary at repo root (run make)"
 if [ -f ../../dist/notnet-src.tar ]; then
   cp ../../dist/notnet-src.tar payload/notnet-src.tar
