@@ -9,7 +9,12 @@ serves the real fleet and the sim fleet.
     python3 c2-server/c2.py \
       --secret <c2_secret> \
       --http-port 8080 --payload-port 8443 --console-port 8090 \
+      --console-token <operator_token> --console-bind 127.0.0.1 \
       --queue-dir queue --payload-dir payload --db c2.db
+
+# --console-token adds Bearer auth to the console API + dashboard (c2ctl
+# reads it from NOTNET_C2_TOKEN). Omit it only for a local loopback lab;
+# --console-bind 0.0.0.0 without a token is refused at startup (#136).
 
 Listeners:
 
@@ -63,12 +68,23 @@ payload is `kill` — it is one-way and the bot exits before re-polling.
 
 ### Exposure warning
 
-All listeners bind `0.0.0.0` and the console API has NO authentication.
-Anyone who can reach port `8090` can POST
-`{"cmd":"kill","broadcast":true}` to `/api/queue` and kill the whole fleet,
-or read `/api/creds` (harvested credentials) and `/api/exfil`. Firewall the
-console and C2 ports, or bind the console to loopback, for anything beyond
-a lab run.
+All C2 listeners (HTTP/WS/IRC/payload) bind `0.0.0.0`. The **operator
+console** (`8090`) now has auth + bind control (#136):
+
+- Default: console binds **loopback only** (`127.0.0.1`) and is
+  unauthenticated — fine for a local lab run, but do not expose it.
+- Set `--console-token <tok>` (or `NOTNET_C2_CONSOLE_TOKEN`): every
+  `/api/*` call and the dashboard require `Authorization: Bearer <tok>`
+  (or a `?token=<tok>` query param, used by `c2ctl` and the form). With a
+  token you may also pass `--console-bind 0.0.0.0` to expose it remotely.
+- Binding the console to `0.0.0.0` **without** a token is refused at
+  startup (exit 2) — the server will not expose an unauthenticated
+  console.
+
+`c2ctl` reads the token from `NOTNET_C2_TOKEN` (and sends it as
+`Authorization: Bearer` / `?token=`).
+
+Firewall the C2 + console ports for anything beyond a lab run.
 
 ## Verification
 

@@ -782,8 +782,39 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _check_auth(self):
+        """Return (ok, body) for console auth.
+
+        If no console token is configured the console is unauthenticated
+        but MUST be bound to loopback (enforced in main()); this keeps the
+        historical lab behaviour while closing the open-0.0.0.0-no-auth
+        exposure (#136). When a token is set, every GET/POST must carry it
+        via `Authorization: Bearer <token>` or a `?token=<token>` param
+        (the latter so the HTML dashboard + c2ctl can authenticate without
+        a custom header)."""
+        tok = self.c2.console_token
+        if not tok:
+            return True, None
+        # Bearer header
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer ") and auth[len("Bearer "):] == tok:
+            return True, None
+        # ?token= param (dashboard form + c2ctl)
+        q = self.path.split("?", 1)
+        if len(q) == 2:
+            from urllib.parse import parse_qs
+            params = parse_qs(q[1])
+            if params.get("token", [""])[0] == tok:
+                return True, None
+        return False, None
+
     def do_GET(self):
         c2 = self.c2
+        ok, _ = self._check_auth()
+        if not ok:
+            self._send(json.dumps({"error": "unauthorized"}),
+                       "application/json", 401)
+            return
         path = self.path.split("?", 1)[0]
         if path == "/api/bots":
             rows = c2.state.bots()
@@ -814,6 +845,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         c2 = self.c2
+        ok, _ = self._check_auth()
+        if not ok:
+            self._send(json.dumps({"error": "unauthorized"}),
+                       "application/json", 401)
+            return
         path = self.path.split("?", 1)[0]
         if path == "/api/queue":
             n = int(self.headers.get("Content-Length") or 0)
@@ -903,22 +939,29 @@ setInterval(refresh,3000);refresh();
 </script></body></html>"""
 
 
-def serve_console(c2, port):
-    srv = ThreadingHTTPServer(("0.0.0.0", port), ConsoleHandler)
+def serve_console(c2, port, bind="127.0.0.1"):
+    srv = ThreadingHTTPServer((bind, port), ConsoleHandler)
     srv.c2 = c2
-    log(f"LISTEN console on 0.0.0.0:{port} (dashboard + /api)")
+    log(f"LISTEN console on {bind}:{port} "
+        + ("(token-auth)" if c2.console_token else "(loopback-only, no token)"))
     srv.serve_forever()
 
 
 # ─────────────────────────── entrypoint ───────────────────────────
 
 class C2:
-    def __init__(self, secret, http_path, queue_dir, payload_dir, state_path):
+    def __init__(self, secret, http_path, queue_dir, payload_dir, state_path,
+                 console_token=""):
         self.secret = secret
         self.http_path = http_path
         self.queue_dir = queue_dir
         self.payload_dir = payload_dir
         self.state = State(state_path)
+        # Console auth token (set via --console-token / NOTNET_C2_CONSOLE_TOKEN).
+        # When empty the console is unauthenticated and MUST be bound to
+        # loopback (enforced in main(), #136). When set, all /api/* and the
+        # dashboard require it.
+        self.console_token = console_token
         # Sim-integration mode (run_sim.py against the real C2):
         #  SIM_EVIDENCE  — write mock-format evidence lines to this file so
         #                  the sim driver's grep-based checks see them
@@ -978,14 +1021,31 @@ def main():
     ap.add_argument("--irc-port", type=int, default=int(os.environ.get("SIM_IRC_PORT", DEFAULT_IRC)))
     ap.add_argument("--irc-nick", default=os.environ.get("SIM_IRC_NICK", "mockirc"))
     ap.add_argument("--irc-channel", default=os.environ.get("SIM_IRC_CHANNEL", "#notnet"))
+    ap.add_argument("--console-token",
+                    default=os.environ.get("NOTNET_C2_CONSOLE_TOKEN", ""),
+                    help="Bearer token for the operator console API + dashboard. "
+                         "If unset, the console MUST bind loopback (see --console-bind).")
+    ap.add_argument("--console-bind", default="127.0.0.1",
+                    help="Bind address for the operator console (default 127.0.0.1). "
+                         "Use 0.0.0.0 ONLY with --console-token set; otherwise we "
+                         "refuse to expose an unauthenticated console (#136).")
     args = ap.parse_args()
 
-    c2 = C2(args.secret, args.http_path, args.queue_dir, args.payload_dir, args.db)
+    # #136: never expose an unauthenticated console on a non-loopback bind.
+    if args.console_bind != "127.0.0.1" and not args.console_token:
+        log("REFUSING to bind unauthenticated console on "
+            f"{args.console_bind} (set --console-token or use 127.0.0.1). #136")
+        sys.exit(2)
+
+    c2 = C2(args.secret, args.http_path, args.queue_dir, args.payload_dir, args.db,
+            console_token=args.console_token)
 
     threads = [
         threading.Thread(target=serve_http, args=(c2, args.http_port), daemon=True),
         threading.Thread(target=serve_http, args=(c2, args.payload_port), daemon=True),
-        threading.Thread(target=serve_console, args=(c2, args.console_port), daemon=True),
+        threading.Thread(target=serve_console,
+                         args=(c2, args.console_port, args.console_bind),
+                         daemon=True),
         threading.Thread(target=serve_ws, args=(c2, args.ws_port), daemon=True),
         threading.Thread(target=serve_irc,
                          args=(c2, args.irc_port, args.irc_nick, args.irc_channel),
