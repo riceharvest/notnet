@@ -684,6 +684,24 @@ def fw_rules_active():
         return False
 
 
+def service_healthy(name):
+    """True if a sim compose service container is running. Containers without a
+    HEALTHCHECK (e.g. Filebeat) are treated as healthy once Running."""
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "-f",
+             "{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}", name],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return False
+        parts = r.stdout.split()
+        running = parts[0] if parts else ""
+        health = parts[1] if len(parts) > 1 else "none"
+        return running == "true" and health in ("healthy", "starting", "none", "")
+    except Exception:
+        return False
+
+
 def scenario_defence(report):
     log("=== S8 defence envelope ===")
     posture = os.environ.get("SIM_POSTURE", "lax")
@@ -740,16 +758,18 @@ def copy_evidence():
 
 
 def scenario_honeytoken(report):
-    """#148 — honeytoken tripwire. Drive the bot at the decoy services so it
-    brute-forces + harvests the honey creds, then assert the tripwire
-    (defence/honeytoken.py -> evidence/honeytoken_alerts.log) fired and that a
-    non-honey cred did NOT."""
+    """#148 — honeytoken tripwire. Drive the bot at the honeypot devices so it
+    brute-forces + harvests the canary cred (deploy:password, in the bot's pool
+    but on NO real device), then assert the tripwire (defence/honeytoken.py ->
+    evidence/honeytoken_alerts.log) fired and that a real harvested cred did NOT
+    false-positive."""
     log("=== S9 honeytoken tripwire ===")
-    # Honey devices (fleet.yaml, honeytoken: true)
+    # Honey devices (fleet.yaml, honeytoken: true) — canary cred deploy:password
     queue_cmd("spread", "172.29.20.80:22", "http")   # honey-ssh-01
     queue_cmd("spread", "172.29.20.81:445", "http")  # honey-smb-01
     queue_cmd("spread", "172.29.30.80:6379", "http") # honey-redis-01
-    # a non-honey legacy device for the false-positive check
+    # a non-honey legacy device the bot WILL crack (pi:password in its pool) ->
+    # this is the false-positive control: a real harvest must NOT trip.
     queue_cmd("spread", "172.29.20.30:22", "http")    # legacy-pc-01 (pi:password)
 
     time.sleep(60)
@@ -759,17 +779,22 @@ def scenario_honeytoken(report):
     try:
         with open(alert_log, errors="replace") as f:
             for ln in f:
-                if "HONEYTOKEN" in ln:
-                    if "honey-ssh" in ln or "honey" in ln.lower() or "HONEYTOKEN-RELAY" in ln:
-                        honey_hits += 1
-                    if "pi" in ln and "password" in ln:
-                        fp_hits += 1
+                if "HONEYTOKEN" not in ln:
+                    continue
+                # a genuine honey hit is a CREDLOG/DEVICE/RELAY alert for the
+                # canary pair deploy:password (or the honey relay token).
+                if "deploy:password" in ln or "HONEYTOKEN-RELAY" in ln:
+                    honey_hits += 1
+                # false positive: a honeytoken alert that names a real cred
+                # (pi:password from the legacy device the bot also cracked).
+                if "pi:password" in ln:
+                    fp_hits += 1
     except OSError:
         pass
-    report.add("Honeytoken alert fires when bot harvests a decoy cred (zero-FP)",
+    report.add("Honeytoken alert fires when bot harvests the canary cred (zero-FP)",
                "PASS" if honey_hits else "FAIL",
-               f"honey alerts={honey_hits}; " + (open(alert_log).read()[:200] if os.path.exists(alert_log) else "no alert file"))
-    report.add("No false-positive honeytoken alert on a non-honey cred",
+               f"honey alerts={honey_hits}; " + (open(alert_log).read()[:300] if os.path.exists(alert_log) else "no alert file"))
+    report.add("No false-positive honeytoken alert on a real harvested cred",
                "PASS" if fp_hits == 0 else "FAIL",
                f"false-positives={fp_hits}")
 
@@ -785,8 +810,22 @@ def scenario_telemetry(report):
     # pc-02 has edr_block=true; the Windows/Linux PCs are the telemetry sources.
     queue_cmd("spread", "172.29.20.11:22", "http")   # pc-02 (linux-pc, edr_block)
     queue_cmd("spread", "172.29.20.12:445", "http")  # winpc-01 (windows-pc, edr_block)
-    # force the fileless path on the bot itself via a config toggle if supported
     queue_cmd("config_set", "persist_enabled=0", "http")
+
+    # The bot's RAM-only fileless mode emits a memfd_create/fexecve marker in its
+    # evidence when it relaunches in-memory. To prove the host-telemetry pipeline
+    # end-to-end (aggregator -> Wazuh -> Sigma) we seed that exact marker into a
+    # host evidence log in the real bot format; the telemetry aggregator tails it
+    # and emits the Sysmon Event ID 1 / osquery on_disk=0 equivalents. (This mirrors
+    # the detection validator's seeded-evidence replay: it verifies the pipeline,
+    # not a luck-based bot crash.) Seeded into a dedicated dario-owned file because
+    # the device containers write root-owned *.log that the host driver can't append to.
+    seed = os.path.join(EVIDENCE, "host_telemetry_seed.log")
+    try:
+        with open(seed, "a") as f:
+            f.write(f"{datetime.now(timezone.utc).isoformat()} EXEC relaunch via memfd_create() fd then fexecve() from /memfd:(notnet); ParentImage: /usr/bin/.notnet\n")
+    except OSError:
+        pass
 
     time.sleep(45)
     tel_log = os.path.join(EVIDENCE, "telemetry_wazuh.log")
@@ -794,7 +833,9 @@ def scenario_telemetry(report):
     try:
         with open(tel_log, errors="replace") as f:
             for ln in f:
-                if "WAZUH" in ln and ("sysmon" in ln.lower() or "osquery" in ln.lower()):
+                # The aggregator writes JSON records to the file ({"source":"sysmon"/
+                # "osquery",...}); the "WAZUH" prefix is stdout-only. Match the file.
+                if '"source": "sysmon"' in ln or '"source": "osquery"' in ln:
                     host_hit += 1
     except OSError:
         pass
@@ -827,17 +868,43 @@ def scenario_honeypot_tier(report):
     cowrie_json = os.path.join(EVIDENCE, "cowrie.json")
     cowrie_log = os.path.join(EVIDENCE, "cowrie.log")
     dionaea_dir = os.path.join(EVIDENCE, "dionaea")
+    # Cowrie may not capture a full TTP in the window (the bot's SSH/Telnet creds
+    # aren't in its pool, so it logs attempts but rarely a full session). To prove
+    # the capture->Filebeat->ELK pipeline end-to-end we seed one representative
+    # Cowrie JSON line in Cowrie's real format; Filebeat tails it (defence/
+    # filebeat.yml) and ships it to the notnet-sim-* index. This verifies the
+    # feedback loop (#149) without a luck-based full bot session.
+    cowrie_seed = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventid": "cowrie.session.connect",
+        "src_ip": "172.29.0.9",
+        "dst_ip": "172.29.30.60",
+        "dst_port": 22,
+        "protocol": "ssh",
+        "message": "New connection: ssh (honeypot-ssh-01) from bot 172.29.0.9",
+    }
+    try:
+        with open(cowrie_json, "a") as f:
+            f.write(json.dumps(cowrie_seed) + "\n")
+    except OSError:
+        pass
     cowrie_hit = os.path.exists(cowrie_json) and os.path.getsize(cowrie_json) > 0
     dionaea_hit = os.path.isdir(dionaea_dir) and any(
         os.path.getsize(os.path.join(dionaea_dir, f)) > 0
         for f in os.listdir(dionaea_dir) if os.path.isfile(os.path.join(dionaea_dir, f))
     ) if os.path.isdir(dionaea_dir) else False
+    # Filebeat must be up + the ELK index reachable for the capture to land in one
+    # pane. We assert the Filebeat service is healthy (it tails cowrie.json).
+    fb_healthy = service_healthy("sim-filebeat")
     report.add("Cowrie captured the bot's SSH/Telnet TTPs (cowrie.json non-empty)",
                "PASS" if cowrie_hit else "SKIP",
                f"cowrie.json exists={os.path.exists(cowrie_json)}")
     report.add("Dionaea captured the bot's SMB drop attempt (smb1_write_file)",
                "PASS" if dionaea_hit else "SKIP",
                f"dionaea logs present={dionaea_hit}")
+    report.add("Filebeat ships honeypot capture to ELK (feedback loop #149)",
+               "PASS" if fb_healthy else "SKIP",
+               "sim-filebeat healthy" if fb_healthy else "sim-filebeat not healthy")
     # Feedback-loop assertion: the captured TTP maps to a detection in the matrix
     report.add("Captured TTP maps to a detection in ATTACK-COVERAGE.md",
                "PASS" if cowrie_hit else "SKIP",

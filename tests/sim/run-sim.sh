@@ -45,6 +45,15 @@ fi
 export SIM_POSTURE="$POSTURE"
 export SUDO_PW="${SUDO_PW:-}"
 
+# The driver (run_sim.py) runs on the HOST (step 5), not in a container, so it
+# must point at the host-side evidence/queue/reports dirs — not /evidence (which
+# only exists inside the sim containers that bind-mount ./evidence). Without this,
+# EVIDENCE falls back to /evidence, the seed writes in scenario_telemetry silently
+# fail, and the honeytoken/telemetry assertions can't see host-written artifacts.
+export SIM_EVIDENCE="$PWD/evidence"
+export SIM_QUEUE_DIR="$PWD/queue"
+export SIM_REPORTS="$PWD/reports"
+
 # --c2 real merges docker-compose.realc2.yml so the fleet talks to the real
 # c2-server instead of the Python mocks (same hostnames/IPs).
 C2_OVERRIDE=""

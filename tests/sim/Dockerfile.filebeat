@@ -1,0 +1,9 @@
+# Filebeat image for the notnet sim (#149). The stock Filebeat refuses to start
+# if its config is not owned by root; a host bind-mount of defence/filebeat.yml
+# carries the host user's uid, so we COPY it into the image as root instead.
+# Build context is the repo root (docker compose context: ../..), so the config
+# lives at tests/sim/defence/filebeat.yml.
+FROM docker.elastic.co/beats/filebeat:8.13.4
+COPY tests/sim/defence/filebeat.yml /usr/share/filebeat/filebeat.yml
+# Filebeat's entrypoint runs as root and the copied file is root-owned, satisfying
+# the config-ownership check. We point -c at this copied file.

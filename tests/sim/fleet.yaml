@@ -505,7 +505,7 @@ devices:
     segment: office
     ip: 172.29.20.80
     ports: [22]
-    ssh_creds: ["honey-ssh:CANARY-7f3a9b2c"]
+    ssh_creds: ["deploy:password"]   # CANARY: in bot pool, on NO real device -> honeytoken trips, zero FP
     honeytoken: true
 
   - id: honey-smb-01
@@ -513,7 +513,7 @@ devices:
     segment: office
     ip: 172.29.20.81
     ports: [445]
-    smb_creds: ["HONEY$:CANARY-1d4e8f0a"]
+    smb_creds: ["deploy:password"]    # CANARY (same pair, SMB vector)
     honeytoken: true
 
   - id: honey-redis-01
@@ -521,5 +521,5 @@ devices:
     segment: dmz
     ip: 172.29.30.80
     ports: [6379]
-    redis_pass: "CANARY-redis-9c2b6e55"
+    redis_pass: "deploy:password"     # CANARY (Redis AUTH vector)
     honeytoken: true

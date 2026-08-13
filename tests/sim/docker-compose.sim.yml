@@ -176,17 +176,25 @@ services:
   # give the captured TTPs one pane and feed them back into the Sigma/YARA
   # rules (detections/) and the ATT&CK matrix (#147).
   dionaea:
-    image: honeynet/dionaea:latest
+    # The upstream honeynet/dionaea image is no longer publicly pullable; this is
+    # a self-contained SMB trap (defence/dionaea_trap.py) that captures the bot's
+    # smb1_write_file drop path (src/spread.c haslist) and writes a Dionaea-style
+    # log to ./evidence/dionaea/ where Filebeat picks it up. #149
+    build:
+      context: ../..
+      dockerfile: tests/sim/Dockerfile.ids
+    image: notnet-sim-ids
     container_name: sim-dionaea
+    command: ["python3", "/app/defence/dionaea_trap.py"]
     environment:
-      DIONAEA_LOG: /opt/dionaea/var/log
+      DIONAEA_PORT: "445"
+      SIM_EVIDENCE: /evidence
     volumes:
-      - ./evidence/dionaea:/opt/dionaea/var/log:rw
+      - ./evidence:/evidence:rw
+      - ./defence:/app/defence:ro
     networks:
       simnet:
         ipv4_address: 172.29.30.70
-    ports:
-      - "445:445"   # SMB — catches the bot's ADMIN$ drop
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
@@ -221,12 +229,17 @@ services:
         ipv4_address: 172.29.0.12
 
   filebeat:
-    image: docker.elastic.co/beats/filebeat:8.13.4
+    # Config is baked into the image as root (Dockerfile.filebeat) because the
+    # stock Filebeat refuses a non-root-owned config file; a bind-mount would
+    # carry the host user's uid and fail the ownership check. #149
+    build:
+      context: ../..
+      dockerfile: tests/sim/Dockerfile.filebeat
+    image: notnet-sim-filebeat
     container_name: sim-filebeat
     user: root
-    command: ["filebeat", "-e", "-c", "/etc/filebeat.yml"]
+    command: ["filebeat", "-e", "-c", "/usr/share/filebeat/filebeat.yml"]
     volumes:
-      - ./defence/filebeat.yml:/etc/filebeat.yml:ro
       - ./evidence:/evidence:rw
       - ./evidence/dionaea:/opt/dionaea/var/log:rw
     depends_on:

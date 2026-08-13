@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """notnet honeytoken tripwire (#148).
 
-Deception layer for credential-driven attacks. Reads the seeded honey-cred set
-and the honey relay token (both written by gen_fleet.py into
-tests/sim/conf/honeytokens.json), then tails the sim evidence directory for the
-bot's harvested credential buffer (format `proto|ip|port|user|pass`) and the relay
-command log. The moment a HONEY cred lands in a cred-log line — or a HONEY relay
-token is used — it fires a deterministic, zero-false-positive Canarytoken-style
+Deception layer for credential-driven attacks. The moment a SEEDED honey cred
+lands in the bot's harvested credential buffer — or a honey relay token appears
+in the relay VIA path — this watcher fires a zero-false-positive Canarytoken-style
 alert.
 
-Why zero-FP: the honey set is real-format creds (e.g. user `honey-ssh`, password
-`CANARY-...`) that no legitimate admin would ever configure, and the honey relay
-token is a value never issued to the operator. Any hit is by definition a bot
-touching a decoy, not a real login.
+What it watches (all real bot/sim evidence formats):
+  1. evidence/cred_exfil.log  — the bot's drained cred-log buffer, one line per
+     harvested credential in the exact shape src/spread.c spread_cred_record()
+     writes:  proto|ip|port|user|pass   (README §Credential log).
+  2. evidence/<device>.log     — victim device witness logs: "SSH <ip> AUTH OK
+     user:pass" / "SMB <ip> AUTH OK account=user" when the bot cracks a device.
+  3. relay VIA path            — any log line containing the honey relay token
+     (a relay node the defender seeded; the bot's RELAY ... VIA ... wire format).
 
-Usage (run inside the sim, as a watcher like ids_monitor.py):
+Why zero-FP: the honey set is real-format creds (e.g. user `deploy`, password
+`password`) that exist ONLY on the honeypot devices and are NOT present on any
+real fleet device, so a legitimate crack of a real device can never match.
+
+Run (as a sim service, beside ids-monitor):
     python3 defence/honeytoken.py
 Env:
-    SIM_EVIDENCE   evidence dir (default /evidence)
+    SIM_EVIDENCE   bot evidence dir (default /evidence)
     HONEY_FILE     honeytoken set (default tests/sim/conf/honeytokens.json)
     HONEY_ALERT    alert output (default /evidence/honeytoken_alerts.log)
 """
@@ -29,87 +34,116 @@ from datetime import datetime, timezone
 
 EVIDENCE = os.environ.get("SIM_EVIDENCE", "/evidence")
 HONEY_FILE = os.environ.get("HONEY_FILE",
-                            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                         "conf", "honeytokens.json"))
+                  os.path.join(os.path.dirname(__file__), "..", "conf", "honeytokens.json"))
 ALERT_FILE = os.environ.get("HONEY_ALERT", os.path.join(EVIDENCE, "honeytoken_alerts.log"))
 
-# cred-log line: proto|ip|port|user|pass   (README §Credential log)
-CRED_RE = re.compile(r"^(?P<proto>\w+)\|(?P<ip>[0-9.]+)\|(?P<port>\d+)\|(?P<user>[^|]*)\|(?P<pass>.*)$")
+# cred-log buffer line: proto|ip|port|user|pass   (README §Credential log)
+CRED_RE = re.compile(r"^(?P<proto>[^|]+)\|(?P<ip>[^|]+)\|(?P<port>[^|]+)\|(?P<user>[^|]+)\|(?P<pass>[^|]+)\s*$")
+# device witness: "SSH <ip> AUTH OK user:pass"  /  "SMB <ip> AUTH OK account=user"
+AUTHOK_RE = re.compile(r"AUTH OK\s+(?P<user>[^\s:]+):?(?P<pass>[^\s:]*)")
 
 honey = {"creds": set(), "relay_token": None}
 
 
 def load_honey():
-    if not os.path.exists(HONEY_FILE):
+    try:
+        with open(HONEY_FILE) as f:
+            d = json.load(f)
+    except OSError:
         return
-    with open(HONEY_FILE, encoding="utf-8") as f:
-        data = json.load(f)
-    for c in data.get("creds", []):
-        # store lowercased user|pass for matching
-        honey["creds"].add(f"{c['user'].lower()}|{c['pass']}")
-    honey["relay_token"] = data.get("relay_token")
-
-
-def now():
-    return datetime.now(timezone.utc).isoformat()
+    for c in d.get("creds", []):
+        honey["creds"].add((c["user"], c["pass"]))
+    honey["relay_token"] = d.get("relay_token")
 
 
 def alert(kind, detail):
     os.makedirs(os.path.dirname(ALERT_FILE) or ".", exist_ok=True)
-    line = f"{now()} HONEYTOKEN-{kind} {detail}"
+    line = f"{datetime.now(timezone.utc).isoformat()} HONEYTOKEN {kind}: {detail}"
     with open(ALERT_FILE, "a") as f:
         f.write(line + "\n")
     print(line, flush=True)
 
 
-def process_line(fn, line):
-    line = line.strip()
-    if not line:
-        return
-    # cred-log match
-    m = CRED_RE.match(line)
-    if m and honey["creds"]:
-        key = f"{m.group('user').lower()}|{m.group('pass')}"
-        if key in honey["creds"]:
-            alert("CRED", f"honey cred harvested proto={m.group('proto')} "
-                           f"src={m.group('ip')}:{m.group('port')} "
-                           f"user={m.group('user')} (zero-FP decoy hit)")
-            return
-    # relay honey token match
-    if honey["relay_token"] and honey["relay_token"] in line:
-        alert("RELAY", f"honey relay token traversed VIA chain: {line[:120]}")
+def is_honey(user, password):
+    return (user, password) in honey["creds"]
+
+
+def scan_cred_buffer(path):
+    """Watch the bot's drained cred-log buffer (proto|ip|port|user|pass)."""
+    fired = 0
+    try:
+        with open(path, errors="replace") as f:
+            for ln in f:
+                m = CRED_RE.match(ln.strip())
+                if not m:
+                    continue
+                if is_honey(m.group("user"), m.group("pass")):
+                    alert("CREDLOG", f"{ln.strip()}")
+                    fired += 1
+    except OSError:
+        pass
+    return fired
+
+
+def scan_device_logs():
+    """Watch victim device AUTH OK witness lines for a honey cred."""
+    fired = 0
+    if not os.path.isdir(EVIDENCE):
+        return 0
+    for fn in os.listdir(EVIDENCE):
+        if not fn.endswith(".log") or fn == os.path.basename(ALERT_FILE):
+            continue
+        if fn in ("ids_alerts.log", "honeytoken_alerts.log", "cred_exfil.log",
+                  "telemetry_wazuh.log", "host_firewall.log"):
+            continue
+        try:
+            with open(os.path.join(EVIDENCE, fn), errors="replace") as f:
+                for ln in f:
+                    if "AUTH OK" not in ln:
+                        continue
+                    m = AUTHOK_RE.search(ln)
+                    if m and is_honey(m.group("user"), m.group("pass")):
+                        alert("DEVICE", f"{fn}: {ln.strip()[:160]}")
+                        fired += 1
+        except OSError:
+            pass
+    return fired
+
+
+def scan_relay_token():
+    fired = 0
+    if not honey["relay_token"] or not os.path.isdir(EVIDENCE):
+        return 0
+    tok = honey["relay_token"]
+    for fn in os.listdir(EVIDENCE):
+        if not fn.endswith(".log"):
+            continue
+        try:
+            with open(os.path.join(EVIDENCE, fn), errors="replace") as f:
+                for ln in f:
+                    if tok in ln:
+                        alert("RELAY", f"{fn}: honey relay token seen in VIA path")
+                        fired += 1
+        except OSError:
+            pass
+    return fired
 
 
 def main():
     load_honey()
     open(ALERT_FILE, "a").close()
-    print(f"{now()} honeytoken up: honey_creds={len(honey['creds'])} "
-          f"relay_token={'set' if honey['relay_token'] else 'none'} "
-          f"dir={EVIDENCE}")
-    if not honey["creds"] and not honey["relay_token"]:
-        print("WARNING: no honey tokens configured (gen_fleet.py did not seed any)")
+    print(f"{datetime.now(timezone.utc).isoformat()} honeytoken up: "
+          f"{len(honey['creds'])} creds, relay_token={'set' if honey['relay_token'] else 'none'}")
+    cred_log = os.path.join(EVIDENCE, "cred_exfil.log")
     positions = {}
+    last_relay = 0
     while True:
-        for fname in os.listdir(EVIDENCE) if os.path.isdir(EVIDENCE) else []:
-            if not fname.endswith(".log"):
-                continue
-            if fname == os.path.basename(ALERT_FILE):
-                continue
-            path = os.path.join(EVIDENCE, fname)
-            try:
-                sz = os.path.getsize(path)
-            except OSError:
-                continue
-            pos = positions.get(path, 0)
-            if sz < pos:
-                pos = 0
-            if sz == pos:
-                continue
-            with open(path, "r", errors="replace") as f:
-                f.seek(pos)
-                for ln in f:
-                    process_line(fname, ln)
-                positions[path] = f.tell()
+        scan_cred_buffer(cred_log)
+        scan_device_logs()
+        # relay token scan is cheap but poll it less often
+        if time.time() - last_relay > 2:
+            scan_relay_token()
+            last_relay = time.time()
         time.sleep(1)
 
 

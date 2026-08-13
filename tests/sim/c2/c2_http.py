@@ -192,6 +192,16 @@ def handle_request(method, path, body, addr, port_label, conn):
         text = body.decode("utf-8", errors="replace")
         with lock:
             stats["exfil_chunks"] += 1
+        # Persist the bot's drained credential buffer (proto|ip|port|user|pass
+        # lines, src/spread.c spread_cred_record) so the honeytoken tripwire
+        # (#148) and the SOC can inspect what the bot harvested. This is the
+        # cred-log buffer #148 ties the honeytoken to.
+        cred_log = os.path.join(os.path.dirname(EVIDENCE), "cred_exfil.log")
+        try:
+            with open(cred_log, "a") as f:
+                f.write(text)
+        except OSError:
+            pass
         log(f"{port_label} EXFIL chunk from {addr[0]} len={len(body)} body={text[:200]}")
         send_response(conn, json.dumps({"status": "ok", "secret": C2_SECRET}))
     elif method == "GET" and path.rstrip("/") == "/bot/notnet":

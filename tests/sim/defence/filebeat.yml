@@ -26,7 +26,7 @@ filebeat.inputs:
     id: dionaea
     enabled: true
     paths:
-      - /opt/dionaea/var/log/dionaea*.log
+      - /evidence/dionaea/dionaea.json
     fields:
       sim_source: dionaea
       sim_attack: smb
