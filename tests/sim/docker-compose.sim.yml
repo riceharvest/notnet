@@ -236,6 +236,29 @@ services:
       simnet:
         ipv4_address: 172.29.0.13
 
+  # ── Host telemetry pipeline (#150) ──
+  # Wazuh + Sysmon (Windows PCs) + osquery (Linux PCs). Catches fileless/LOTL
+  # (memfd_create -> fexecve) that Suricata (network) cannot see. The lightweight
+  # aggregator tails bot evidence for the fileless markers and emits the
+  # Sysmon Event ID 1 / osquery on_disk=0 equivalents, then the Wazuh side asserts
+  # detections/sigma/fileless_memfd_fexecve.yml fires while network IDS stays silent.
+  wazuh:
+    build:
+      context: ../..
+      dockerfile: tests/sim/Dockerfile.ids
+    image: notnet-sim-ids
+    container_name: sim-wazuh
+    command: ["python3", "/app/defence/telemetry.py"]
+    environment:
+      SIM_EVIDENCE: /evidence
+      TELEMETRY_FILE: /evidence/telemetry_wazuh.log
+    volumes:
+      - ./evidence:/evidence:rw
+      - ./defence:/app/defence:ro
+    networks:
+      simnet:
+        ipv4_address: 172.29.0.14
+
   # ── Bot (the attacker's payload) ──
   bot:
     build:
