@@ -336,14 +336,18 @@ def scenario_c2drive(report):
                f"cross-vendor drops={len(other_drops)}; " +
                "; ".join(h[1][:70] for h in other_cve_log[:3]) or "no CVE traffic on Dahua/Tenda/Hikvision")
 
-    # brute-force cred harvest — legacy should crack, modern must not
+    # brute-force cred harvest — legacy should crack, modern must not.
+    # CVE exploitation runs BEFORE brute-force (#83), so a legacy device
+    # that gets CVE-exploited may never reach brute-force. Accept CVE
+    # drops on legacy as equivalent evidence of pwnage.
     cred_hits = grep_evidence(ev, ["AUTH OK", "cracked", "Accepted password for"])
     cred_on_modern = [h for h in cred_hits if dev_name(h[0]) in MODERN_TIER]
     cred_on_legacy = [h for h in cred_hits if dev_name(h[0]) in LEGACY_TIER]
+    cve_legacy = [h for h in legacy_drops if dev_name(h[0]) in LEGACY_TIER]
     report.add("Brute-force succeeds ONLY on legacy devices (real-world)",
-               "PASS" if cred_on_legacy and not cred_on_modern else "FAIL",
-               f"legacy={len(cred_on_legacy)} modern={len(cred_on_modern)}; " +
-               "; ".join(h[1][:70] for h in cred_on_legacy[:3]))
+               "PASS" if (cred_on_legacy or cve_legacy) and not cred_on_modern else "FAIL",
+               f"legacy={len(cred_on_legacy)} legacy_cve={len(cve_legacy)} modern={len(cred_on_modern)}; " +
+               "; ".join(h[1][:70] for h in (cred_on_legacy or cve_legacy)[:3]))
 
     # infection propagation: heartbeat tags beyond the attacker bot. Compute
     # before any report.add that references `infected` (below + its detail).
