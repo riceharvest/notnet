@@ -266,16 +266,13 @@ def scenario_c2drive(report):
     # 3. wait for spread + payload execution + heartbeats.
     # Each spread command may run the full brute-force pool; the C2 serves one
     # command per heartbeat, and MODERN devices burn the full 19x25 pool
-    # rejecting (~25s each). With ~2 modern targets, allow ~200s for the
-    # full queue to drain. Poll until evidence of modern-tier resistance
-    # appears, keeping the most complete evidence seen.
+    # rejecting (~25s each). Poll until ALL evidence is collected:
+    # modern resistance + (legacy CVE drops OR legacy brute-force AUTH OK)
+    # with no modern drops, or timeout at 600s.
     deadline = time.time() + 600
     ev = read_evidence()
-    # Minimum wait: let the bot process spread commands. Each heartbeat
-    # takes ~2s, brute-force pool drain is ~25s per modern target.
-    min_wait_done = time.time() + 420
     while time.time() < deadline:
-        time.sleep(10)
+        time.sleep(15)
         ev2 = read_evidence()
         for fn, lines in ev2.items():
             if fn not in ev or len(lines) > len(ev[fn]):
@@ -288,20 +285,20 @@ def scenario_c2drive(report):
         # Also check for brute-force AUTH OK on legacy devices
         auth_ok = grep_evidence(ev, ["AUTH OK", "cracked", "Accepted password for"])
         auth_ok_legacy = [h for h in auth_ok if dev_name(h[0]) in LEGACY_TIER]
-        # Exit when we have all required evidence after minimum wait.
-        if time.time() > min_wait_done:
-            if modern_cve_resist and legacy_drops and not modern_drops:
-                break
-            # Exit if we have modern resistance + legacy brute-force OK
-            if modern_cve_resist and auth_ok_legacy and not modern_drops:
-                break
-            # Exit if 120s elapsed and we have modern resistance
-            if modern_cve_resist and time.time() > deadline - 120:
-                break
+        # Exit only when we have ALL required evidence:
+        # - modern resistance (proves modern tier resists)
+        # - legacy drops OR legacy brute-force (proves legacy is pwned)
+        # - no modern drops (proves modern tier is clean)
+        if modern_cve_resist and (legacy_drops or auth_ok_legacy) and not modern_drops:
+            break
+        # Timeout fallback: if we have modern resistance and 60s to
+        # deadline, accept whatever legacy evidence we have
+        if modern_cve_resist and not modern_drops and time.time() > deadline - 60:
+            break
 
     # Final merge: re-read evidence one last time to catch any device log
     # buffer that flushed after the poll loop exited.
-    time.sleep(10)
+    time.sleep(5)
     ev2 = read_evidence()
     for fn, lines in ev2.items():
         if fn not in ev or len(lines) > len(ev[fn]):
