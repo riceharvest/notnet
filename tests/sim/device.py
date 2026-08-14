@@ -66,6 +66,7 @@ def log(line):
         with open(EVIDENCE, "a") as f:
             f.write(f"{ts} {line}\n")
             f.flush()
+            os.fsync(f.fileno())
         print(f"[{ts}] {line}", flush=True)
 
 

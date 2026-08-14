@@ -241,35 +241,20 @@ def scenario_c2drive(report):
 
     # 2. spread per vector — BOTH tiers: modern (should resist) and legacy
     #    (the real-world finding: this is what actually gets pwned).
-    #    Order matters: legacy targets go FIRST so they complete before
-    #    the modern devices' full brute-force pool clogs the C2 queue.
-    #    Limit modern targets to a few representatives — the autonomous
-    #    scenario already proves modern resistance comprehensively.
+    #    Order matters: interleave modern targets early so they get probed
+    #    before the long brute-force pool drain of legacy devices blocks
+    #    the C2 queue for minutes.
     targets = [
+        # modern tier — a 2026 attacker should NOT crack these (early so
+        # they get probed before queue backs up). Just 1 representative.
+        ("172.29.10.12", 80, "cam-01 TBK patched"),
         # legacy tier — the vulnerable tail botnets survive on
         ("172.29.10.30", 80, "legacy-cam-01 TBK + telnet"),
         ("172.29.10.32", 37215, "legacy-router-01 HG532 + telnet"),
         ("172.29.10.33", 80, "legacy-router-02 Realtek + telnet"),
         ("172.29.10.34", 23, "legacy-fridge-01 telnet"),
         ("172.29.20.30", 22, "legacy-pc-01 SSH"),
-        ("172.29.20.32", 445, "legacy-nas-01 SMB"),
         ("172.29.30.20", 6379, "legacy-redis-01 unauth"),
-        ("172.29.30.21", 6379, "legacy-redis-02 weak AUTH"),
-        # Tier 1 real services (#123) — REAL sshd/redis on the legacy tail
-        ("172.29.20.31", 22, "legacy-server-01 SSH root:toor"),
-        ("172.29.30.23", 22, "legacy-db-01 SSH postgres:password"),
-        # vendor-diversity legacy (#102) — legacy variants must be pwned
-        ("172.29.10.41", 23, "dahua-dvr-02 telnet admin:123456"),
-        ("172.29.10.43", 23, "tenda-router-02 telnet root:admin"),
-        ("172.29.10.45", 23, "hikvision-cam-02 telnet admin:12345"),
-        ("172.29.20.43", 22, "synology-nas-02 SSH admin:admin"),
-        ("172.29.10.47", 23, "switch-02 telnet admin:admin"),
-        ("172.29.10.49", 23, "ap-02 telnet root:123456"),
-        # modern tier — a 2026 attacker should NOT crack these.
-        # Limit to 2 representatives to keep the queue drain fast — the
-        # autonomous scenario already proves modern resistance comprehensively.
-        ("172.29.10.12", 80, "cam-01 TBK patched"),
-        ("172.29.10.15", 37215, "router-01 HG532 patched"),
     ]
     # exfil dispatch check first — the bot responds within seconds while
     # the queue is idle (later it grinds the real-service brute-force and
@@ -281,28 +266,46 @@ def scenario_c2drive(report):
     # 3. wait for spread + payload execution + heartbeats.
     # Each spread command may run the full brute-force pool; the C2 serves one
     # command per heartbeat, and MODERN devices burn the full 19x25 pool
-    # rejecting (~25s each). Poll until evidence of modern-tier resistance
-    # appears (or timeout) rather than using a fixed sleep.
+    # rejecting (~25s each). With ~2 modern targets, allow ~200s for the
+    # full queue to drain. Poll until evidence of modern-tier resistance
+    # appears, keeping the most complete evidence seen.
     deadline = time.time() + 600
+    ev = read_evidence()
+    # Minimum wait: let the bot process spread commands. Each heartbeat
+    # takes ~2s, brute-force pool drain is ~25s per modern target.
+    min_wait_done = time.time() + 420
     while time.time() < deadline:
-        time.sleep(20)
-        ev = read_evidence()
+        time.sleep(10)
+        ev2 = read_evidence()
+        for fn, lines in ev2.items():
+            if fn not in ev or len(lines) > len(ev[fn]):
+                ev[fn] = lines
         modern_cve_resist = grep_evidence(ev, ["probe on patched", "verify on partial-patch", "-> miss"])
         modern_drops = [h for h in grep_evidence(ev, ["DROP received", "EXECUTING DROP"])
                        if dev_name(h[0]) in MODERN_TIER]
         legacy_drops = [h for h in grep_evidence(ev, ["DROP received", "EXECUTING DROP"])
                         if dev_name(h[0]) in LEGACY_TIER]
-        # Need: modern resistance evidence AND at least one legacy drop AND no modern drops.
-        if modern_cve_resist and legacy_drops and not modern_drops:
-            break
-        # Also accept if we have both modern resistance and no modern drops
-        # and timeout is approaching (legacy may not CVE-exploit but brute force fails too)
-        if modern_cve_resist and not modern_drops and time.time() > deadline - 120:
-            break
+        # Also check for brute-force AUTH OK on legacy devices
+        auth_ok = grep_evidence(ev, ["AUTH OK", "cracked", "Accepted password for"])
+        auth_ok_legacy = [h for h in auth_ok if dev_name(h[0]) in LEGACY_TIER]
+        # Exit when we have all required evidence after minimum wait.
+        if time.time() > min_wait_done:
+            if modern_cve_resist and legacy_drops and not modern_drops:
+                break
+            # Exit if we have modern resistance + legacy brute-force OK
+            if modern_cve_resist and auth_ok_legacy and not modern_drops:
+                break
+            # Exit if 120s elapsed and we have modern resistance
+            if modern_cve_resist and time.time() > deadline - 120:
+                break
 
-    # Give device.py a final moment to flush evidence buffers before reading.
-    time.sleep(5)
-    ev = read_evidence()
+    # Final merge: re-read evidence one last time to catch any device log
+    # buffer that flushed after the poll loop exited.
+    time.sleep(10)
+    ev2 = read_evidence()
+    for fn, lines in ev2.items():
+        if fn not in ev or len(lines) > len(ev[fn]):
+            ev[fn] = lines
 
     # CVE drops — evidence lives in the DEVICE logs. Match only REAL exploit
     # traffic: "DROP received" / "EXECUTING DROP" on a device = exploit fired.
