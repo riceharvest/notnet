@@ -287,23 +287,21 @@ def scenario_c2drive(report):
     # 3. wait for spread + payload execution + heartbeats.
     # Each spread command may run the full brute-force pool; the C2 serves one
     # command per heartbeat, and MODERN devices burn the full 19x25 pool
-    # rejecting (~25s each). Poll until evidence of modern-tier resistance
-    # appears (or timeout) rather than using a fixed sleep.
-    deadline = time.time() + 300
-    while time.time() < deadline:
-        time.sleep(15)
-        ev = read_evidence()
-        modern_cve_resist = grep_evidence(ev, ["probe on patched", "verify on partial-patch", "-> miss"])
-        modern_drops = [h for h in grep_evidence(ev, ["DROP received", "EXECUTING DROP"])
-                       if dev_name(h[0]) in MODERN_TIER]
-        legacy_drops = [h for h in grep_evidence(ev, ["DROP received", "EXECUTING DROP"])
-                        if dev_name(h[0]) in LEGACY_TIER]
-        # We need: modern resistance evidence AND at least one legacy drop AND no modern drops
-        if modern_cve_resist and legacy_drops and not modern_drops:
-            break
-    # Give device.py a final moment to flush evidence buffers before reading.
-    time.sleep(5)
+    # rejecting (~25s each). With ~7 modern targets, allow ~200s for the
+    # full queue to drain.
+    time.sleep(300)
+    # Device.py writes evidence with flush=True, but OS page cache and
+    # Docker's filesystem layer can lag. Read multiple times and merge
+    # to get the most complete evidence before generating the report.
     ev = read_evidence()
+    for attempt in range(5):
+        time.sleep(5)
+        ev2 = read_evidence()
+        for fn, lines in ev2.items():
+            if fn not in ev:
+                ev[fn] = lines
+            elif len(lines) > len(ev[fn]):
+                ev[fn] = lines
 
     # CVE drops — evidence lives in the DEVICE logs. Match only REAL exploit
     # traffic: "DROP received" / "EXECUTING DROP" on a device = exploit fired.

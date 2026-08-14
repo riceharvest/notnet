@@ -65,6 +65,7 @@ def log(line):
     with lock:
         with open(EVIDENCE, "a") as f:
             f.write(f"{ts} {line}\n")
+            f.flush()
         print(f"[{ts}] {line}", flush=True)
 
 
