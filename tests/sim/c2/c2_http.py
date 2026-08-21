@@ -144,6 +144,9 @@ def handle_http(conn, addr, port_label):
                     buf = rest
                     continue
                 method, path, _ver = reqline.split(" ", 2)
+                # strip query string so /bot/notnet?secret=... routes the
+                # same as /bot/notnet (the real C2 accepts ?secret=, #173)
+                path = path.split("?", 1)[0]
                 clen = 0
                 ctype = ""
                 for h in lines[1:]:
