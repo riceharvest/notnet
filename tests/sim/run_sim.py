@@ -564,7 +564,7 @@ def scenario_remaining_parity(report):
     try:
         r = subprocess.run(
             ["docker", "exec", "sim-c2", "python3", "/app/socks5_client.py",
-             "172.29.0.9", "1080", "172.29.0.2", "8443", "proxytok", "/bot/notnet"],
+             "172.29.0.9", "1080", "172.29.0.2", "8443", "proxytok", f"/bot/notnet?secret={C2_SECRET}"],
             capture_output=True, text=True, timeout=90)
         socks_out = (r.stdout or "") + (r.stderr or "")
         socks_rc = r.returncode
