@@ -149,6 +149,37 @@ def unique_tags(ev):
 
 # ───────────────────────── checks ─────────────────────────
 
+def assert_no_heartbeat_gaps(ev, max_gap_s=30):
+    """#193: command-loop starvation guard.
+
+    Scans the heartbeat/SERVE evidence lines in http.log and ws.log,
+    parses their leading ISO-8601 timestamps, and returns the largest
+    gap (seconds) between consecutive beats. The bot's command loop
+    heartbeats every ~2s, so any gap well above `max_gap_s` means
+    something blocked the loop — e.g. the 8-minute SSH-brute stall of
+    24e5ae2, which previously only surfaced indirectly through stale
+    evidence. Returns the observed max gap so the caller can report it.
+    """
+    stamps = []
+    for fn, lines in ev.items():
+        if not ("http.log" in fn or "ws.log" in fn):
+            continue
+        for ln in lines:
+            low = ln.lower()
+            if "heartbeat" not in low and "serve" not in low:
+                continue
+            tok = ln.split(None, 1)[0] if ln.split() else ""
+            try:
+                stamps.append(datetime.fromisoformat(tok))
+            except ValueError:
+                continue
+    if len(stamps) < 2:
+        return 0.0
+    stamps.sort()
+    return max((b - a).total_seconds()
+               for a, b in zip(stamps, stamps[1:]))
+
+
 class Report:
     def __init__(self):
         self.rows = []
@@ -365,6 +396,14 @@ def scenario_c2drive(report):
     report.add("exfil_creds command dispatched", "PASS" if exfil_hits else "FAIL",
                "; ".join(h[1][:80] for h in exfil_hits[:3]) or "no exfil evidence")
 
+    # #193: heartbeat-gap guard — any command-loop block (the 8-minute
+    # SSH-brute stall of 24e5ae2 is the canonical case) shows up as a hole
+    # in the heartbeat stream. Fail loudly on gaps over the cadence.
+    gap = assert_no_heartbeat_gaps(ev)
+    report.add("No command-loop starvation (max heartbeat gap <30s)",
+               "PASS" if gap < 30 else "FAIL",
+               f"max gap {gap:.1f}s in http.log/ws.log heartbeats")
+
 
 def scenario_autonomous(report):
     log("=== S2 autonomous: bot left to spread on its own (Finding A) ===")
@@ -410,11 +449,25 @@ def scenario_autonomous(report):
     # autonomous spreader still lands payloads (re-drop is exactly what a
     # real botnet does). "New tags only" was only meaningful when S1 left
     # the fleet clean; it false-FAILs now that S1 actually infects.
+    # NOTE (#193): the STRICT variant of this assertion — new tags ONLY,
+    # no re-drop acceptance — is valid solely on a CLEAN fleet, i.e. when
+    # S2 runs without S1 having infected anything earlier in the same
+    # --scenario all pass. Scenarios are deliberately NOT reordered (S1
+    # stays first); give S2 its own device segment excluded from S1's
+    # targets if the strict assertion is ever wanted again.
     reinfected = [l for _, l in new_drops]
     report.add("Autonomous infection of the fleet (new tags only)",
                "FAIL" if not (new_infected or reinfected) else "PASS",
                f"new={sorted(new_infected)[:10]}" if new_infected
                else f"re-drops on known tags: {len(reinfected)} (fleet pre-infected by S1)")
+
+    # #193: heartbeat-gap guard for S2 as well — the autonomous config has
+    # no IRC/HTTP command loop, but the bot still heartbeats; a stall here
+    # is just as real (and would have caught 24e5ae2 loudly).
+    gap = assert_no_heartbeat_gaps(ev)
+    report.add("No command-loop starvation (max heartbeat gap <30s)",
+               "PASS" if gap < 30 else "FAIL",
+               f"max gap {gap:.1f}s in http.log/ws.log heartbeats")
 
 def scenario_resilience(report):
     log("=== S5 resilience: dead-drop + rotation (flux uses its own config) ===")

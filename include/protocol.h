@@ -369,6 +369,12 @@ int http_read(notnet_bot_t *bot, char *buf, int len);
 int http_download(notnet_bot_t *bot, const char *url, const char *dest);
 int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_path);
 void http_disconnect(notnet_bot_t *bot);
+/* #192 (CWE-598): returns 1 when url's host:port is the bot's configured
+ * C2 endpoint. Callers (http_get_url/http_download) use this to decide
+ * whether auto-appending ?secret=<c2_secret> is safe — foreign URLs
+ * (operator dead-drops, external payload mirrors) must never receive the
+ * fleet secret in a query string. */
+int http_url_is_local_c2(notnet_bot_t *bot, const char *url);
 
 /* ── WebSocket Functions ────────────────────────────────────── */
 int ws_connect(notnet_bot_t *bot);

