@@ -778,9 +778,15 @@ def scenario_remaining_parity(report):
         recreate_bot("generated/notnet.conf.pinbad")
         time.sleep(5)
         queue_cmd("update", "http://c2:8443/bot/notnet.bad", "http")
-        time.sleep(12)
-        botlog = bot_log_full()
-        bad_hits = [l for l in botlog.splitlines() if "SHA-256 mismatch" in l]
+        # Poll: same CI-load rationale as the valid-pin check above.
+        bad_hits = []
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            time.sleep(5)
+            botlog = bot_log_full()
+            bad_hits = [l for l in botlog.splitlines() if "SHA-256 mismatch" in l]
+            if bad_hits:
+                break
         report.add("Payload pinning: tampered payload refused (hash mismatch, no install)",
                    "PASS" if bad_hits else "FAIL",
                    "; ".join(l.strip()[:90] for l in bad_hits[-2:]) or "no SHA-256 mismatch in bot log")
