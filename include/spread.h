@@ -97,6 +97,11 @@ int lotl_run_cycle(notnet_bot_t *bot);
 /* #143: render CVE registry status for the C2 `cve list` command. */
 void cve_registry_status(char *buf, size_t len);
 
+/* Set the per-command brute-force wall-clock budget in milliseconds
+ * (#191). protocol.c calls this before invoking any spread vector.
+ * Clamped to SPREAD_BUDGET_MIN_MS..SPREAD_BUDGET_MAX_MS. */
+void spread_set_budget_ms(long ms);
+
 /* ── Service Helpers ────────────────────────────────────────── */
 /* Timeout-aware login variants are the LIVE paths (the non-timeout
  * variants were removed in the #112 dead-code sweep). Returns socket fd

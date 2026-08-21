@@ -284,6 +284,8 @@ static int init_bot(void) {
     if (g_bot.scan_timeout_ms == 0) g_bot.scan_timeout_ms = SCAN_TIMEOUT_MS;
     if (g_bot.scan_max_hosts == 0) g_bot.scan_max_hosts = 254;
     if (g_bot.heartbeat_interval == 0) g_bot.heartbeat_interval = HEARTBEAT_INTERVAL;
+    /* #191: brute-force budget default (config key spread_budget_ms) */
+    if (g_bot.spread_budget_ms == 0) g_bot.spread_budget_ms = SPREAD_BUDGET_DEFAULT_MS;
     
     log_init();
     log_info("notnet v%s starting", NOTNET_VERSION);

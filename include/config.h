@@ -23,6 +23,13 @@
 #define SCAN_RETRY_COUNT     2
 #define SCAN_SLEEP_SEC       30   /* sleep between scan cycles */
 
+/* Per-command brute-force wall-clock budget (#191): bounds how long a
+ * single `spread <ip>:<port>` command may run its credential pool so
+ * the single-threaded command loop (and heartbeats) cannot starve. */
+#define SPREAD_BUDGET_MIN_MS     5000L
+#define SPREAD_BUDGET_MAX_MS     600000L
+#define SPREAD_BUDGET_DEFAULT_MS 60000L
+
 /* C2 heartbeat */
 #define HEARTBEAT_INTERVAL   60   /* seconds */
 #define HEARTBEAT_RETRY      3

