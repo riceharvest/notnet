@@ -167,7 +167,7 @@ services:
       - ./queue:/queue:rw
     networks:
       simnet:
-        ipv4_address: 172.29.0.10
+        ipv4_address: 172.29.0.15
 
   # ── Honeytoken tripwire (#148) ──
   honeytoken:
