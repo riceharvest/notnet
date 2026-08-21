@@ -62,6 +62,16 @@ static char g_op_pubkey_hex[MESH_OP_PUBKEY_HEX + 1] = MESH_OP_PUBKEY;
 static int g_op_pubkey_valid = 0;
 static notnet_bot_t *g_bot_ref = NULL;
 
+/* #170: the mesh listen thread pushes onto bot->cmd_queue/cmd_count while
+ * the main loop (protocol_process_commands) reads and compacts the same
+ * array with no lock of its own. This mutex serializes mesh-side pushes;
+ * protocol.c takes it around its queue processing (protocol_cmd_queue_lock
+ * / _unlock below). */
+static pthread_mutex_t g_cmdq_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void mesh_cmd_queue_lock(void)   { pthread_mutex_lock(&g_cmdq_mutex); }
+void mesh_cmd_queue_unlock(void) { pthread_mutex_unlock(&g_cmdq_mutex); }
+
 /* ── Helpers ─────────────────────────────────────────────── */
 static int hexval(int c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -248,13 +258,15 @@ int mesh_verify_and_queue(notnet_bot_t *bot, const char *cmd, const char *sig_he
     return -1;
 #endif
     /* Verified: push onto the bot's cmd_queue so the existing dispatch
-     * loop executes it — the mesh never defines its own command semantics. */
-    pthread_mutex_lock(&g_peer_mutex);
-    if (bot->cmd_count >= 256) { pthread_mutex_unlock(&g_peer_mutex); return -1; }
+     * loop executes it — the mesh never defines its own command semantics.
+     * #170: guard with g_cmdq_mutex (the queue's own lock), not
+     * g_peer_mutex which protects the peer table, not the queue. */
+    pthread_mutex_lock(&g_cmdq_mutex);
+    if (bot->cmd_count >= 256) { pthread_mutex_unlock(&g_cmdq_mutex); return -1; }
     snprintf(bot->cmd_queue[bot->cmd_count], 256, "%.255s", cmd);
     bot->cmd_queue[bot->cmd_count][255] = '\0';
     bot->cmd_count++;
-    pthread_mutex_unlock(&g_peer_mutex);
+    pthread_mutex_unlock(&g_cmdq_mutex);
     log_info("MESH: verified+queued operator command: %s", cmd);
     return 0;
 }

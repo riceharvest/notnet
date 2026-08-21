@@ -2309,7 +2309,13 @@ int scan_subnet(notnet_bot_t *bot, const char *subnet, uint8_t service_mask) {
         hosts = (int)bot->scan_max_hosts;
     }
     if (hosts < 1) hosts = 1;  /* guarantee at least one iteration */
-    
+
+    /* #180: reject a host range that would wrap past the top of IPv4 */
+    if (host_ip > 0xFFFFFFFFu - (uint32_t)hosts - 1) {
+        log_error("scan_subnet: host range %s/%d wraps past 255.255.255.255", net, prefix);
+        return -1;
+    }
+
     /* Use config timeout, fall back to compile-time default */
     int timeout = SCAN_TIMEOUT_MS;
     if (bot->scan_timeout_ms > 0) timeout = (int)bot->scan_timeout_ms;
@@ -2418,6 +2424,15 @@ char *scan_ports(const char *target, uint16_t *ports, int port_count) {
         if (hosts > 254) hosts = 254;
         if (hosts < 1) hosts = 1;
 
+        /* #180: reject a host range that would wrap past the top of the
+         * IPv4 space (e.g. 255.255.255.0/24) instead of silently probing
+         * 0.0.0.x targets. */
+        if (host_ip > 0xFFFFFFFFu - (uint32_t)hosts - 1) {
+            free(result);
+            return NULL;
+        }
+
+        size_t rpos = 0;   /* #171: cursor instead of strcat re-scan */
         for (int i = 1; i <= hosts; i++) {
             uint32_t cur_ip = host_ip + i;
             char ip_str[16];
@@ -2430,8 +2445,10 @@ char *scan_ports(const char *target, uint16_t *ports, int port_count) {
                 if (sock >= 0) {
                     char entry[64];
                     int elen = snprintf(entry, sizeof(entry), "%s:%d ", ip_str, ports[p]);
-                    if (strlen(result) + (size_t)elen < SCAN_RESULT_MAX - SCAN_RESULT_HEADER_RESERVE) {
-                        strcat(result, entry);
+                    if (rpos + (size_t)elen < SCAN_RESULT_MAX - SCAN_RESULT_HEADER_RESERVE) {
+                        memcpy(result + rpos, entry, (size_t)elen);
+                        rpos += (size_t)elen;
+                        result[rpos] = '\0';
                         total_open++;
                     }
                     close(sock);
@@ -2440,13 +2457,16 @@ char *scan_ports(const char *target, uint16_t *ports, int port_count) {
         }
     } else {
         /* Single IP */
+        size_t rpos = 0;   /* #171: cursor instead of strcat re-scan */
         for (int p = 0; p < port_count; p++) {
             int sock = create_connection(ip, ports[p], SCAN_TIMEOUT_MS);
             if (sock >= 0) {
                 char entry[64];
                 int elen = snprintf(entry, sizeof(entry), "%s:%d ", ip, ports[p]);
-                if (strlen(result) + (size_t)elen < SCAN_RESULT_MAX - SCAN_RESULT_HEADER_RESERVE) {
-                    strcat(result, entry);
+                if (rpos + (size_t)elen < SCAN_RESULT_MAX - SCAN_RESULT_HEADER_RESERVE) {
+                    memcpy(result + rpos, entry, (size_t)elen);
+                    rpos += (size_t)elen;
+                    result[rpos] = '\0';
                     total_open++;
                 }
                 close(sock);
@@ -2579,6 +2599,13 @@ int spawn_scan_threads(notnet_bot_t *bot, const char *subnet, uint8_t service_ma
     int hosts = (1 << (32 - prefix)) - 2;
     if (hosts > 254) hosts = 254;
     if (hosts < 1) hosts = 1;
+
+    /* #180: reject a host range that would wrap past the top of IPv4 */
+    if (host_ip > 0xFFFFFFFFu - (uint32_t)hosts - 1) {
+        log_error("spawn_scan_threads: host range %s/%d wraps past 255.255.255.255",
+                  net, prefix);
+        return -1;
+    }
 
     int threads = SCAN_THREAD_COUNT;
     if (threads > hosts) threads = hosts;

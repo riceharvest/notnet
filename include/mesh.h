@@ -51,6 +51,12 @@ int  mesh_peer_count(void);
 int  mesh_has_peers(void);            /* 1 if >=1 live peer */
 void mesh_prune_stale(void);          /* evict MESH_PEER_TTL-expired peers */
 
+/* #170: cmd_queue cross-thread lock. The mesh listen thread pushes onto
+ * bot->cmd_queue; protocol.c's main-loop processing must hold the same
+ * lock while reading/compacting the queue. */
+void mesh_cmd_queue_lock(void);
+void mesh_cmd_queue_unlock(void);
+
 /* Peer-seed list from the dead-drop blob (#139 step 1). The blob may carry
  * a `peers=` field ("host:port,host:port,..."). Verified via the same
  * secret echo as deaddrop; we only store them, we never trust them for

