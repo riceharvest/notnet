@@ -12,7 +12,8 @@ One container = one device from fleet.yaml. Profile-driven via env vars:
   SSH_CREDS        "user:pass"
   SMB_CREDS        "user:pass"
   REDIS_PASS       "" = no auth, else AUTH requires this password
-  CVE              CVE-2024-3721 | CVE-2017-17215 | CVE-2021-35395 | none
+  CVE              CVE-2024-3721 | CVE-2017-17215 | CVE-2021-35395 |
+                   CVE-2018-10088 | CVE-2020-29583 | CVE-2015-2051 | none
   PATCHED          true/false — patched CVE devices return a generic banner (probe miss)
   PATCHED_PARTIAL  true/false — banner matches but verify fails (no drop)
   EDR_BLOCK        true/false — refuse to execute the payload + log EDR-ALERT
@@ -27,6 +28,7 @@ bot_tag=<device-id>). Cowrie devices (honeypots) never execute.
 """
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -228,6 +230,104 @@ def handle_http_cve(conn, addr):
                 else:
                     http_response(conn, sys_cmd)  # echo token
                     log(f"Realtek VERIFY cmd={sys_cmd!r} -> echoed")
+                return
+            http_response(conn, "404", code="404 Not Found")
+            return
+
+        if CVE == "CVE-2018-10088":  # Boa httpd formAuth (router)
+            if PATCHED:
+                # Generic nginx banner -> probe miss (and arch=x86)
+                http_response(conn, "<html>Welcome</html>",
+                              extra="Server: nginx/1.18.0")
+                log(f"BOA probe on patched device {addr[0]} -> miss")
+                return
+            if PATCHED_PARTIAL:
+                # Boa banner still served, but formAuth injection is
+                # fixed: verify gets a generic response, no token echo.
+                http_response(conn, "<html>login</html>", extra="Server: Boa/0.94.14rc21")
+                log(f"BOA verify on partial-patch {addr[0]} -> no echo (patched)")
+                return
+            if method == "GET":
+                http_response(conn, "<html><title>Router Login</title></html>", extra="Server: Boa/0.94.14rc21")
+                log(f"BOA probe {addr[0]}: GET {path} -> Boa")
+                return
+            if method == "POST" and "/boafrm/formAuth" in path:
+                params = urllib.parse.parse_qs(body_txt)
+                # parse_qs already percent-decodes the value; do NOT run
+                # unquote_plus here or a literal '+' inside the injected
+                # command (chmod +x) collapses into a space.
+                cmd = (params.get("cmd", [""])[0])
+                log(f"BOA POST {addr[0]}: cmd={cmd[:200]}")
+                if "wget" in cmd:
+                    http_response(conn, "Boa ok: " + cmd)
+                    log(f"BOA DROP received cmd={cmd!r}")
+                    execute_drop(cmd)
+                else:
+                    http_response(conn, "Boa echo: " + cmd)
+                    log(f"BOA VERIFY cmd={cmd!r} -> echoed")
+                return
+            http_response(conn, "404", code="404 Not Found")
+            return
+
+        if CVE == "CVE-2020-29583":  # Zyxel zysh (USG/ZyWALL)
+            if PATCHED:
+                http_response(conn, "<html>404 Not Found</html>", code="404 Not Found")
+                log(f"ZYXEL probe on patched device {addr[0]} -> miss")
+                return
+            if PATCHED_PARTIAL:
+                # Zyxel banner still answers but zysh exec is fixed.
+                http_response(conn, "<html><title>Zyxel</title></html>")
+                log(f"ZYXEL verify on partial-patch {addr[0]} -> no echo (patched)")
+                return
+            if method == "GET":
+                http_response(conn, "<html><title>Zyxel Communications Corp.</title><body>Zyxel USG login</body></html>")
+                log(f"ZYXEL probe {addr[0]}: GET {path} -> zyxel banner")
+                return
+            if method == "POST" and "/ztp/cgi-bin/handle" in path:
+                params = urllib.parse.parse_qs(body_txt)
+                # shape: command=zysh<space><cmd> — parse_qs already
+                # percent-decoded; strip the zysh prefix for execution.
+                command = params.get("command", [""])[0]
+                cmd = command[len("zysh "):] if command.startswith("zysh ") else command
+                log(f"ZYXEL POST {addr[0]}: command={command[:200]}")
+                if "wget" in cmd:
+                    http_response(conn, "zysh ok: " + cmd)
+                    log(f"ZYXEL DROP received cmd={cmd!r}")
+                    execute_drop(cmd)
+                else:
+                    http_response(conn, "zysh echo: " + cmd)
+                    log(f"ZYXEL VERIFY cmd={cmd!r} -> echoed")
+                return
+            http_response(conn, "404", code="404 Not Found")
+            return
+
+        if CVE == "CVE-2015-2051":  # D-Link HNAP (DIR-645/815, port 8080)
+            if PATCHED:
+                http_response(conn, "<html>404 Not Found</html>", code="404 Not Found")
+                log(f"HNAP probe on patched device {addr[0]} -> miss")
+                return
+            if PATCHED_PARTIAL:
+                # HNAP1 marker still served; SOAPAction injection fixed.
+                http_response(conn, "HNAP1")
+                log(f"HNAP verify on partial-patch {addr[0]} -> no echo (patched)")
+                return
+            if method == "GET":
+                http_response(conn, "HNAP1")
+                log(f"HNAP probe {addr[0]}: GET {path} -> HNAP1 marker")
+                return
+            if method == "POST" and path.startswith("/HNAP1"):
+                soap_action = headers.get("soapaction", "")
+                log(f"HNAP POST {addr[0]} SOAPAction={soap_action[:200]}")
+                # injection rides inside backticks in SOAPAction
+                m = re.search(r"`([^`]*)`", soap_action)
+                cmd = m.group(1) if m else ""
+                if "wget" in cmd:
+                    http_response(conn, "HNAP1 ok: " + cmd)
+                    log(f"HNAP DROP received cmd={cmd!r}")
+                    execute_drop(cmd)
+                else:
+                    http_response(conn, "HNAP1 echo: " + cmd)
+                    log(f"HNAP VERIFY cmd={cmd!r} -> echoed")
                 return
             http_response(conn, "404", code="404 Not Found")
             return

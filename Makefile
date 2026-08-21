@@ -35,6 +35,7 @@ INCLUDES := -I include
 SRCS := notnet.c \
         src/protocol.c \
         src/spread.c \
+        src/arch_detect.c \
         src/payload.c \
         src/persist.c \
         src/util.c \

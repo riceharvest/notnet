@@ -12,6 +12,9 @@
 #   tbk-dvr         : CVE-2024-3721 (port 80)
 #   huawei-hg532    : CVE-2017-17215 (port 37215)
 #   realtek         : CVE-2021-35395 (port 80)
+#   boa-router      : CVE-2018-10088 (port 80, Boa formAuth)
+#   zyxel-router    : CVE-2020-29583 (port 80, zysh CGI)
+#   dlink-hnap      : CVE-2015-2051 (port 8080, HNAP1)
 #   linux-pc        : SSH 22
 #   windows-pc      : SMB 445 + RDP 3389
 #   nas             : SSH 22 + SMB 445
@@ -422,6 +425,33 @@ devices:
     ports: [80, 23]
     cve: CVE-2021-35395
     telnet_creds: ["admin:admin"]
+
+  # #160: three more unpatched CVE gadgets in the legacy tail, one per
+  # new module. Each banner matches ONLY its own module (cross-vendor
+  # probe misses are the point — see the vendor-diversity tier note).
+  - id: legacy-boa-01
+    type: boa-router
+    segment: iot
+    ip: 172.29.10.35
+    ports: [80, 23]
+    cve: CVE-2018-10088
+    telnet_creds: ["admin:123456"]
+
+  - id: legacy-zyxel-01
+    type: zyxel-router
+    segment: iot
+    ip: 172.29.10.36
+    ports: [80, 23]           # module targets cleartext 80 (443 shares the CGI)
+    cve: CVE-2020-29583
+    telnet_creds: ["admin:1234"]
+
+  - id: legacy-dlink-01
+    type: dlink-hnap
+    segment: iot
+    ip: 172.29.10.37
+    ports: [8080, 23]
+    cve: CVE-2015-2051
+    telnet_creds: ["root:admin"]
 
   - id: legacy-fridge-01
     type: smart-fridge

