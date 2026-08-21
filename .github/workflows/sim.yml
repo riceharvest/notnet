@@ -106,6 +106,7 @@ jobs:
           gcc -DTLS_ENABLED -DMESH_ED25519 -I include -o /tmp/mesh_test tests/host/mesh_test.c \
             src/mesh.o src/util.o src/protocol.o src/persist.o src/spread.o src/payload.o \
             src/proxy.o src/deaddrop.o src/relay.o src/plugin.o src/killswitch.o \
+            src/arch_detect.o \
             -lssl -lcrypto -lpthread
           /tmp/mesh_test
 
