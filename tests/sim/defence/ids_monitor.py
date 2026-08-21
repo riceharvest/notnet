@@ -19,8 +19,12 @@ plus /evidence/http.log, /evidence/cowrie-*.log (Cowrie JSON lines).
 import glob
 import os
 import re
+import sys
 import time
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import siem_emit  # noqa: E402  (SIEM fanout backends, issue #155)
 
 EVIDENCE_DIR = os.environ.get("SIM_EVIDENCE", "/evidence")
 ALERT_FILE = os.environ.get("SIM_ALERT_FILE", "/evidence/ids_alerts.log")
@@ -46,11 +50,17 @@ def now():
 
 
 def alert(sig, src, dst, detail):
-    line = f"{now()} ALERT sig={sig} src={src} dst={dst} {detail}"
+    ts = now()
+    line = f"{ts} ALERT sig={sig} src={src} dst={dst} {detail}"
     with lock:
         with open(ALERT_FILE, "a") as f:
             f.write(line + "\n")
         print(line, flush=True)
+    # SIEM fanout (issue #155): no-op unless SIM_SIEM_* is configured.
+    try:
+        siem_emit.get_emitter().emit(sig, src, dst, detail, timestamp=ts)
+    except Exception as exc:
+        print(f"{ts} SIEM emit error: {exc}", file=sys.stderr, flush=True)
     if IPS and sig in ("SCAN-SWEEP", "BRUTE-BURST", "CVE-EXPLOIT") and src not in blacklisted:
         blacklisted.add(src)
         with open(BLACKLIST, "a") as f:

@@ -69,3 +69,49 @@ Segmentation is enforced TWO ways:
    skipped with a warning and the sim runs with the log-layer defence only.
 
 The defence layer also runs on evidence logs (no packet capture required).
+
+## Defence: SIEM output (issue #155)
+
+The IDS (`defence/ids_monitor.py`) can fan every detection out to real SOC
+tooling. Backends are selected by environment variables — set any combination
+for concurrent fanout, set none for the default local-only behaviour:
+
+| Env var | Format | Transport |
+|---|---|---|
+| `SIM_SIEM_SYSLOG=host:port` | Syslog RFC 5424 (PRI 132 high / 130 medium / 110 info, `notnet@32473` structured data) | UDP datagrams |
+| `SIM_SIEM_CEF=file:path` | ArcSight CEF v0 (`CEF:0\|notnet\|ids\|1.0\|<sig>\|<sig>\|<0-10>\|src=… dst=… msg=…`) | CEF-over-TCP line protocol; in the sim the identical newline-delimited records are appended to a file so a TCP collector or Filebeat file input can tail them unchanged |
+| `SIM_SIEM_ECS=file:path` | Elastic Common Schema 8.x JSON lines (`@timestamp`, `event.kind=alert`, `source.ip`, `destination.ip`, `labels.signature`) | JSON-lines file |
+| `SIM_SIEM_WEBHOOK=url` | Structured JSON (ECS body + `notnet` metadata) | HTTP POST |
+
+Severity mapping: `CVE-EXPLOIT`/`PAYLOAD-DROP` → high, `SCAN-SWEEP`/
+`BRUTE-BURST` → medium, `EDR`/`HONEYPOT` → info.
+
+Example — fan out to syslog and both file formats from one detection stream:
+
+```sh
+export SIM_SIEM_SYSLOG=splunk.example.com:514
+export SIM_SIEM_CEF=file:/var/log/notnet/ids-cef.log
+export SIM_SIEM_ECS=file:/var/log/notnet/ids-ecs.json
+```
+
+Acceptance example — ingest the ECS JSON lines with Logstash:
+
+```conf
+input { file { path => "/var/log/notnet/ids-ecs.json" codec => json_lines } }
+output { elasticsearch { hosts => ["https://es:9200"] index => "notnet-ids" } }
+```
+
+or with Filebeat (also works for the CEF file):
+
+```yaml
+filebeat.inputs:
+  - type: filestream
+    id: notnet-ids-ecs
+    paths: [/var/log/notnet/ids-ecs.json]
+    parsers: [{ndjson: {}}]
+output.logstash:
+  hosts: ["logstash:5044"]
+```
+
+Unit tests: `python3 tests/sim/defence/test_siem_emit.py` (validates the
+RFC 5424 header regex, CEF pipe count = 7, ECS required fields; no deps).
