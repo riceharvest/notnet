@@ -36,6 +36,17 @@ jobs:
           test -n "$(ls detections/sigma/*.yml detections/suricata/*.rules detections/yara/*.yar 2>/dev/null)" \
             || { echo "no detection rules present"; exit 1; }
 
+      - name: No forked socks5_client copies (#194)
+        run: |
+          if [ -f c2-server/socks5_client.py ]; then
+            echo "::error::c2-server/socks5_client.py must not exist."
+            echo "::error::The canonical copy is tests/sim/c2/socks5_client.py"
+            echo "::error::(mounted into sim-c2 by tests/sim/docker-compose.realc2.yml)."
+            echo "::error::Delete the stray, or move it deliberately and update the compose mount + this guard. See issue #194."
+            diff -u tests/sim/c2/socks5_client.py c2-server/socks5_client.py || true
+            exit 1
+          fi
+
   stix:
     name: STIX 2.1 intel — schema + drift
     runs-on: ubuntu-latest

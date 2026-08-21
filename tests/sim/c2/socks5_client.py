@@ -6,6 +6,10 @@ Connects to a SOCKS5 proxy (RFC 1928) with RFC 1929 user/pass auth
 Prints the SOCKS5 handshake result + HTTP status so the driver can verify
 real proxied traffic (not just a bound listener).
 
+Canonical location: tests/sim/c2/socks5_client.py (this file). It is mounted
+into the sim-c2 container by tests/sim/docker-compose.realc2.yml. Do not copy
+it into c2-server/ — CI fails on stray duplicates (issue #194).
+
 Usage:
   socks5_client.py <proxy_host> <proxy_port> <target_host> <target_port>
                    <token> [http_path]
