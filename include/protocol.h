@@ -292,6 +292,18 @@ typedef struct {
     /* Heartbeat interval in seconds (0 = use default) */
     uint32_t heartbeat_interval;
 
+    /* ISSUE #159 (SIMULATION-ONLY red-team realism). Every field here
+     * defaults to zero/empty = feature disabled; with defaults the
+     * bot behaves identically to stock. See include/config.h for the
+     * per-key documentation and the DGA algorithm contract. */
+    uint32_t heartbeat_jitter_pct;   /* 0..50: ±% swing around hb interval */
+    uint32_t start_delay_s;          /* 0..3600: sleep-on-start */
+    char dga_seed[DGA_SEED_MAX_HEX + 1]; /* hex seed; empty = DGA off */
+    char dga_tld[64];                /* DGA TLD (default DGA_TLD_DEFAULT) */
+    char payload_key_hex[PAYLOAD_XOR_KEY_HEX_LEN + 1]; /* 64-hex XOR key; empty = plaintext downloads */
+    uint8_t anti_vm;                 /* 1 = sandbox sweep before main loop */
+    uint32_t hb_pad_max;             /* 0..512 max random heartbeat pad */
+
     /* Update tracking */
     time_t last_update;
 

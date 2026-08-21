@@ -294,6 +294,13 @@ Config is loaded from `/etc/notnet.conf` (key=value).
 | `redis_enabled` | `1` | Enable Redis spreading |
 | `rdp_enabled` | `1` | Enable RDP spreading |
 | `persist_enabled` | `1` | 0 = RAM-only fileless mode (or `NOTNET_PERSIST_ENABLED`) |
+| `heartbeat_jitter` | `0` | #159 (simulation-only): heartbeat jitter percent (0–50); interval varies ±N% non-periodically |
+| `start_delay_s` | `0` | #159 (simulation-only): sleep-on-start seconds (0–3600) before the main loop |
+| `dga_seed` | *(none)* | #159 (simulation-only): hex seed; when set the bot derives `<8hex>.<dga_tld>` daily (algorithm in `include/config.h`) and tries it before the static HTTP C2 |
+| `dga_tld` | `sim.test` | #159 (simulation-only): DGA TLD |
+| `payload_key_hex` | *(none)* | #159 (simulation-only): 64-hex XOR key; payload downloads are de-obfuscated in memory before verification (obfuscation-grade, NOT encryption) |
+| `anti_vm` | `0` | #159 (simulation-only): sandbox sweep before the main loop (QEMU/KVM/VMware/Cowrie/timing); idles hourly on detection |
+| `hb_pad_max` | `0` | #159 (simulation-only): max random padding bytes appended to heartbeats as a `pad` field (0–512) |
 
 ### Scan targets
 

