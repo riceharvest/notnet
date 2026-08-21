@@ -113,8 +113,11 @@ def build():
         })
 
     for tag, pat, name in [
-        (f"c2-http-{http_path}", f"[url:value matches '.*{http_path}.*']", "notnet HTTP C2 path"),
-        (f"c2-ws-{ws_path}", f"[url:value matches '.*{ws_path}.*']", "notnet WS C2 path"),
+        # STIX 2.1 pattern operators are case-sensitive uppercase (MATCHES,
+        # not matches — the lowercase form is a grammar error, caught by the
+        # stix2 CI gate).
+        (f"c2-http-{http_path}", f"[url:value MATCHES '.*{http_path}.*']", "notnet HTTP C2 path"),
+        (f"c2-ws-{ws_path}", f"[url:value MATCHES '.*{ws_path}.*']", "notnet WS C2 path"),
         ("relay-via", "[network-traffic:extensions.'notnet-relay'.via MATCHES '.*VIA.*']",
          "notnet ORB relay VIA chain wire format"),
     ]:

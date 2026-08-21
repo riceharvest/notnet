@@ -72,6 +72,10 @@ echo "════════════════════════�
 echo "[1/6] Building images..."
 docker compose -f docker-compose.sim.yml build bot ids-monitor 2>&1 | tail -3
 docker build -f Dockerfile.device -t notnet-sim-device ../.. 2>&1 | tail -2
+# notnet-sim-realsvc (#123): Tier-1 real-service devices reference this image.
+# gen_fleet.py emits containers for it, so a fresh runner without the cached
+# image fails at `up` with "pull access denied" — build it here like the rest.
+docker build -f Dockerfile.realsvc -t notnet-sim-realsvc . 2>&1 | tail -2
 
 # 1. Generate fleet + payload artifacts
 echo "[2/6] Generating fleet + payload..."

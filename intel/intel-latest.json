@@ -1,5 +1,5 @@
 {
-  "id": "bundle--e8f4b280-cc50-51ab-bc60-0b8bdf97026f",
+  "id": "bundle--2b247083-abf7-50f4-ae09-df9ce56dfceb",
   "objects": [
     {
       "created": "2026-08-13T00:00:00.000Z",
@@ -180,7 +180,7 @@
       ],
       "modified": "2026-08-13T00:00:00.000Z",
       "name": "notnet HTTP C2 path",
-      "pattern": "[url:value matches '.*/api/v1/bot.*']",
+      "pattern": "[url:value MATCHES '.*/api/v1/bot.*']",
       "pattern_type": "stix",
       "spec_version": "2.1",
       "type": "indicator",
@@ -200,7 +200,7 @@
       ],
       "modified": "2026-08-13T00:00:00.000Z",
       "name": "notnet WS C2 path",
-      "pattern": "[url:value matches '.*/ws/v1/bot.*']",
+      "pattern": "[url:value MATCHES '.*/ws/v1/bot.*']",
       "pattern_type": "stix",
       "spec_version": "2.1",
       "type": "indicator",
