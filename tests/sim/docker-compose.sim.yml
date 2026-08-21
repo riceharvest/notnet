@@ -149,6 +149,26 @@ services:
       simnet:
         ipv4_address: 172.29.0.8
 
+  # ── Automated containment (#157) ──
+  containment:
+    build:
+      context: ../..
+      dockerfile: tests/sim/Dockerfile.ids
+    image: notnet-sim-ids
+    container_name: sim-containment
+    command: ["python3", "/app/defence/containment.py"]
+    environment:
+      SIM_EVIDENCE: /evidence
+      SIM_ALERT_FILE: /evidence/ids_alerts.log
+      CONTAIN_THRESH: ${CONTAIN_THRESH:-3}
+      QUEUE_DIR: /queue
+    volumes:
+      - ./evidence:/evidence:rw
+      - ./queue:/queue:rw
+    networks:
+      simnet:
+        ipv4_address: 172.29.0.10
+
   # ── Honeytoken tripwire (#148) ──
   honeytoken:
     build:

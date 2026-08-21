@@ -74,15 +74,17 @@ fi
 if [ "$POSTURE" = "hardened" ]; then
     (
         while true; do
-            if [ -f /run/ips_blacklist ]; then
-                while read -r src; do
-                    [ -z "$src" ] && continue
-                    iptables -C INPUT -s "$src" -j DROP 2>/dev/null || \
-                        iptables -A INPUT -s "$src" -j DROP 2>/dev/null || true
-                    iptables -C FORWARD -s "$src" -j DROP 2>/dev/null || \
-                        iptables -A FORWARD -s "$src" -j DROP 2>/dev/null || true
-                done < /run/ips_blacklist
-            fi
+            for blfile in /run/ips_blacklist /run/contain_blacklist; do
+                if [ -f "$blfile" ]; then
+                    while read -r src; do
+                        [ -z "$src" ] && continue
+                        iptables -C INPUT -s "$src" -j DROP 2>/dev/null || \
+                            iptables -A INPUT -s "$src" -j DROP 2>/dev/null || true
+                        iptables -C FORWARD -s "$src" -j DROP 2>/dev/null || \
+                            iptables -A FORWARD -s "$src" -j DROP 2>/dev/null || true
+                    done < "$blfile"
+                fi
+            done
             sleep 5
         done
     ) &
