@@ -434,7 +434,13 @@ def scenario_autonomous(report):
 
     # spread_local + scan cycle evidence lives in the BOT's docker log, not
     # the evidence files (scan_subnet only probes, never writes to targets).
-    botlog = bot_log_since(window_start)
+    # Use bot_log_full(), not bot_log_since(): after a force-recreate the
+    # --since filter intermittently returns an empty log on GH runners (clock
+    # skew between driver and dockerd), which false-FAILed this check while
+    # propagation PASSed — drops prove spread_local ran. S1's c2drive conf
+    # never triggers spread_local (its C2 stays connected), so the full-log
+    # grep cannot match S1 leftovers.
+    botlog = bot_log_full()
     scan_hits = [l for l in botlog.splitlines() if "Local spread cycle" in l or "scan:" in l]
     report.add("Autonomous scan cycle runs (spread_local path)",
                "PASS" if scan_hits else "FAIL",
