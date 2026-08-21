@@ -23,12 +23,19 @@ while [ $# -gt 0 ]; do
     --profile) PROFILE="${2:-}"; shift 2 ;;
     --c2) C2_MODE="${2:-real}"; shift 2 ;;
     --keep) KEEP=1; shift ;;
+    --training) TRAINING="${2:-}"; shift 2 ;;
     *) shift ;;
   esac
 done
 
 # Expand a named profile (#153) to its posture. The mapping mirrors
 # defence/posture.yaml `profiles:`. Keep the two in sync.
+# Training mode (#163): run a named training scenario via run_training.py.
+if [ -n "${TRAINING:-}" ]; then
+    echo "TRAINING: $TRAINING"
+    exec python3 "$BASE/tests/sim/run_training.py" --scenario "$TRAINING" --posture "$POSTURE"
+fi
+
 if [ -n "$PROFILE" ]; then
   case "$PROFILE" in
     legacy-unpatched)  POSTURE="lax" ;;
