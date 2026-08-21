@@ -138,7 +138,27 @@ fi
 
 # 3. Boot stack
 echo "[3/6] Booting stack..."
-$COMPOSE_BASE -f docker-compose.fleet.yml up -d --remove-orphans --force-recreate 2>&1 | tail -5
+# Pre-flight: prune stale networks from prior runs on this runner (the
+# 172.29.0.0/16 subnet can linger if a previous job's teardown was partial).
+docker network prune -f >/dev/null 2>&1 || true
+# Retry compose up up to 3 times: "Address already in use" is an intermittent
+# race between container start ordering and network address assignment on
+# loaded runners (all static IPs are verified unique).
+COMPOSE_UP_OK=0
+for attempt in 1 2 3; do
+    if $COMPOSE_BASE -f docker-compose.fleet.yml up -d --remove-orphans --force-recreate 2>&1 | tail -5; then
+        COMPOSE_UP_OK=1
+        break
+    fi
+    echo "[3/6] compose up failed (attempt $attempt/3) — pruning and retrying..."
+    $COMPOSE_BASE -f docker-compose.fleet.yml down --remove-orphans >/dev/null 2>&1 || true
+    docker network prune -f >/dev/null 2>&1 || true
+    sleep 5
+done
+if [ "$COMPOSE_UP_OK" != "1" ]; then
+    echo "ERROR: compose up failed after 3 attempts"
+    exit 1
+fi
 
 # 4. Wait for services to be ready
 echo "[4/6] Waiting for services..."
