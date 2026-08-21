@@ -23,6 +23,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install PyYAML (Sigma schema stage needs it)
+        run: pip install --quiet pyyaml
+
       - name: Validate detections (schema, source-drift, replay)
         run: |
           python3 detections/validate.py --strict
