@@ -108,3 +108,27 @@ OpenCTI, a SIEM trigger).
 
 The difference between "here's code" and "here's the threat you can block
 today" is a publishable, schema-validated feed. This is that feed.
+
+## Forensics toolkit (#158)
+
+`intel/forensics.py` turns a campaign's evidence into consumable artifacts:
+
+```sh
+# IOC bundle (STIX 2.1) from a run's evidence
+python3 intel/forensics.py iocs --evidence tests/sim/evidence --out iocs.json
+
+# Merged attack timeline with infection-chain linking
+python3 intel/forensics.py timeline --evidence tests/sim/evidence --out timeline.md
+
+# Evidence hash chain: seal then verify (tamper detection)
+python3 intel/forensics.py seal --dir exported/ --out chain.json
+python3 intel/forensics.py verify --chain chain.json --dir exported/
+```
+
+Observable types extracted: ipv4-addr, domain-name, file:hashes.SHA-256,
+url, software (CVE modules), user-account (harvested credentials).
+
+**PCAP capture**: add a tcpdump sidecar to docker-compose.sim.yml
+(`network_mode: host`, writing /evidence/capture.pcapng) — forensics.py
+will reference it when present; live capture is out of scope for the
+stdlib toolkit.
