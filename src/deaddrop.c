@@ -66,7 +66,22 @@ static int dd_verify(const notnet_bot_t *bot, const char *body) {
         log_warn("Dead-drop: blob has no secret= field, rejected");
         return 0;
     }
-    if (strcmp(got, bot->secret) != 0) {
+    /* #237: compare CONSTANT-TIME, matching http_body_has_secret
+     * (#175/#181) and the proxy/relay token checks (#11). Length is
+     * checked first (it leaks nothing the echo does not), then a
+     * volatile-accumulate XOR loop covers the full secret so mismatch
+     * position is not observable in timing. */
+    size_t glen = strlen(got);
+    size_t slen = strlen(bot->secret);
+    if (glen != slen) {
+        log_warn("Dead-drop: secret mismatch, blob rejected");
+        return 0;
+    }
+    volatile unsigned char diff = 0;
+    for (size_t i = 0; i < slen; i++) {
+        diff |= (unsigned char)got[i] ^ (unsigned char)bot->secret[i];
+    }
+    if (diff != 0) {
         log_warn("Dead-drop: secret mismatch, blob rejected");
         return 0;
     }
