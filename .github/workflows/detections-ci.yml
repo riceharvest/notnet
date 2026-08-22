@@ -59,8 +59,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Optional stix2 schema validation
-        run: pip install --quiet stix2 || true
+      # Schema validation is NOT optional here (#242): if stix2 can't be
+      # installed, fail loudly instead of silently downgrading to the
+      # structural-only check inside build_intel.py.
+      - name: Install stix2 (schema gate is mandatory)
+        run: |
+          pip install --quiet stix2
+          python3 -c "import stix2" \
+            || { echo "::error::stix2 unavailable — refusing to run the STIX schema gate without it"; exit 1; }
 
       - name: Build + assert intel bundle matches source (no drift)
         run: |

@@ -21,6 +21,8 @@ services:
 
   # ── Scenario B: Mock C2 test ──
   # Comment out bot-no-net to run scenario B only, or run both together
+  # Healthchecks (#245): the bot connects on boot; depends_on alone only
+  # waits for container start, which loses the startup race.
   mock-irc:
     image: python:3.11-slim
     container_name: mock-irc
@@ -29,6 +31,12 @@ services:
       - ./tests:/app
     expose:
       - "6667"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 6667), timeout=2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
     networks:
       - testnet
 
@@ -40,6 +48,12 @@ services:
       - ./tests:/app
     expose:
       - "8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 8080), timeout=2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
     networks:
       - testnet
 
@@ -51,6 +65,12 @@ services:
       - ./tests:/app
     expose:
       - "22"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 22), timeout=2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
     networks:
       - testnet
 
@@ -62,6 +82,12 @@ services:
       - ./tests:/app
     expose:
       - "6379"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 6379), timeout=2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
     networks:
       - testnet
 
@@ -70,10 +96,14 @@ services:
     container_name: notnet-mock-c2
     command: ["notnet"]
     depends_on:
-      - mock-irc
-      - mock-http
-      - mock-ssh
-      - mock-redis
+      mock-irc:
+        condition: service_healthy
+      mock-http:
+        condition: service_healthy
+      mock-ssh:
+        condition: service_healthy
+      mock-redis:
+        condition: service_healthy
     volumes:
       - ./tests/notnet.conf.mock:/etc/notnet.conf:ro
     networks:

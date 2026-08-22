@@ -14,3 +14,12 @@ payload
 *.log
 __pycache__
 **/__pycache__
+
+# Root Dockerfile context (`COPY . .`, #243): never ship C2 runtime state,
+# attestation artifacts or release bundles into the builder layer.
+c2.db
+c2.db-shm
+c2.db-wal
+BUILD-ATTESTATION.json
+dist
+notnet
