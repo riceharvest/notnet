@@ -117,6 +117,14 @@ def cred_ok(creds, user, password):
 
 # ─────────────────────────── HTTP/CVE handlers ───────────────────────────
 
+def is_drop_cmd(cmd):
+    """#305: drop-vs-verify dispatch keys on the actual payload-delivery
+    signature — the C2 download URL /bot/notnet?token=<tok> (or its opt-in
+    legacy ?secret= fallback) that build_drop_url() embeds in every drop
+    command — never on the downloader name ('wget'), which can also appear
+    inside benign probe/verify traffic."""
+    return "/bot/notnet?" in (cmd or "")
+
 def http_response(conn, body, ctype="text/html", code="200 OK", extra=""):
     body_b = body.encode("utf-8") if isinstance(body, str) else body
     resp = (
@@ -184,8 +192,11 @@ def handle_http_cve(conn, addr):
                 mdc = params.get("mdc", [""])[0]
                 cmd = urllib.parse.unquote(mdc)
                 log(f"TBK POST {addr[0]}: {path[:200]} body={body_txt[:200]}")
-                # verify echoes token back; drop executes payload
-                if "wget" in cmd:
+                if not cmd.strip():
+                    # #305: an empty mdc is not a verify — no echo.
+                    http_response(conn, "TBK 400", code="400 Bad Request")
+                    log(f"TBK POST empty mdc -> ignored")
+                elif is_drop_cmd(cmd):  # #305: drop signature, not 'wget'
                     http_response(conn, "TBK ok: " + cmd)
                     log(f"TBK DROP received cmd={cmd!r}")
                     execute_drop(cmd)
@@ -208,12 +219,21 @@ def handle_http_cve(conn, addr):
                 log(f"HG532 verify on partial-patch {addr[0]} -> no echo (patched)")
                 return
             if method == "POST" and "/ctrlt/DeviceUpgrade_1" in path:
-                soap_action = headers.get("soapaction", "")
+                soap_action = headers.get("soapaction", "").strip().strip('"')
                 log(f"HG532 POST {addr[0]} SOAPAction={soap_action[:100]} body={body_txt[:200]}")
-                if "wget" in body_txt:
+                # #307: CVE-2017-17215 requires SOAPAction
+                # urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade
+                # (what the module sends); anything else gets no success
+                # envelope and no drop.
+                if soap_action != "urn:schemas-upnp-org:service:WANPPPConnection:1#DeviceUpgrade":
+                    http_response(conn, '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><s:Fault>UPnPError</s:Fault></s:Body></s:Envelope>', code="500 Internal Server Error")
+                    log(f"HG532 POST refused: missing/invalid SOAPAction {soap_action[:100]!r}")
+                    return
+                cmd = extract_cmd(body_txt)
+                if is_drop_cmd(cmd):  # #305: drop signature, not 'wget'
                     http_response(conn, '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:UpgradeResponse xmlns:u="urn:schemas-upnp-org:service:WANPPPConnection:1"><NewStatusURL>HUAWEIUPNP</NewStatusURL></u:UpgradeResponse></s:Body></s:Envelope>')
-                    log(f"HG532 DROP received (wget in body)")
-                    execute_drop(extract_cmd(body_txt))
+                    log(f"HG532 DROP received cmd={cmd!r}")
+                    execute_drop(cmd)
                 else:
                     # probe/verify: HUAWEIUPNP envelope
                     http_response(conn, '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:UpgradeResponse xmlns:u="urn:schemas-upnp-org:service:WANPPPConnection:1"><NewStatusURL>HUAWEIUPNP</NewStatusURL></u:UpgradeResponse></s:Body></s:Envelope>')
@@ -241,7 +261,11 @@ def handle_http_cve(conn, addr):
                 params = urllib.parse.parse_qs(body_txt)
                 sys_cmd = params.get("sysCmd", [""])[0]
                 log(f"Realtek POST {addr[0]}: sysCmd={sys_cmd[:200]}")
-                if "wget" in sys_cmd:
+                if not sys_cmd.strip():
+                    # #305: an empty sysCmd is not a verify — no echo.
+                    http_response(conn, "400", code="400 Bad Request")
+                    log(f"Realtek POST empty sysCmd -> ignored")
+                elif is_drop_cmd(sys_cmd):  # #305: drop signature, not 'wget'
                     http_response(conn, sys_cmd)
                     log(f"Realtek DROP received cmd={sys_cmd!r}")
                     execute_drop(sys_cmd)
@@ -276,7 +300,11 @@ def handle_http_cve(conn, addr):
                 # command (chmod +x) collapses into a space.
                 cmd = (params.get("cmd", [""])[0])
                 log(f"BOA POST {addr[0]}: cmd={cmd[:200]}")
-                if "wget" in cmd:
+                if not cmd.strip():
+                    # #305: an empty cmd is not a verify — no echo.
+                    http_response(conn, "Boa 400", code="400 Bad Request")
+                    log(f"BOA POST empty cmd -> ignored")
+                elif is_drop_cmd(cmd):  # #305: drop signature, not 'wget'
                     http_response(conn, "Boa ok: " + cmd)
                     log(f"BOA DROP received cmd={cmd!r}")
                     execute_drop(cmd)
@@ -308,7 +336,11 @@ def handle_http_cve(conn, addr):
                 command = params.get("command", [""])[0]
                 cmd = command[len("zysh "):] if command.startswith("zysh ") else command
                 log(f"ZYXEL POST {addr[0]}: command={command[:200]}")
-                if "wget" in cmd:
+                if not cmd.strip():
+                    # #305: an empty command is not a verify — no echo.
+                    http_response(conn, "zysh 400", code="400 Bad Request")
+                    log(f"ZYXEL POST empty command -> ignored")
+                elif is_drop_cmd(cmd):  # #305: drop signature, not 'wget'
                     http_response(conn, "zysh ok: " + cmd)
                     log(f"ZYXEL DROP received cmd={cmd!r}")
                     execute_drop(cmd)
@@ -336,10 +368,23 @@ def handle_http_cve(conn, addr):
             if method == "POST" and path.startswith("/HNAP1"):
                 soap_action = headers.get("soapaction", "")
                 log(f"HNAP POST {addr[0]} SOAPAction={soap_action[:200]}")
+                # #307: CVE-2015-2051 rides the SOAPAction header of an
+                # /HNAP1 request shaped "http://purenetworks.com/HNAP1/
+                # <Action>/`cmd`" (what the module sends). Requests without
+                # that shape get a fault, never an echo or a drop.
+                if not (soap_action.startswith('"http://purenetworks.com/HNAP1/')
+                        and "`" in soap_action):
+                    http_response(conn, "HNAP1 fault", code="500 Internal Server Error")
+                    log(f"HNAP POST refused: missing/invalid SOAPAction {soap_action[:100]!r}")
+                    return
                 # injection rides inside backticks in SOAPAction
                 m = re.search(r"`([^`]*)`", soap_action)
                 cmd = m.group(1) if m else ""
-                if "wget" in cmd:
+                if not cmd.strip():
+                    # #305: an empty injection is not a verify — no echo.
+                    http_response(conn, "HNAP1 400", code="400 Bad Request")
+                    log(f"HNAP POST empty injection -> ignored")
+                elif is_drop_cmd(cmd):  # #305: drop signature, not 'wget'
                     http_response(conn, "HNAP1 ok: " + cmd)
                     log(f"HNAP DROP received cmd={cmd!r}")
                     execute_drop(cmd)
