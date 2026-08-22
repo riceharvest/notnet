@@ -21,7 +21,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUNDLE = os.path.join(REPO, "intel", "intel-latest.json")
-COLLECTION_ID = "notnet-indicators"
+# #205: TAXII 2.1 requires collection identifiers to be UUIDs. Derive a
+# stable UUID from the human-readable name so the id never changes between
+# runs; the alias below stays usable as a path alternative.
+COLLECTION_NAME = "notnet-indicators"
+COLLECTION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, COLLECTION_NAME))
 TITLE = "notnet detection intel"
 
 
@@ -57,8 +61,10 @@ class Handler(BaseHTTPRequestHandler):
                 "collections": f"/taxii2/api/collections/",
             })
         if path in ("/taxii2/api/collections", "/taxii2/api/collections/"):
+            # #204: Collections resource per TAXII 2.1 section 5 — the key
+            # is "collections", not "objects".
             return self._send(200, {
-                "objects": [{
+                "collections": [{
                     "id": COLLECTION_ID,
                     "title": TITLE,
                     "description": "notnet C2 domains, killswitch domain, CVE modules, wire-format fingerprints, ATT&CK mapping.",
@@ -68,7 +74,8 @@ class Handler(BaseHTTPRequestHandler):
                 }],
                 "spec_version": "2.1",
             })
-        if path == f"/taxii2/api/collections/{COLLECTION_ID}":
+        if path in (f"/taxii2/api/collections/{COLLECTION_ID}",
+                    f"/taxii2/api/collections/{COLLECTION_NAME}"):
             return self._send(200, {
                 "id": COLLECTION_ID,
                 "title": TITLE,
@@ -76,7 +83,8 @@ class Handler(BaseHTTPRequestHandler):
                 "can_read": True, "can_write": False,
                 "media_types": ["application/stix+json;version=2.1"],
             })
-        if path == f"/taxii2/api/collections/{COLLECTION_ID}/objects":
+        if path in (f"/taxii2/api/collections/{COLLECTION_ID}/objects",
+                    f"/taxii2/api/collections/{COLLECTION_NAME}/objects"):
             return self._send(200, {
                 "objects": _load_bundle().get("objects", []),
                 "spec_version": "2.1",

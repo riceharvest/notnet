@@ -4102,11 +4102,15 @@ int protocol_resolve_host(const char *host) {
 char *protocol_hex_encode(const char *data, int len) {
     static char buf[1024];
     int pos = 0;
-    
-    for (int i = 0; i < len && pos < 1023; i++) {
+
+    /* AUDIT 79/#250: each snprintf(buf + pos, 3, ...) writes 2 hex chars
+     * plus a NUL at pos+2, so pos must stop at 1022 — the old bound of
+     * 1023 let the final iteration write the NUL one byte past the end
+     * (and buf[pos] with pos == 1024 overflowed again). */
+    for (int i = 0; i < len && pos < 1022; i++) {
         pos += snprintf(buf + pos, 3, "%02x", (unsigned char)data[i]);
     }
-    
+
     buf[pos] = '\0';
     return buf;
 }

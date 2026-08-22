@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG = os.path.join(REPO, "include", "config.h")
@@ -230,9 +230,18 @@ def cmd_timeline(args):
                 ts = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
             except ValueError:
                 continue
+            # #198: keep the parsed instant alongside the raw display string;
+            # naive timestamps are treated as UTC so mixed-offset evidence
+            # compares correctly.
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
             events.append({"ts": ts_s, "device": device, "event_type": et,
-                           "detail": msg[:160]})
-    events.sort(key=lambda e: e["ts"])
+                           "detail": msg[:160], "_dt": ts})
+    # #198: sort on the parsed datetime, not the raw ISO string —
+    # lexicographic order misorders "+00:00" vs "+02:00" evidence.
+    events.sort(key=lambda e: (e["_dt"], e["ts"]))
+    for e in events:
+        del e["_dt"]
 
     # infection-chain linking: device A's DROP URL in device B's EXECUTING DROP
     chains = []
@@ -279,6 +288,14 @@ def _hash_file(p):
     return h.hexdigest()
 
 
+def _chain_head(entries):
+    """#301: digest over the whole entry list — the chain head the verifier
+    recomputes so an edited chain.json is detectable even when its internal
+    prev_hash links were rebuilt consistently."""
+    canonical = json.dumps(entries, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def cmd_seal(args):
     entries = []
     prev = GENESIS
@@ -291,7 +308,16 @@ def cmd_seal(args):
         prev = h
     with open(args.out, "w") as f:
         json.dump(entries, f, indent=2)
+    head = _chain_head(entries)
+    # #301: anchor the chain head OUTSIDE the evidence. Print it for
+    # out-of-band custody and write it to a sidecar next to the chain
+    # file (which should itself live outside the sealed directory).
+    head_path = args.out + ".head"
+    with open(head_path, "w") as f:
+        f.write(head + "\n")
     print(f"sealed {len(entries)} files → {args.out}")
+    print(f"CHAIN HEAD (record out-of-band, e.g. in the case file): {head}")
+    print(f"chain head written to {head_path} — keep it OUT of the sealed dir")
     return 0
 
 
@@ -302,7 +328,11 @@ def cmd_verify(args):
         print(f"VERIFY FAIL: cannot read chain: {e}", file=sys.stderr)
         return 1
     base = args.dir or os.path.dirname(os.path.abspath(args.chain))
+    head_path = args.chain + ".head"
+    chain_fn = os.path.basename(os.path.abspath(args.chain))
+    head_fn = os.path.basename(head_path)
     prev = GENESIS
+    covered = set()
     for i, e in enumerate(chain):
         if e["prev_hash"] != prev:
             print(f"VERIFY FAIL at entry {i} ({e['file']}): chain break")
@@ -317,8 +347,36 @@ def cmd_verify(args):
                   f"(expected {e['sha256'][:16]}..., got {actual[:16]}...) — "
                   f"file tampered")
             return 1
+        covered.add(e["file"])
         prev = e["sha256"]
-    print(f"VERIFY OK: {len(chain)} files, chain intact")
+    # #301: recompute the chain-head digest and check it against the
+    # anchored copy — a re-sealed (consistently rebuilt) chain.json no
+    # longer verifies clean.
+    head = _chain_head(chain)
+    if os.path.isfile(head_path):
+        with open(head_path) as f:
+            recorded = f.read().strip()
+        if recorded != head:
+            print(f"VERIFY FAIL: chain-head mismatch — chain.json was "
+                  f"modified after sealing (expected {recorded[:16]}..., "
+                  f"recomputed {head[:16]}...)")
+            return 1
+    else:
+        print(f"NOTICE: no anchored head found at {head_path}; compare the "
+              f"recomputed head against out-of-band custody: {head}")
+    # #197: tampering-by-addition — any file in the evidence dir that the
+    # chain does not cover fails verification (planting fake evidence must
+    # not pass as "chain intact").
+    for fn in sorted(os.listdir(base)):
+        p = os.path.join(base, fn)
+        if not os.path.isfile(p):
+            continue
+        if fn in covered or fn in (chain_fn, head_fn):
+            continue
+        print(f"VERIFY FAIL: unsealed file present in evidence dir: {fn} "
+              f"— added after sealing")
+        return 1
+    print(f"VERIFY OK: {len(chain)} files, chain intact, head anchored")
     return 0
 
 

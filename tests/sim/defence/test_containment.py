@@ -64,7 +64,8 @@ if kill_files:
     check("kill command correct", data["cmd"] == "kill")
 
 print("== evidence lock: files + chain created ==")
-containment_dirs = [d for d in os.listdir(os.path.join(ev3, "containment"))] \
+containment_dirs = [d for d in os.listdir(os.path.join(ev3, "containment"))
+                    if os.path.isdir(os.path.join(ev3, "containment", d))] \
     if os.path.isdir(os.path.join(ev3, "containment")) else []
 check("evidence dir created", len(containment_dirs) >= 1)
 if containment_dirs:

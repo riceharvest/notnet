@@ -137,14 +137,38 @@ class ContainmentController:
         dest = os.path.join(self.evidence_dir, "containment",
                             f"{src}-{int(time.time())}")
         os.makedirs(dest, exist_ok=True)
+        # #301: chain successive locks — start from the previous lock's
+        # head (kept in a state file OUTSIDE any sealed directory) so
+        # continuity across containment events is provable, instead of
+        # restarting at GENESIS per event.
+        containment_root = os.path.join(self.evidence_dir, "containment")
+        state_path = os.path.join(containment_root, ".chain-state.json")
+        try:
+            with open(state_path) as f:
+                prev = json.load(f).get("head", "0" * 64)
+        except (OSError, ValueError):
+            prev = "0" * 64
         chain = []
-        prev = "0" * 64
+        # #301: bind the lock to the ids_alerts.log entries that triggered
+        # it — the alert digest is hashed into the chain's first entry.
+        alert_binding = "none"
+        try:
+            with open(os.path.join(self.evidence_dir, "ids_alerts.log"),
+                      errors="replace") as f:
+                matched_alerts = [ln for ln in f if src in ln]
+            if matched_alerts:
+                alert_binding = hashlib.sha256(
+                    "".join(matched_alerts).encode()).hexdigest()
+        except OSError:
+            pass
         device_log = os.path.join(self.evidence_dir, f"{src}.log")
         if os.path.isfile(device_log):
             shutil.copy2(device_log, dest)
             h = hashlib.sha256(
                 open(os.path.join(dest, f"{src}.log"), "rb").read()).hexdigest()
-            chain.append({"file": f"{src}.log", "sha256": h, "prev_hash": prev})
+            chain.append({"file": f"{src}.log", "sha256": h,
+                          "prev_hash": prev,
+                          "alert_binding": alert_binding})
             prev = h
         http_log = os.path.join(self.evidence_dir, "http.log")
         matched = []
@@ -166,7 +190,23 @@ class ContainmentController:
         cp = os.path.join(dest, "chain.json")
         with open(cp, "w") as f:
             json.dump(chain, f, indent=2)
+        # #301: anchor the chain head outside the sealed directory — write
+        # the head digest to the containment root and persist it as the
+        # previous head for the next lock.
+        canonical = json.dumps(chain, sort_keys=True, separators=(",", ":"))
+        head = hashlib.sha256(canonical.encode()).hexdigest()
+        head_path = os.path.join(containment_root,
+                                 f"{os.path.basename(dest)}.head")
+        try:
+            with open(head_path, "w") as f:
+                f.write(head + "\n")
+            with open(state_path, "w") as f:
+                json.dump({"head": head}, f)
+        except OSError:
+            pass
         log(f"EVIDENCE LOCK: {len(chain)} files sealed in {dest}")
+        log(f"EVIDENCE LOCK: chain head {head} -> {head_path} "
+            f"(chained to prior locks; record out-of-band)")
         return dest
 
     def process(self, src_counts):
