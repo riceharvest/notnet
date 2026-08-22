@@ -28,6 +28,11 @@ services:
       - ./payload:/payload
       - ./evidence:/evidence
       - ./state:/state
+    # Publish the operator console to the host so it can be watched during a
+    # run without exec'ing into the container. Loopback-only; 8090 is left
+    # free for other services — override with SIM_CONSOLE_HOST_PORT.
+    ports:
+      - "127.0.0.1:${SIM_CONSOLE_HOST_PORT:-8091}:8090"
     environment:
       SIM_EVIDENCE: /evidence/http.log
       SIM_BOT_IP: "172.29.0.9"

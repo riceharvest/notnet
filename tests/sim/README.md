@@ -122,3 +122,15 @@ output.logstash:
 
 Unit tests: `python3 tests/sim/defence/test_siem_emit.py` (validates the
 RFC 5424 header regex, CEF pipe count = 7, ECS required fields; no deps).
+
+## Watching the operator dashboard during a run
+
+When the sim runs with `--c2 real`, the C2 console (dashboard) is published
+to the host on loopback only:
+
+    http://127.0.0.1:${SIM_CONSOLE_HOST_PORT:-8091}
+
+The container-internal port stays 8090; the host port is overridable so it
+never collides with other local services. The dashboard shows live fleet
+cards, a 30-min activity chart, CVE hit-rate bars and the event feed while
+the scenario runs.
