@@ -84,8 +84,12 @@ def map_botnet(evidence_dir):
                                      "first_seen": ts, "last_seen": ts})
         if ts < d["first_seen"]:
             d["first_seen"] = ts
-        if ts > d["last_seen"]:
+        # #201: track the LATEST-seen IP — a roaming device that re-appears
+        # from a different address must report (and be segment-classified
+        # from) its last-seen address, not the first heartbeat's.
+        if ts >= d["last_seen"]:
             d["last_seen"] = ts
+            d["ip"] = ip
 
     dev_list = sorted(devices.values(), key=lambda d: d["tag"])
     for d in dev_list:
