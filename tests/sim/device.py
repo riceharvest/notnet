@@ -58,8 +58,12 @@ PAYLOAD_URL = os.environ.get("PAYLOAD_URL", "http://c2:8443/bot/notnet")
 EVIDENCE = os.environ.get("EVIDENCE", f"/evidence/{DEVICE_ID}.log")
 
 lock = threading.Lock()
-failed_auths = 0
-lockout_until = 0.0
+# Lockout state is keyed per (service, source IP) so a brute on one service
+# or from one source never contaminates another (issue #298).
+failed_auths = {}    # (proto, src_ip) -> consecutive failures since last success/reset
+lockout_until = {}   # (proto, src_ip) -> epoch ts until which auths are rejected
+LOCKOUT_THRESHOLD = 5
+LOCKOUT_SECONDS = 60
 
 
 def log(line):
@@ -72,30 +76,39 @@ def log(line):
         print(f"[{ts}] {line}", flush=True)
 
 
-def check_lockout():
-    """Return True if the device is in lockout (reject all auths)."""
+def check_lockout(proto, src_ip):
+    """Return True if (proto, src_ip) is in lockout (reject all auths)."""
     if not LOCKOUT:
         return False
     # Shared state read from per-connection threads: take the module lock so
     # we never observe a torn/partial update of lockout_until.
     with lock:
-        return time.time() < lockout_until
+        return time.time() < lockout_until.get((proto, src_ip), 0.0)
 
 
-def record_failure():
-    global failed_auths, lockout_until
+def record_failure(proto, src_ip):
+    key = (proto, src_ip)
     if not LOCKOUT:
         return
     msg = None
     with lock:
-        failed_auths += 1
-        if failed_auths >= 5:
-            lockout_until = time.time() + 60
-            msg = f"LOCKOUT triggered after {failed_auths} failures (60s)"
-            failed_auths = 0
+        n = failed_auths.get(key, 0) + 1
+        failed_auths[key] = n
+        if n >= LOCKOUT_THRESHOLD:
+            lockout_until[key] = time.time() + LOCKOUT_SECONDS
+            msg = f"LOCKOUT triggered for {proto} from {src_ip} after {n} failures ({LOCKOUT_SECONDS}s)"
+            failed_auths[key] = 0
     # log() acquires `lock` itself, so it must run outside the held lock.
     if msg:
         log(msg)
+
+
+def record_success(proto, src_ip):
+    """Reset the failure counter for (proto, src_ip) on successful auth (#298)."""
+    if not LOCKOUT:
+        return
+    with lock:
+        failed_auths.pop((proto, src_ip), None)
 
 
 def cred_ok(creds, user, password):
@@ -384,35 +397,128 @@ def execute_drop(cmd):
 
 # ─────────────────────────── Telnet handler ───────────────────────────
 
+IAC = 0xFF
+IAC_SB = 0xFA
+IAC_SE = 0xF0
+IAC_WILL = 0xFB
+IAC_WONT = 0xFC
+IAC_DO = 0xFD
+IAC_DONT = 0xFE
+
+
+def strip_iac(buf):
+    """Strip telnet IAC (RFC 854) escape sequences from buf.
+
+    Returns (clean, consumed, replies):
+      clean    - buf with IAC sequences removed (escaped 0xFF kept as one)
+      consumed - how many leading bytes of buf were fully processed; an
+                 incomplete trailing sequence is NOT consumed so the caller
+                 can wait for more bytes
+      replies  - minimal negotiation refusals: WILL->DONT, DO->WONT
+    """
+    out = bytearray()
+    replies = bytearray()
+    i, n = 0, len(buf)
+    while i < n:
+        if buf[i] != IAC:
+            out.append(buf[i])
+            i += 1
+            continue
+        if i + 1 >= n:
+            break  # incomplete sequence at end of buffer
+        cmd = buf[i + 1]
+        if cmd == IAC:  # escaped literal 0xFF
+            out.append(IAC)
+            i += 2
+        elif cmd in (IAC_WILL, IAC_WONT, IAC_DO, IAC_DONT):
+            if i + 2 >= n:
+                break  # option byte not arrived yet
+            opt = buf[i + 2]
+            if cmd == IAC_WILL:
+                replies += bytes((IAC, IAC_DONT, opt))
+            elif cmd == IAC_DO:
+                replies += bytes((IAC, IAC_WONT, opt))
+            i += 3
+        elif cmd == IAC_SB:
+            j = i + 2
+            while j + 1 < n and not (buf[j] == IAC and buf[j + 1] == IAC_SE):
+                j += 1
+            if j + 1 >= n:
+                break  # subnegotiation not terminated yet
+            i = j + 2
+        else:
+            # two-byte commands (NOP/DM/BRK/AYT/...) — drop
+            i += 2
+    return bytes(out), i, bytes(replies)
+
+
+class LineReader:
+    """Line reader that strips IAC sequences with a bounded buffer.
+
+    Keeps leftover bytes between readline() calls so pipelined credentials
+    (user+password in one packet) are parsed line-by-line instead of being
+    swallowed whole by a single recv (issue #278)."""
+
+    def __init__(self, conn, max_buf=4096):
+        self.conn = conn
+        self.max_buf = max_buf
+        self.raw = b""    # unprocessed bytes incl. incomplete IAC sequences
+        self.clean = b""  # decoded stream awaiting newline
+
+    def _fill(self):
+        chunk = self.conn.recv(256)
+        if not chunk:
+            return False
+        self.raw += chunk
+        clean, consumed, replies = strip_iac(self.raw)
+        self.raw = self.raw[consumed:]
+        self.clean += clean
+        if replies:
+            try:
+                self.conn.sendall(replies)
+            except OSError:
+                pass
+        if len(self.clean) > self.max_buf or len(self.raw) > self.max_buf:
+            raise ValueError("auth input exceeded buffer limit")
+        return True
+
+    def readline(self):
+        """Return the next CRLF/LF-terminated line, stripped; None on EOF."""
+        while True:
+            idx = self.clean.find(b"\n")
+            if idx != -1:
+                line = self.clean[:idx].rstrip(b"\r").decode(errors="replace")
+                self.clean = self.clean[idx + 1:]
+                return line.strip()
+            if not self._fill():
+                return None
+
+
 def handle_telnet(conn, addr):
     conn.settimeout(15)
     try:
         conn.sendall(b"\r\n" + DEVICE_ID.encode() + b" login: ")
-        buf = b""
-        while not buf.endswith(b"\r\n"):
-            chunk = conn.recv(256)
-            if not chunk:
-                return
-            buf += chunk
-        user = buf.strip().decode(errors="replace")
+        reader = LineReader(conn)
+        user = reader.readline()
+        if user is None:
+            return
         conn.sendall(b"Password: ")
-        buf = b""
-        while not buf.endswith(b"\r\n"):
-            chunk = conn.recv(256)
-            if not chunk:
-                return
-            buf += chunk
-        password = buf.strip().decode(errors="replace")
-        if check_lockout():
+        password = reader.readline()
+        if password is None:
+            return
+        if check_lockout("telnet", addr[0]):
             log(f"TELNET {addr[0]} auth {user} REJECTED (lockout)")
             conn.sendall(b"Login incorrect\r\n")
             return
         if cred_ok(TELNET_CREDS, user, password):
+            record_success("telnet", addr[0])
             log(f"TELNET {addr[0]} AUTH OK {user}:{password}")
             conn.sendall(b"# ")
             # read drop command
             try:
-                cmd = conn.recv(4096).decode(errors="replace")
+                cmd_raw = conn.recv(4096)
+                cmd, _, _ = strip_iac(cmd_raw)
+                cmd = cmd.decode(errors="replace")
                 log(f"TELNET {addr[0]} CMD: {cmd.strip()[:200]}")
                 if "wget" in cmd:
                     execute_drop(cmd.strip())
@@ -420,7 +526,7 @@ def handle_telnet(conn, addr):
             except socket.timeout:
                 pass
         else:
-            record_failure()
+            record_failure("telnet", addr[0])
             log(f"TELNET {addr[0]} AUTH FAIL {user}:{password}")
             conn.sendall(b"Login incorrect\r\n")
     except (socket.timeout, ConnectionError, OSError):
@@ -443,50 +549,43 @@ def handle_ssh(conn, addr):
     try:
         conn.sendall(b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4\r\n")
         # read client banner (SSH-2.0-Notnet)
-        banner = b""
-        while b"\r\n" not in banner:
-            chunk = conn.recv(1024)
-            if not chunk:
-                return
-            banner += chunk
+        reader = LineReader(conn)
+        banner = reader.readline()
+        if banner is None:
+            return
         conn.sendall(b"Username: ")
-        user_buf = b""
-        while b"\r\n" not in user_buf:
-            chunk = conn.recv(1024)
-            if not chunk:
-                return
-            user_buf += chunk
-        user = user_buf.strip().decode(errors="replace")
+        user = reader.readline()
+        if user is None:
+            return
         conn.sendall(b"Password: ")
-        pass_buf = b""
-        while b"\r\n" not in pass_buf:
-            chunk = conn.recv(1024)
-            if not chunk:
-                return
-            pass_buf += chunk
-        password = pass_buf.strip().decode(errors="replace")
+        password = reader.readline()
+        if password is None:
+            return
         if SSH_KEY_ONLY:
             # Modern sshd: PasswordAuthentication no — key auth only.
             # The bot only brute-forces passwords, so this must always fail.
             log(f"SSH {addr[0]} REJECTED (key-only auth, password auth disabled)")
             conn.sendall(b"Permission denied (publickey)\r\n")
             return
-        if check_lockout():
+        if check_lockout("ssh", addr[0]):
             log(f"SSH {addr[0]} auth {user} REJECTED (lockout)")
             conn.sendall(b"Permission denied\r\n")
             return
         if cred_ok(SSH_CREDS, user, password):
+            record_success("ssh", addr[0])
             log(f"SSH {addr[0]} AUTH OK {user}:{password}")
             conn.sendall(b"# \r\n")
             try:
-                cmd = conn.recv(4096).decode(errors="replace")
+                cmd_raw = conn.recv(4096)
+                cmd, _, _ = strip_iac(cmd_raw)
+                cmd = cmd.decode(errors="replace")
                 log(f"SSH {addr[0]} CMD: {cmd.strip()[:200]}")
                 if "wget" in cmd:
                     execute_drop(cmd.strip())
             except socket.timeout:
                 pass
         else:
-            record_failure()
+            record_failure("ssh", addr[0])
             log(f"SSH {addr[0]} AUTH FAIL {user}:{password}")
             conn.sendall(b"Permission denied\r\n")
     except (socket.timeout, ConnectionError, OSError):
@@ -567,12 +666,13 @@ def handle_smb(conn, addr):
                     account = toks[i - 1].decode("latin-1", "replace")
             except ValueError:
                 pass
-        if check_lockout():
+        if check_lockout("smb", addr[0]):
             log(f"SMB {addr[0]} auth REJECTED (lockout)")
             smb_status_response(conn, 0xC000006A)  # STATUS_LOGON_FAILURE
             return
         ok = cred_ok(SMB_CREDS, account, password) if SMB_CREDS else False
         if ok:
+            record_success("smb", addr[0])
             log(f"SMB {addr[0]} AUTH OK account={account}")
             smb_status_response(conn, 0, uid=30000)
             # read drop command (raw bytes after setup)
@@ -584,7 +684,7 @@ def handle_smb(conn, addr):
             except socket.timeout:
                 pass
         else:
-            record_failure()
+            record_failure("smb", addr[0])
             log(f"SMB {addr[0]} AUTH FAIL account={account}")
             smb_status_response(conn, 0xC000006A)
     except (socket.timeout, ConnectionError, OSError):
@@ -649,11 +749,12 @@ def handle_redis(conn, addr):
                     parts = ln.split()
                     if len(parts) >= 2 and parts[1] == REDIS_PASS:
                         authed = True
+                        record_success("redis", addr[0])
                         conn.sendall(b"+OK\r\n")
                         log(f"REDIS {addr[0]} AUTH OK")
                     else:
                         authed = False
-                        record_failure()
+                        record_failure("redis", addr[0])
                         conn.sendall(b"-ERR invalid password\r\n")
                         log(f"REDIS {addr[0]} AUTH FAIL")
                 elif not authed:
