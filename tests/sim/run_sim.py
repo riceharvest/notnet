@@ -225,8 +225,16 @@ def recreate_bot(conf):
     for f in files:
         args += ["-f", f]
     args += ["up", "-d", "--force-recreate", "bot"]
-    subprocess.run(args, cwd=BASE, env=env, capture_output=True, text=True,
-                   timeout=120)
+    r = subprocess.run(args, cwd=BASE, env=env, capture_output=True, text=True,
+                       timeout=120)
+    if r.returncode != 0:
+        detail = (r.stderr or "").strip() or "(no stderr)"
+        log(f"  ERROR: bot recreate failed for config {conf} "
+            f"(docker compose exit {r.returncode}): {detail}")
+        raise RuntimeError(
+            f"recreate_bot failed for {conf}: docker compose exited "
+            f"{r.returncode} — subsequent assertions would evaluate stale "
+            f"container state.\n{detail}")
     log(f"bot recreated with config {conf}")
 
 
