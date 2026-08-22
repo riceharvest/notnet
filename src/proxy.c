@@ -418,7 +418,20 @@ int proxy_start(notnet_bot_t *bot) {
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bot->proxy_bind[0] != '\0') {
+        /* SECURITY FIX (#295): least-privilege bind. A configured but
+         * unparseable address refuses to start (never fall back to
+         * 0.0.0.0 — that would silently widen the listener). */
+        if (inet_pton(AF_INET, bot->proxy_bind, &sa.sin_addr) != 1) {
+            log_warn("SOCKS5: invalid proxy_bind='%s' — refusing to start",
+                     bot->proxy_bind);
+            close(lfd);
+            pthread_mutex_unlock(&g_proxy_mutex);
+            return -1;
+        }
+    } else {
+        sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
     sa.sin_port = htons((uint16_t)bot->proxy_port);
     if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         log_warn("SOCKS5: bind 0.0.0.0:%u failed: %s",
@@ -449,7 +462,9 @@ int proxy_start(notnet_bot_t *bot) {
     g_proxy_running = 1;
     pthread_mutex_unlock(&g_proxy_mutex);
 
-    log_info("SOCKS5: proxy listening on 0.0.0.0:%u", (unsigned)g_proxy_port);
+    log_info("SOCKS5: proxy listening on %s:%u",
+             bot->proxy_bind[0] ? bot->proxy_bind : "0.0.0.0",
+             (unsigned)g_proxy_port);
     return 0;
 }
 

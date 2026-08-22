@@ -407,7 +407,19 @@ int mesh_start(notnet_bot_t *bot) {
     if (lfd < 0) { pthread_mutex_unlock(&g_peer_mutex); return -1; }
     int one = 1; setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET; sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    sa.sin_family = AF_INET;
+    if (bot->mesh_bind[0] != '\0') {
+        /* SECURITY FIX (#295): least-privilege bind. A configured but
+         * unparseable address refuses to start (never fall back to
+         * 0.0.0.0 — that would silently widen the listener). */
+        if (inet_pton(AF_INET, bot->mesh_bind, &sa.sin_addr) != 1) {
+            log_warn("MESH: invalid mesh_bind='%s' — refusing to start",
+                     bot->mesh_bind);
+            close(lfd); pthread_mutex_unlock(&g_peer_mutex); return -1;
+        }
+    } else {
+        sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
     sa.sin_port = htons((uint16_t)g_mesh_port);
     if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         log_warn("MESH: bind 0.0.0.0:%u failed: %s", (unsigned)g_mesh_port, strerror(errno));

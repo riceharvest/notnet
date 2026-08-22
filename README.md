@@ -268,11 +268,14 @@ Config is loaded from `/etc/notnet.conf` (key=value).
 | `proxy_enabled` | `0` | Start SOCKS5 proxy at boot (requires token) |
 | `proxy_port` | `1080` | Proxy listen port |
 | `proxy_token` | *(none)* | Proxy password (RFC 1929); no default (or `NOTNET_PROXY_TOKEN`) |
+| `proxy_bind` | `0.0.0.0` | SOCKS5 listener bind address (IPv4); set to one interface IP for least-privilege binding |
 | `relay_enabled` | `0` | Start relay at boot (requires token) |
 | `relay_port` | `1081` | Relay listen port |
 | `relay_token` | *(none)* | Relay client token; no default (or `NOTNET_RELAY_TOKEN`) |
+| `relay_bind` | `0.0.0.0` | Relay listener bind address (IPv4) |
 | `mesh_enabled` | `0` | Start the P2P command/peer mesh at boot (requires `relay_token` + operator pubkey) |
 | `mesh_port` | `1082` | Mesh listener port (accepts peer `MESH` frames) |
+| `mesh_bind` | `0.0.0.0` | Mesh listener bind address (IPv4) |
 | `mesh_operator_pubkey` | *(none)* | 64-hex ed25519 operator public key; commands are ed25519-signed and verified against it (fail-closed) |
 | `mesh_static_peers` | *(none)* | Up to `MESH_PEER_MAX` (16) seed peers, one per line as `host:port` |
 | `plugin_enabled` | `1` | Enable the plugin framework |

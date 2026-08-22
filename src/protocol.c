@@ -4778,6 +4778,12 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "proxy_token") == 0) {
             strncpy(bot->proxy_token, value, sizeof(bot->proxy_token) - 1);
             bot->proxy_token[sizeof(bot->proxy_token) - 1] = '\0';
+        } else if (strcmp(key, "proxy_bind") == 0) {
+            /* SECURITY FIX (#295): least-privilege listener bind address.
+             * Empty = 0.0.0.0 (all interfaces, legacy default). Validated
+             * at proxy_start(); an invalid address refuses to start. */
+            strncpy(bot->proxy_bind, value, sizeof(bot->proxy_bind) - 1);
+            bot->proxy_bind[sizeof(bot->proxy_bind) - 1] = '\0';
         } else if (strcmp(key, "relay_enabled") == 0) {
             /* SECURITY FIX (#91): ORB-style relay toggle. The accept
              * thread is started at boot (notnet.c) only when this is 1
@@ -4794,6 +4800,12 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "relay_token") == 0) {
             strncpy(bot->relay_token, value, sizeof(bot->relay_token) - 1);
             bot->relay_token[sizeof(bot->relay_token) - 1] = '\0';
+        } else if (strcmp(key, "relay_bind") == 0) {
+            /* SECURITY FIX (#295): least-privilege listener bind address.
+             * Empty = 0.0.0.0 (all interfaces, legacy default). Validated
+             * at relay_start(); an invalid address refuses to start. */
+            strncpy(bot->relay_bind, value, sizeof(bot->relay_bind) - 1);
+            bot->relay_bind[sizeof(bot->relay_bind) - 1] = '\0';
         } else if (strncmp(key, "mesh_static_peers_", 18) == 0) {
             /* SECURITY FIX (#139): static bootstrap peers for the P2P
              * mesh, mesh_static_peers_1..N = host:port. */
@@ -4808,6 +4820,12 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "mesh_port") == 0) {
             int v = atoi(value);
             if (v >= 1 && v <= 65535) bot->mesh_port = (uint16_t)v;
+        } else if (strcmp(key, "mesh_bind") == 0) {
+            /* SECURITY FIX (#295): least-privilege listener bind address.
+             * Empty = 0.0.0.0 (all interfaces, legacy default). Validated
+             * at mesh_start(); an invalid address refuses to start. */
+            strncpy(bot->mesh_bind, value, sizeof(bot->mesh_bind) - 1);
+            bot->mesh_bind[sizeof(bot->mesh_bind) - 1] = '\0';
         } else if (strcmp(key, "mesh_operator_pubkey") == 0) {
             /* SECURITY FIX (#139): operator ed25519 pubkey (64 hex).
              * Validated at mesh_start(); rejected if not 64 hex. */
