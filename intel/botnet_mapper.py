@@ -103,6 +103,12 @@ def map_botnet(evidence_dir):
     # Variant fingerprint: CVE exploits attributed to devices by name match.
     # An alert attributes its CVE to every device whose tag appears in the
     # dst name or the free-text detail (dst names embed the bot tag).
+    # #200: match tags on token boundaries — a raw substring test let short
+    # tags ('cam' inside 'camera-7', 'pc' in a hostname) over-attribute.
+    tag_patterns = {
+        tag: re.compile(r"(?<![\w-])" + re.escape(tag.lower()) + r"(?![\w-])")
+        for tag in devices
+    }
     cve_attribution = {}
     for a in alerts:
         if a["sig"] != "CVE-EXPLOIT":
@@ -110,7 +116,7 @@ def map_botnet(evidence_dir):
         cves = CVE_RE.findall(a["detail"]) or CVE_RE.findall(a.get("dst", ""))
         haystack = (a.get("dst", "") + " " + a["detail"]).lower()
         for tag in devices:
-            if tag.lower() in haystack:
+            if tag_patterns[tag].search(haystack):
                 for cve in cves:
                     cve_attribution.setdefault(tag, set()).add(cve)
 

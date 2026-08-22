@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timezone
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -953,6 +954,28 @@ def fw_rules_active():
         return False
 
 
+def es_doc_count(q=None):
+    """#329 — count docs in the notnet-sim-* indices by querying
+    sim-elasticsearch directly. This is real delivery proof (Filebeat can be
+    running while shipping fails); returns None if ES is unreachable."""
+    url = "http://localhost:9200/notnet-sim-*/_count"
+    if q:
+        url += "?q=" + urllib.parse.quote(q)
+    try:
+        r = subprocess.run(
+            ["docker", "exec", "sim-elasticsearch", "curl", "-fs", "-m", "10",
+             url],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return int(json.loads(r.stdout).get("count", 0))
+    except (ValueError, AttributeError):
+        return None
+
+
 def service_healthy(name):
     """True if a sim compose service container is running. Containers without a
     HEALTHCHECK (e.g. Filebeat) are treated as healthy once Running."""
@@ -1028,9 +1051,17 @@ def copy_evidence():
     d = os.path.join(REPORTS, f"evidence-{int(time.time())}")
     os.makedirs(d, exist_ok=True)
     if os.path.isdir(EVIDENCE):
-        for fn in os.listdir(EVIDENCE):
-            if fn.endswith(".log"):
-                shutil.copy2(os.path.join(EVIDENCE, fn), os.path.join(d, fn))
+        for fn in sorted(os.listdir(EVIDENCE)):
+            src = os.path.join(EVIDENCE, fn)
+            dst = os.path.join(d, fn)
+            # *.log plus the JSON artifacts the report cites (eve.json,
+            # cowrie.json, dionaea/*.json) — #292: logs-only archival lost
+            # exactly the evidence quoted in the parity report.
+            if fn.endswith(".log") or fn.endswith(".json"):
+                if os.path.isfile(src):
+                    shutil.copy2(src, dst)
+            elif fn == "dionaea" and os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True)
     return d
 
 
@@ -1200,8 +1231,10 @@ def scenario_honeypot_tier(report):
         os.path.getsize(os.path.join(dionaea_dir, f)) > 0
         for f in os.listdir(dionaea_dir) if os.path.isfile(os.path.join(dionaea_dir, f))
     ) if os.path.isdir(dionaea_dir) else False
-    # Filebeat must be up + the ELK index reachable for the capture to land in one
-    # pane. We assert the Filebeat service is healthy (it tails cowrie.json).
+    # Feedback-loop assertion (#329): container health proves nothing — Filebeat
+    # can run while shipping fails (ES down, mapping rejected, permissions).
+    # Require actual ingested docs in the notnet-sim-* index, at least one
+    # cowrie-sourced, before PASSing.
     fb_healthy = service_healthy("sim-filebeat")
     report.add("Cowrie captured the bot's SSH/Telnet TTPs (genuine cowrie.json session from bot src_ip)",
                "PASS" if cowrie_hit else "SKIP",
@@ -1209,9 +1242,18 @@ def scenario_honeypot_tier(report):
     report.add("Dionaea captured the bot's SMB drop attempt (smb1_write_file)",
                "PASS" if dionaea_hit else "SKIP",
                f"dionaea logs present={dionaea_hit}")
+    es_total = es_doc_count()
+    es_cowrie = es_doc_count("cowrie")
+    if (es_cowrie or 0) > 0:
+        fb_state = "PASS"
+    elif es_total is None or not fb_healthy:
+        fb_state = "SKIP"   # ELK stack not up in this run
+    else:
+        fb_state = "FAIL"   # stack up + filebeat healthy but zero delivery
     report.add("Filebeat ships honeypot capture to ELK (feedback loop #149)",
-               "PASS" if fb_healthy else "SKIP",
-               "sim-filebeat healthy" if fb_healthy else "sim-filebeat not healthy")
+               fb_state,
+               f"notnet-sim-* docs ingested={es_total}, cowrie-matched={es_cowrie}; "
+               + ("sim-filebeat healthy" if fb_healthy else "sim-filebeat not healthy"))
     # Feedback-loop assertion: the captured TTP maps to a detection in the matrix
     report.add("Captured TTP maps to a detection in ATTACK-COVERAGE.md",
                "PASS" if cowrie_hit else "SKIP",

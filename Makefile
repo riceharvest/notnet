@@ -5,6 +5,9 @@ CC ?= gcc
 # Hardening: stack protector, FORTIFY_SOURCE (needs -O1+), RELRO+now at link.
 # TLS builds strip -static (below) but keep the hardening flags.
 CFLAGS := -Wall -Wextra -O2 -static -fstack-protector-strong -D_FORTIFY_SOURCE=2
+# Header dependency tracking (#221): emit .d depfiles so editing include/*.h
+# rebuilds every dependent object instead of relinking stale ones.
+CFLAGS += -MMD -MP
 LDFLAGS := -lpthread -Wl,-z,relro,-z,now
 
 # TLS support: make TLS=1 to enable OpenSSL
@@ -63,6 +66,9 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+# Generated header dependencies (#221)
+-include $(OBJS:.o=.d)
+
 # ── Architecture-specific builds ──────────────────────────
 build-x86_64:
 	@echo "Building for x86_64..."
@@ -86,7 +92,7 @@ build-riscv64:
 
 # ── Clean ─────────────────────────────────────────────────
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(OBJS:.o=.d) $(TARGET)
 	rm -rf build/
 
 # ── Distribution ─────────────────────────────────────────
@@ -156,4 +162,5 @@ help:
 	@echo "Cross-compilation requires target toolchains"
 	@echo "Example: make build-x86_64"
 
-.PHONY: all clean dist help attest release
+.PHONY: all clean dist dist-src help attest release \
+	build-x86_64 build-armv7l build-aarch64 build-riscv64
