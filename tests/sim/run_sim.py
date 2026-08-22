@@ -472,12 +472,20 @@ def scenario_c2drive(report):
     tags = unique_tags(ev)
     infected = tags - {"sim-attacker-1"}
 
-    # payload execution (drop actually ran)
-    drop_hits = grep_evidence(ev, ["EXECUTING DROP", "DROP received", "DROP spawned"])
+    # payload execution (drop actually ran). AUDIT 16 (#279): the claim is
+    # scoped to the LEGACY tier, so PASS requires drop evidence from a legacy
+    # device's own log — a modern-tier or stray drop must not satisfy it, and
+    # `infected` alone proves propagation (heartbeats), not payload delivery;
+    # that is the separate row below and is reported, never OR'd into PASS.
+    all_drops = grep_evidence(ev, ["EXECUTING DROP", "DROP received", "DROP spawned"])
+    legacy_drops = [h for h in all_drops if dev_name(h[0]) in LEGACY_TIER]
+    stray_drops = [h for h in all_drops if dev_name(h[0]) not in LEGACY_TIER]
     report.add("Payload drop executed on victims (legacy tier)",
-               "PASS" if (drop_hits or infected) else "FAIL",
-               "; ".join(h[1][:80] for h in drop_hits[:5]) or
-               (f"real-device infection: {sorted(infected)[:5]}" if infected else "no drop evidence"))
+               "PASS" if legacy_drops else "FAIL",
+               "; ".join(h[1][:80] for h in legacy_drops[:5])
+               or (f"no legacy-tier drops (stray={len(stray_drops)})"
+                   + (f"; infected tags={sorted(infected)[:5]} — see propagation row"
+                      if infected else "; no infection either")))
 
     # infection propagation: heartbeat tags beyond the attacker bot
     report.add("Infected devices join C2 with own bot_tag (propagation)",
@@ -608,14 +616,17 @@ def scenario_resilience(report):
         botlog = ""
     dd_bot = [l for l in botlog.splitlines()
               if "Dead-drop" in l or "dead_drop" in l]
-    dd_hits = grep_evidence(ev, ["dead-drop", "DEADDROP", "dead_drop", "applied verified"],
-                            files=["deaddrop.log", "http.log"])
-    # AUDIT 87 (#287): a mere mention of dead-drop (config echo, attempted-but-
-    # failed fetch) must NOT satisfy this claim. Anchor PASS to the specific
-    # success marker deaddrop.c emits only after signature verification.
-    dd_verified = ([h for h in dd_hits if "applied verified C2 override" in h[1].lower()]
+    # AUDIT 87 (#264): PASS evidence is deaddrop.c's post-signature-verification
+    # marker ALONE ("Dead-drop: applied verified C2 override ...", deaddrop.c).
+    # Weak keywords ('dead-drop','DEADDROP','dead_drop') match config echoes
+    # and attempted-but-failed fetches — they are collected separately and
+    # used only as FAIL-detail context, never as PASS evidence.
+    dd_mentions = grep_evidence(ev, ["dead-drop", "DEADDROP", "dead_drop"],
+                                files=["deaddrop.log", "http.log"])
+    dd_verified = (grep_evidence(ev, ["applied verified C2 override"],
+                                 files=["deaddrop.log", "http.log"])
                    + [l for l in dd_bot if "applied verified C2 override" in l.lower()])
-    all_dd = dd_hits + [("sim-bot-log", l.strip()) for l in dd_bot]
+    all_dd = dd_mentions + [("sim-bot-log", l.strip()) for l in dd_bot]
     report.add("Dead-drop blob fetched + verified override applied",
                "PASS" if dd_verified else "FAIL",
                "; ".join(h[1][:80] for h in dd_verified[:3])
@@ -665,15 +676,19 @@ def scenario_monetization(report):
         botlog = (r.stdout or "") + (r.stderr or "")
     except Exception:
         botlog = ""
-    # AUDIT 87 (#287): 'proxy'/'SOCKS'/'relay' substrings match config echoes
-    # and known-failure lines ('proxy disabled', failed binds), so the rows
-    # could never fail on absence. Anchor PASS to the success markers the
+    # AUDIT 87 (#262/#287): 'proxy'/'SOCKS'/'relay' substrings match heartbeat
+    # inventory field names ("proxy_on":0) and config echoes on EVERY line, so
+    # those greps could never fail. Anchor PASS to success-only markers the
     # components emit only after actually binding: proxy.c's "SOCKS5: proxy
-    # listening", relay.c's "RELAY: relay listening" / protocol.c's response
-    # "relay on: listening".
+    # listening" bot-log line, relay.c's "RELAY: relay listening", and the
+    # protocol.c command responses "proxy on: listening on <port>" /
+    # "relay on: listening on <port>" — sent only when proxy_start/relay_start
+    # returned 0 (protocol.c), echoed back by the bot and logged to http.log
+    # as RESP body by c2_http.py.
     PROXY_OK = "socks5: proxy listening"
     RELAY_OK = ("relay listening on", "relay on: listening")
-    proxy_hits = grep_evidence(ev, ["SOCKS5: proxy listening"], files=["http.log", "ws.log"])
+    proxy_hits = grep_evidence(ev, ["SOCKS5: proxy listening", "proxy on: listening on"],
+                               files=["http.log", "ws.log"])
     proxy_bot = [l for l in botlog.splitlines() if PROXY_OK in l.lower()]
     relay_hits = grep_evidence(ev, ["RELAY: relay listening", "relay on: listening"],
                                files=["http.log", "ws.log"])
@@ -760,6 +775,21 @@ def scenario_remaining_parity(report):
         proxy_bind = [l for l in botlog.splitlines() if "SOCKS5: proxy listening" in l]
         if proxy_bind:
             break
+    # AUDIT 87 (#263): the old check grepped "PAYLOAD download from
+    # 172.29.0.9" — but the bot downloads /bot/notnet DIRECTLY in earlier
+    # scenarios with the same source IP and wording, so a leftover direct
+    # download satisfied the claim with zero proxied bytes. Give the proxied
+    # fetch a unique nonce route (/bot/notnet.viasocks5, staged into the
+    # payload dir like the S7 pin files) and require THAT download logged
+    # from the bot IP — a line only the proxied request can produce.
+    SOCKS_NONCE_FNAME = "notnet.viasocks5"
+    try:
+        payload_dir = os.path.join(BASE, "payload")
+        os.makedirs(payload_dir, exist_ok=True)
+        with open(os.path.join(payload_dir, SOCKS_NONCE_FNAME), "wb") as f:
+            f.write(b"notnet sim socks5 probe payload\n")
+    except OSError as e:
+        log(f"S7 socks5: could not stage nonce payload (row will FAIL closed): {e}")
     # run the RFC 1928 client from inside the c2 container (has python +
     # simnet reachability to the bot at 172.29.0.9)
     socks_out = ""
@@ -767,23 +797,29 @@ def scenario_remaining_parity(report):
     try:
         r = subprocess.run(
             ["docker", "exec", "sim-c2", "python3", "/app/socks5_client.py",
-             "172.29.0.9", "1080", "172.29.0.2", "8443", "proxytok", f"/bot/notnet?secret={C2_SECRET}"],
+             "172.29.0.9", "1080", "172.29.0.2", "8443", "proxytok",
+             f"/bot/{SOCKS_NONCE_FNAME}?secret={C2_SECRET}"],
             capture_output=True, text=True, timeout=90)
         socks_out = (r.stdout or "") + (r.stderr or "")
         socks_rc = r.returncode
     except Exception as e:
         socks_out = f"exec error: {e}"
     ev = read_evidence()
-    # the c2 payload server must log the PAYLOAD download sourced from the BOT IP
-    pay_src = grep_evidence(ev, ["PAYLOAD notnet download from 172.29.0.9",
-                                  "PAYLOAD download from 172.29.0.9"],
+    # c2_http's generic /bot/<name> route logs "PAYLOAD <fname> download from"
+    # ONLY for this nonce file, and only when the request arrives (from the
+    # proxy, i.e. sourced from the BOT IP). Direct bot downloads use
+    # /bot/notnet ("PAYLOAD download from ...") and can never match.
+    pay_src = grep_evidence(ev,
+                            [f"PAYLOAD {SOCKS_NONCE_FNAME} download from 172.29.0.9"],
                             files=["http.log"])
     report.add("SOCKS5: client handshake + CONNECT through bot proxy (RFC 1928/1929)",
                "PASS" if socks_rc == 0 and "SOCKS5 CONNECT OK" in socks_out else "FAIL",
                socks_out.strip().replace("\n", " | ")[:160])
     report.add("SOCKS5: target sees proxied request from BOT source IP",
                "PASS" if pay_src else "FAIL",
-               "; ".join(h[1][:80] for h in pay_src[-2:]) or "no PAYLOAD download from 172.29.0.9 in http.log")
+               "; ".join(h[1][:80] for h in pay_src[-2:])
+               or f"no PAYLOAD {SOCKS_NONCE_FNAME} download from 172.29.0.9 in http.log "
+                  "(direct-bot downloads of /bot/notnet don't count)")
 
     # ── 3. Persistence across reboot ─────────────────────────────────
     # legacy-server-01 has persist=true: its drop command is recorded to
