@@ -231,6 +231,15 @@ static int ed25519_verify(const unsigned char *sig, const unsigned char *msg,
 /* ── Signed command verification + queue (#139 step 2) ───── */
 int mesh_verify_and_queue(notnet_bot_t *bot, const char *cmd, const char *sig_hex) {
     if (!bot || !cmd || !sig_hex) return -1;
+    /* #336: canonicalize BEFORE verification — reject anything longer than
+     * what a queue slot can hold so the verified bytes are exactly the
+     * queued/executed bytes. Silently truncating after verify would let a
+     * signed command execute as an unverified prefix of itself. */
+    if (strlen(cmd) > 255) {
+        log_warn("MESH: rejecting signed command — %zu bytes exceeds 255-byte queue limit",
+                 strlen(cmd));
+        return -1;
+    }
     if (!g_op_pubkey_valid) {
         log_warn("MESH: rejecting signed command — no operator pubkey compiled in");
         return -1;
