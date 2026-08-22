@@ -1263,11 +1263,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         """Token used by the dashboard for auth + CSRF (#212/#213).
 
         With --console-token this is the console token itself; in loopback
-        tokenless mode we mint a per-process secret so POST /api/queue can
+        tokenless mode main() minted a per-process secret and persisted it
+        to <db>.console-csrf (0600) for local CLI clients; if that never
+        happened (direct handler use) mint lazily so POST /api/queue can
         still require a custom header no cross-site form can send."""
         if self.c2.console_token:
             return self.c2.console_token
-        tok = getattr(self.c2, "console_csrf", None)
+        tok = self.c2.console_csrf
         if not tok:
             tok = secrets.token_hex(16)
             self.c2.console_csrf = tok
@@ -1529,6 +1531,10 @@ class C2:
         # loopback (enforced in main(), #136). When set, all /api/* and the
         # dashboard require it.
         self.console_token = console_token
+        # Tokenless-mode CSRF secret (#213). Minted lazily by the console
+        # handler, or eagerly in main() which also persists it to
+        # <db>.console-csrf (0600) for local CLI clients.
+        self.console_csrf: str = ""
         # #190: live single-use download tokens (token -> expiry epoch).
         self.dl_tokens = {}
         self.dl_tokens_lock = threading.Lock()
@@ -1645,6 +1651,22 @@ def main():
 
     c2 = C2(args.secret, args.http_path, args.queue_dir, args.payload_dir, args.db,
             console_token=args.console_token)
+
+    # Tokenless loopback mode: mint the CSRF secret eagerly and write it to
+    # <db>.console-csrf (0600) so local CLI clients (c2ctl, smoke_test.sh)
+    # can read it — a browser cannot (different user/machine), which keeps
+    # the cross-site POST guard (#213) intact while un-breaking non-browser
+    # automation that #374 accidentally locked out.
+    if not args.console_token:
+        c2.console_csrf = secrets.token_hex(16)
+        csrf_path = args.db + ".console-csrf"
+        try:
+            fd = os.open(csrf_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(c2.console_csrf + "\n")
+        except OSError as e:
+            log(f"WARNING: cannot write {csrf_path}: {e} — "
+                "POST /api/queue will reject all tokenless clients")
 
     # ISSUE #159 (SIMULATION-ONLY): payload XOR obfuscation. When
     # --payload-xor-key is set, XOR <payload_dir>/notnet with the

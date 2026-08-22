@@ -108,6 +108,8 @@ pass "heartbeats flow over TLS (bot in inventory)"
 
 # [4/6] command over TLS
 echo "[4/6] command delivered + executed over TLS"
+# c2ctl needs the tokenless CSRF secret the server persisted next to its db (#374 follow-up)
+export NOTNET_C2_CSRF_FILE="$WORK/c2.db.console-csrf"
 ./c2-server/c2ctl --api "http://127.0.0.1:$API" queue --target smoke-tls-1 exec hostname >/dev/null
 executed=""
 for i in $(seq 1 25); do

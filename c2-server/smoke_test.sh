@@ -56,6 +56,9 @@ python3 c2.py --secret "$SECRET" \
 C2_PID=$!
 sleep 2
 
+# c2ctl reads the tokenless CSRF secret the server persisted next to its db (#374 follow-up)
+export NOTNET_C2_CSRF_FILE="$WORK/c2.db.console-csrf"
+
 API="http://127.0.0.1:$PORT_CON"
 fail=0
 

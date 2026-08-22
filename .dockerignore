@@ -22,4 +22,7 @@ c2.db-shm
 c2.db-wal
 BUILD-ATTESTATION.json
 dist
-notnet
+# NOTE: `notnet` (the host-built binary) is deliberately NOT ignored:
+# Dockerfile.device does `COPY notnet /app/notnet` from the repo-root
+# context (run-sim.sh step [1/6] builds it on the host first). Excluding
+# it here broke the sim smoke job with "/notnet: not found".
