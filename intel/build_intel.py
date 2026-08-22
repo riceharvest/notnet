@@ -24,6 +24,7 @@ INTEL = os.path.join(REPO, "intel")
 CFG = os.path.join(REPO, "include", "config.h")
 SPREAD = os.path.join(REPO, "src", "spread.c")
 OUT = os.path.join(INTEL, "intel-latest.json")
+ATTACK_MAP_OUT = os.path.join(INTEL, "attack_mapping.json")
 GENERATED = "2026-08-13T00:00:00.000Z"
 
 ATTACK_TECHS = {
@@ -38,6 +39,54 @@ ATTACK_TECHS = {
     "T1027": "Obfuscated Files or Information",
     "T1489": "Service Stop",
 }
+
+# technique -> detections that cover it (#206 single source of truth).
+# attack_mapping.json is GENERATED from this table and detections/validate.py
+# replays it (stage 3), so adding a rule in one place can no longer silently
+# diverge the mapping, the coverage matrix replay, or the published JSON.
+TECH_COVERAGE = {
+    "T1190": ["suricata:cve_2017_17215_hg532", "suricata:cve_2021_35395_realtek",
+              "suricata:cve_2024_3721_tbk"],
+    "T1110": ["sigma:brute_force_ssh_smb_redis"],
+    "T1005": ["sigma:exfil_creds", "yara:notnet_cred_log_format"],
+    "T1020": ["sigma:exfil_creds"],
+    "T1572": ["suricata:c2_heartbeat_bot_paths", "sigma:proxy_tunnel"],
+    "T1090": ["suricata:relay_via_chain", "sigma:proxy_tunnel"],
+    "T1021": ["sigma:admin_share_write", "sigma:redis_config_set_authorized_keys"],
+    "T1543": ["sigma:persistence_cron_systemd_sysv"],
+    "T1027": ["yara:notnet_fileless_memfd_fexecve", "sigma:fileless_memfd_fexecve"],
+    "T1489": ["sigma:self_destruct_killswitch"],
+}
+
+
+def _detection_exists(name):
+    """True if a covered_by name resolves to a real detection (#206 --check)."""
+    kind, _, ident = name.partition(":")
+    base = os.path.join(REPO, "detections")
+    if kind == "suricata":
+        return os.path.isfile(os.path.join(base, "suricata", ident + ".rules"))
+    if kind == "sigma":
+        return os.path.isfile(os.path.join(base, "sigma", ident + ".yml"))
+    if kind == "yara":
+        yar = os.path.join(base, "yara", "notnet_indicators.yar")
+        try:
+            return ("rule " + ident) in open(yar, encoding="utf-8").read()
+        except OSError:
+            return False
+    return False
+
+
+def build_attack_mapping():
+    """attack_mapping.json content, generated from ATTACK_TECHS/TECH_COVERAGE."""
+    return {
+        "version": "0.1.0-dev",
+        "generated": GENERATED,
+        "techniques": [
+            {"technique": t, "name": ATTACK_TECHS[t],
+             "covered_by": TECH_COVERAGE[t]}
+            for t in ATTACK_TECHS
+        ],
+    }
 
 
 def _define(s, var):
@@ -181,11 +230,38 @@ def main():
                   "Re-run `python3 intel/build_intel.py` and commit.", file=sys.stderr)
             return 1
         print("drift-check: OK (bundle matches source)")
+
+        # attack_mapping.json drift (#206): generated from ATTACK_TECHS /
+        # TECH_COVERAGE above, and every covered_by name must resolve to a
+        # real detection file/rule under detections/.
+        if not os.path.exists(ATTACK_MAP_OUT):
+            print(f"ERROR: {ATTACK_MAP_OUT} missing", file=sys.stderr)
+            return 1
+        with open(ATTACK_MAP_OUT, encoding="utf-8") as f:
+            committed_map = json.load(f)
+        amap = build_attack_mapping()
+        if json.dumps(amap, sort_keys=True) != json.dumps(committed_map, sort_keys=True):
+            print("ERROR: attack_mapping.json drifted from ATTACK_TECHS/TECH_COVERAGE "
+                  "in build_intel.py. Re-run `python3 intel/build_intel.py` and commit.",
+                  file=sys.stderr)
+            return 1
+        bad = [d for dets in TECH_COVERAGE.values() for d in dets
+               if not _detection_exists(d)]
+        if bad:
+            print("ERROR: attack_mapping covered_by names not found under "
+                  f"detections/: {', '.join(bad)}", file=sys.stderr)
+            return 1
+        print("drift-check: OK (attack_mapping.json matches source; "
+              "all covered_by detections exist)")
         return 0
 
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2, sort_keys=True)
     print(f"wrote {OUT}")
+    with open(ATTACK_MAP_OUT, "w", encoding="utf-8") as f:
+        json.dump(build_attack_mapping(), f, indent=2)
+        f.write("\n")
+    print(f"wrote {ATTACK_MAP_OUT}")
     return 0
 
 

@@ -49,10 +49,27 @@ check("neither side fully won on partial data", True)  # smoke: no crash
 print("== ATT&CK mapping completeness ==")
 # every sig ids_monitor emits must have a mapping
 IDS_SIGS = ["SCAN-SWEEP", "BRUTE-BURST", "CVE-EXPLOIT", "PAYLOAD-DROP",
-            "EDR", "HONEYPOT", "CRED-STUFF", "LATERAL-MOVE", "BEACONING"]
+            "EDR", "HONEYPOT", "CRED-STUFF", "LATERAL-MOVEMENT", "BEACONING"]
 m = attack_mapping(IDS_SIGS)
 check("all IDS sigs mapped", len(m) == len(IDS_SIGS))
 check("techniques are valid T-format", all(t["technique"].startswith("T") for t in m))
+
+print("== score: SKIP excluded from denominator (#332) ==")
+rows = [("Payload drop executed on victims (legacy tier)", "PASS", "drops"),
+        (f"IDS alerts under posture=lax", "SKIP", "no IDS alerts (lax expected)"),
+        ("No command-loop starvation (max heartbeat gap <75s)", "PASS", "gap 2s")]
+s = score(rows, "ransomware-prep")
+check("defender_score 1.0 with SKIP row", s["defender_score"] == 1.0)
+check("defender_won with SKIP row", s["defender_won"])
+
+print("== score: one-way matching, no bidirectional bind (#332) ==")
+# an unrelated long claim containing the criterion text must NOT bind when it
+# appears before the intended claim... here the only claim is unrelated, so
+# the criterion stays unmet
+rows = [("Payload drop executed on victims (legacy tier)", "FAIL", "no drops")]
+s = score(rows, "ransomware-prep")
+pc = [p for p in s["per_criterion"] if p["criterion"] == "Infected devices join C2"][0]
+check("unbound criterion not met", not pc["met"])
 
 print()
 if FAILS:

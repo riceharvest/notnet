@@ -83,9 +83,12 @@ def _creds_from_lines(lines):
 
 
 def _heartbeat_srcs(lines):
+    # Tolerant tag regex, same as botnet_mapper.TAG_RE (#199): allow optional
+    # whitespace around the colon so logs with spaces still yield IOCs.
+    tag_re = re.compile(r"C2 heartbeat from (\d+\.\d+\.\d+\.\d+) .*\"tag\"\s*:\s*\"([^\"]+)\"")
     srcs = {}
     for ln in lines:
-        m = re.search(r"C2 heartbeat from (\d+\.\d+\.\d+\.\d+) .*\"tag\":\"([^\"]+)\"", ln)
+        m = tag_re.search(ln)
         if m:
             srcs.setdefault(m.group(2), m.group(1))
     return srcs

@@ -21,7 +21,7 @@ a rule dump.
 
 | technique | name | covered-by (detection) | sim scenario | status |
 |---|---|---|---|---|
-| T1190 | Exploit Public-Facing Application | Suricata `cve_2017_17215_hg532.yml`, `cve_2021_35395_realtek.yml` (`src/spread.c`) | c2-drive / remaining-parity | PASS |
+| T1190 | Exploit Public-Facing Application | Suricata `cve_2017_17215_hg532.yml`, `cve_2021_35395_realtek.yml`, `cve_2024_3721_tbk.yml` (`src/spread.c`) | c2-drive / remaining-parity | PASS |
 | T1110 | Brute Force | Sigma `brute_force_ssh_smb_redis.yml` | autonomous | PASS |
 | T1005 | Data from Local System | Sigma `exfil_creds.yml` + YARA `notnet_indicators.yar` (cred-log `proto\|ip\|port\|user\|pass`) | monetization | PASS |
 | T1020 | Automated Exfiltration | Sigma `exfil_creds.yml` | monetization | PASS |

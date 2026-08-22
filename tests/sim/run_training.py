@@ -14,12 +14,29 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from training import SCENARIOS, score, after_action_report, parse_report_md
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIM = os.path.join(REPO, "tests", "sim")
+
+
+def session_reports(started_before=None, started_at=None):
+    """All parity reports produced during this invocation (#334).
+
+    Chained scenarios (e.g. ransomware-prep's c2-drive + autonomous) each
+    write their own parity-<ts>.md; scoring only the newest one silently
+    dropped every claim from the earlier runs. Collect every report with a
+    mtime at/after the session start instead.
+    """
+    reports = sorted(glob.glob(os.path.join(SIM, "reports", "parity-*.md")))
+    if started_at is not None:
+        reports = [r for r in reports if os.path.getmtime(r) >= started_at - 1]
+    if started_before is not None:
+        reports = [r for r in reports if os.path.getmtime(r) <= started_before + 1]
+    return reports
 
 
 def find_latest_report():
@@ -41,25 +58,40 @@ def main():
     print(f"  Operator objective:  {sc['operator_objective']}")
     print(f"  Defender objective:  {sc['defender_objective']}")
 
-    # Run each sim scenario via run-sim.sh
-    for sim_scenario in sc["sim_scenarios"]:
+    session_start = time.time()
+    scenarios = sc["sim_scenarios"]
+    # Run each sim scenario via run-sim.sh.
+    # --keep semantics (#335): --keep suppresses THAT run's own teardown, so
+    # pass it on all but the LAST scenario — earlier runs leave the fleet up
+    # for the next chained scenario to reuse (no full down/up per hop), and
+    # the final run (without --keep) tears the whole stack down so nothing
+    # leaks.
+    for i, sim_scenario in enumerate(scenarios):
         cmd = [os.path.join(SIM, "run-sim.sh"),
                "--scenario", sim_scenario, "--posture", posture]
-        if len(sc["sim_scenarios"]) > 1 and sim_scenario != sc["sim_scenarios"][0]:
-            cmd += ["--keep"]  # reuse fleet between chained scenarios
+        if i < len(scenarios) - 1:
+            cmd += ["--keep"]  # leave fleet up for the next chained scenario
         print(f"\n=== Running: {' '.join(cmd)}")
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
         if r.returncode != 0:
             print(f"WARNING: {sim_scenario} exited {r.returncode} — scoring on available evidence")
 
-    # Score from the latest parity report
-    report = find_latest_report()
-    if not report:
-        print("ERROR: no parity report found", file=sys.stderr)
+    # Score ALL parity reports from this session (#334), merged.
+    reports = session_reports(started_at=session_start)
+    if not reports:
+        print("ERROR: no parity report produced during this training run",
+              file=sys.stderr)
         return 1
-    rows = parse_report_md(report)
+    rows = []
+    for rep in reports:
+        rep_rows = parse_report_md(rep)
+        if not rep_rows:
+            print(f"WARNING: no rows parsed from {rep}", file=sys.stderr)
+            continue
+        rows.extend(rep_rows)
+        print(f"  scored report: {os.path.basename(rep)} ({len(rep_rows)} claims)")
     if not rows:
-        print(f"ERROR: no rows parsed from {report}", file=sys.stderr)
+        print("ERROR: no rows parsed from any session parity report", file=sys.stderr)
         return 1
 
     scored = score(rows, args.scenario)

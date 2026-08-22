@@ -42,7 +42,7 @@ fingerprint — which CVE each device was exploited through (from
 ```sh
 # what will the bots resolve on day 233?
 python3 intel/sinkhole_sim.py --generate-dga-seed --seed myseed --day 233
-# -> 8-hex.sim.test   (SHA-256(seed + str(day)).hexdigest()[:8] + "." + tld)
+# -> 8-hex.sim.test   (FNV-1a 32-bit over "seed:YYYY-DDD", per include/config.h)
 
 # who checked in while we held the domain?
 python3 intel/sinkhole_sim.py --domain <dga-domain> \

@@ -28,6 +28,10 @@ REPLAY = os.path.join(HERE, "replay_check.py")
 
 SEED = "unit-test-seed"
 DAY = 233
+YEAR = 2026  # year of the planted evidence timestamps below
+# Pinned literal from include/config.h: FNV-1a 32-bit over "unit-test-seed:2026-233".
+# Guards against the predictor drifting from the spec while agreeing with itself.
+DGA_EXPECTED_HEX = "31cb80e1"
 
 # Planted fleet: one device per segment.
 FLEET = [
@@ -50,10 +54,13 @@ def run(script, *args):
     return r.stdout
 
 
-def dga(day, tld="sim.test"):
-    """Mirror of the sinkhole DGA spec — used to plant + predict domains."""
-    import hashlib
-    return hashlib.sha256((DGA_DOMAIN_SEED + str(day)).encode()).hexdigest()[:8] + "." + tld
+def dga(day, tld="sim.test", year=YEAR):
+    """Mirror of the bot's DGA spec in include/config.h: FNV-1a 32-bit over
+    "<seed>:<YYYY>-<DDD>" (zero-padded day-of-year)."""
+    h = 2166136261
+    for b in f"{DGA_DOMAIN_SEED}:{year:04d}-{int(day):03d}".encode():
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return "%08x.%s" % (h, tld)
 
 
 def write_evidence(dirname, day, include_cve=True, extra_iocs=True, legacy_domains=()):
@@ -142,8 +149,10 @@ class TestAttribution(unittest.TestCase):
         self.assertIn(CVE, report["cve_attribution"]["cam-01"])
 
     def test_02_dga_seed_matches_spec(self):
+        # must match the pinned config.h reference literal, not just our mirror
+        self.assertEqual(dga(DAY), DGA_EXPECTED_HEX + ".sim.test")
         out = run(SINKHOLE, "--generate-dga-seed", "--seed", DGA_DOMAIN_SEED,
-                  "--day", str(DAY))
+                  "--day", str(DAY), "--year", str(YEAR))
         self.assertEqual(out.strip(), self.dom_a)
 
     def test_03_sinkhole_coverage_is_100pct(self):

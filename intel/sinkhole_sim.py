@@ -5,8 +5,9 @@ Two modes:
 
 1. DGA domain prediction (what the bots will resolve tomorrow):
        python3 intel/sinkhole_sim.py --generate-dga-seed --seed myseed --day 233
-   The simulated DGA is: 8-hex = SHA-256(seed + str(day_of_year)).hexdigest()[:8],
-   domain = hex + "." + tld (tld defaults to "sim.test").
+   The simulated DGA is exactly the bot's spec in include/config.h:
+   FNV-1a 32-bit over "<seed>:<YYYY>-<DDD>" (zero-padded day-of-year),
+   domain = "%08x" + "." + tld (tld defaults to "sim.test").
 
 2. Sinkhole capture report (who checked in while we held the domain):
        python3 intel/sinkhole_sim.py --domain <dga-domain> \
@@ -19,7 +20,7 @@ Two modes:
 Stdlib only.
 """
 import argparse
-import hashlib
+import datetime
 import json
 import os
 import re
@@ -30,10 +31,20 @@ from botnet_mapper import parse_http_log  # same evidence parser, one source of 
 DEFAULT_TLD = "sim.test"
 
 
-def dga_domain(seed, day, tld=DEFAULT_TLD):
-    """8-hex label from SHA-256(seed + day_of_year), per the #162 DGA spec."""
-    hex8 = hashlib.sha256((seed + str(day)).encode("utf-8")).hexdigest()[:8]
-    return f"{hex8}.{tld}"
+def fnv1a_32(data):
+    """FNV-1a 32-bit over the ASCII bytes — the config.h DGA hash."""
+    h = 2166136261
+    for b in data.encode("utf-8"):
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def dga_domain(seed, day, tld=DEFAULT_TLD, year=None):
+    """8-hex label per the include/config.h DGA spec: FNV-1a 32-bit over
+    "<seed>:<YYYY>-<DDD>" (zero-padded day-of-year)."""
+    d = year if year is not None else datetime.date.today().year
+    material = f"{seed}:{d:04d}-{int(day):03d}"
+    return f"{fnv1a_32(material):08x}.{tld}"
 
 
 def sinkhole_report(domain, expected_tags, evidence_dir):
@@ -75,6 +86,8 @@ def main():
                     help="predict the DGA domain instead of reporting a capture")
     ap.add_argument("--seed", help="DGA seed (with --generate-dga-seed)")
     ap.add_argument("--day", type=int, help="day of year (with --generate-dga-seed)")
+    ap.add_argument("--year", type=int, default=None,
+                    help="year of the DGA material (default: current year)")
     ap.add_argument("--tld", default=DEFAULT_TLD, help=f"DGA tld (default {DEFAULT_TLD})")
     ap.add_argument("--domain", help="sinkholed DGA domain")
     ap.add_argument("--expected-tags", help="comma-separated bot tags expected to check in")
@@ -86,7 +99,7 @@ def main():
         if args.seed is None or args.day is None:
             print("ERROR: --generate-dga-seed needs --seed S --day N", file=sys.stderr)
             return 1
-        print(dga_domain(args.seed, args.day, args.tld))
+        print(dga_domain(args.seed, args.day, args.tld, year=args.year))
         return 0
 
     if not (args.domain and args.expected_tags and args.evidence):

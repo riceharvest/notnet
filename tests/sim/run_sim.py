@@ -21,6 +21,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -130,14 +131,29 @@ def read_evidence():
     return out
 
 
-def grep_evidence(ev, patterns, files=None):
-    """Return lines matching any pattern (substring)."""
+def grep_evidence(ev, patterns, files=None, mode="substr"):
+    """Return (filename, line) hits for any pattern.
+
+    Pattern modes (#294):
+      "substr"  legacy case-insensitive substring match
+      "regex"   each pattern is a case-sensitive regular expression, matched
+                with re.search — use anchors/\\b where the caller means exact
+    The `files` filter is exact basename equality in every mode (a substring
+    test over evidence filenames was itself a precision leak).
+    """
+    if mode not in ("substr", "regex"):
+        raise ValueError(f"unknown grep_evidence mode: {mode}")
+    rxes = [re.compile(p) for p in patterns] if mode == "regex" else []
     hits = []
     for fn, lines in ev.items():
-        if files and not any(f in fn for f in files):
+        if files and fn not in files:
             continue
         for ln in lines:
-            if any(p.lower() in ln.lower() for p in patterns):
+            if mode == "regex":
+                hit = any(rx.search(ln) for rx in rxes)
+            else:
+                hit = any(p.lower() in ln.lower() for p in patterns)
+            if hit:
                 hits.append((fn, ln.strip()))
     return hits
 
@@ -192,17 +208,25 @@ def unique_tags(ev):
 # ───────────────────────── checks ─────────────────────────
 
 def assert_no_heartbeat_gaps(ev, max_gap_s=30):
-    """#193: command-loop starvation guard.
+    """#193/#280: command-loop starvation guard.
 
-    Scans the heartbeat/SERVE evidence lines in http.log and ws.log,
-    parses their leading ISO-8601 timestamps, and returns the largest
-    gap (seconds) between consecutive beats. The bot's command loop
-    heartbeats every ~2s, so any gap well above `max_gap_s` means
-    something blocked the loop — e.g. the 8-minute SSH-brute stall of
-    24e5ae2, which previously only surfaced indirectly through stale
-    evidence. Returns the observed max gap so the caller can report it.
+    Scans the heartbeat/SERVE evidence lines in http.log and ws.log, parses
+    their leading ISO-8601 timestamps, and computes the largest gap between
+    consecutive beats PER DEVICE STREAM (keyed by file + bot_tag) instead of
+    over one merged stream — with dozens of devices interleaving beats, the
+    merged max gap collapses toward zero even when a single device's command
+    loop is fully stalled (the exact #193 failure this guard exists for).
+    A device that drops out of the stream mid-window is caught by its tail
+    gap (global last beat minus the device's own last beat).
+
+    Returns (max_gap_seconds, detail). max_gap is None when fewer than two
+    timestamped beats were seen in total — total evidence-collection failure
+    must FAIL loudly, never PASS as 'gap 0.0s' (#280). The bot's command loop
+    heartbeats every ~2s, so any gap well above `max_gap_s` means something
+    blocked the loop.
     """
-    stamps = []
+    tag_re = re.compile(r'"tag"\s*:\s*"([^"]+)"')
+    streams = {}  # (fn, tag) -> [datetime]
     for fn, lines in ev.items():
         if not ("http.log" in fn or "ws.log" in fn):
             continue
@@ -212,14 +236,44 @@ def assert_no_heartbeat_gaps(ev, max_gap_s=30):
                 continue
             tok = ln.split(None, 1)[0] if ln.split() else ""
             try:
-                stamps.append(datetime.fromisoformat(tok))
+                stamp = datetime.fromisoformat(tok)
             except ValueError:
                 continue
-    if len(stamps) < 2:
-        return 0.0
-    stamps.sort()
-    return max((b - a).total_seconds()
-               for a, b in zip(stamps, stamps[1:]))
+            m = tag_re.search(ln)
+            streams.setdefault((fn, m.group(1) if m else "-"), []).append(stamp)
+
+    total = sum(len(v) for v in streams.values())
+    if total < 2:
+        return None, (f"insufficient heartbeat evidence: {total} timestamped "
+                      f"beat(s) across {len(streams)} stream(s) in http.log/ws.log")
+
+    all_stamps = sorted(s for v in streams.values() for s in v)
+    global_last = all_stamps[-1]
+    max_gap = 0.0
+    worst = None
+
+    def consider(gap, label):
+        nonlocal max_gap, worst
+        if gap > max_gap:
+            max_gap, worst = gap, label
+
+    measured = 0
+    for (fn, tag), stamps in streams.items():
+        if len(stamps) < 2:
+            continue
+        measured += 1
+        stamps.sort()
+        label = f"{tag}@{fn}"
+        for a, b in zip(stamps, stamps[1:]):
+            consider((b - a).total_seconds(), label)
+        # dropout detection (#280): a stalled device stops mid-window while
+        # others keep beating — charge it the silence up to the global last beat
+        tail = (global_last - stamps[-1]).total_seconds()
+        consider(tail, label + " (dropout tail)")
+
+    detail = (f"max gap {max_gap:.1f}s ({worst}); "
+              f"{measured} device stream(s), {total} beats")
+    return max_gap, detail
 
 
 class Report:
@@ -390,7 +444,11 @@ def scenario_c2drive(report):
     OTHER_VENDORS = ["dahua-dvr-01", "dahua-dvr-03", "tenda-router-01",
                      "tenda-router-03", "hikvision-cam-01", "hikvision-cam-03"]
     other_drops = [h for h in cve_drops if dev_name(h[0]) in OTHER_VENDORS]
-    other_cve_log = grep_evidence(ev, ["CVE-"], files=[f"{v}.log" for v in OTHER_VENDORS])
+    # anchored CVE id (#294): a bare "CVE-" substring can match stack traces
+    # and config echoes; only a real CVE identifier counts as exploit traffic
+    other_cve_log = grep_evidence(ev, [r"CVE-\d{4}-\d{4,6}"],
+                                  files=[f"{v}.log" for v in OTHER_VENDORS],
+                                  mode="regex")
     report.add("CVE modules DO NOT false-positive on non-matching vendors (#102)",
                "PASS" if not other_drops else "FAIL",
                f"cross-vendor drops={len(other_drops)}; " +
@@ -452,12 +510,17 @@ def scenario_c2drive(report):
     # Threshold is spread_budget_ms (#191, default 60s) + margin: a single
     # spread command legitimately runs inline up to the budget, so the gap
     # it produces is bounded by the budget, not unbounded.
-    gap = assert_no_heartbeat_gaps(ev)
+    gap, gap_detail = assert_no_heartbeat_gaps(ev)
     budget_s = 60  # SPREAD_BUDGET_DEFAULT_MS / 1000; keep in sync with config.h
     threshold = budget_s + 15
-    report.add(f"No command-loop starvation (max heartbeat gap <{threshold}s)",
-               "PASS" if gap < threshold else "FAIL",
-               f"max gap {gap:.1f}s in http.log/ws.log heartbeats")
+    if gap is None:
+        # #280: evidence-collection failure must FAIL loudly, never PASS
+        report.add(f"No command-loop starvation (max heartbeat gap <{threshold}s)",
+                   "FAIL", f"heartbeat-gap guard could not run: {gap_detail}")
+    else:
+        report.add(f"No command-loop starvation (max heartbeat gap <{threshold}s)",
+                   "PASS" if gap < threshold else "FAIL",
+                   f"per-device streams: {gap_detail}")
 
 
 def scenario_autonomous(report):

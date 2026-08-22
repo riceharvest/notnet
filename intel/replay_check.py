@@ -12,7 +12,10 @@ Supported pattern types:
     [url:value = '...' | url:value MATCHES '.*...*']
     [file:hashes.'SHA-256' = '...' | file:hashes.MD5 = ...]
 
-Reports total_indicators, matched, detection_rate and false_negative_pct.
+Reports total_indicators, unsupported, matched, detection_rate and
+false_negative_pct. Indicators whose pattern type cannot be parsed (e.g.
+[x-notnet:cve = ...], network-traffic objects) are counted in `unsupported`
+and warned on stderr rather than silently dropped (#203).
 Exit code 0 always (this is a measurement, not a gate); use the JSON.
 
 Stdlib only. Usage:
@@ -35,8 +38,12 @@ PATTERNS = [
 
 
 def extract_indicators(bundle):
-    """[(indicator_id, name, ioc_type, literal)] for every parseable indicator."""
+    """([(indicator_id, name, ioc_type, literal)], [unsupported indicator_id])
+    for every indicator in the bundle: parseable ones first, then the ids of
+    indicators whose pattern type we cannot parse (#203) so callers can
+    report the drop instead of silently shrinking the denominator."""
     out = []
+    unsupported = []
     for obj in bundle.get("objects", []):
         if obj.get("type") != "indicator":
             continue
@@ -48,7 +55,9 @@ def extract_indicators(bundle):
             literal = next(g for g in m.groups() if g)
             out.append((obj.get("id"), obj.get("name", ""), ioc_type, literal))
             break
-    return out
+        else:
+            unsupported.append(obj.get("id"))
+    return out, unsupported
 
 
 def evidence_text(evidence_dir):
@@ -64,10 +73,14 @@ def evidence_text(evidence_dir):
     return "\n".join(chunks)
 
 
-def replay_check(feed_path, evidence_dir):
+def replay_check(feed_path, evidence_dir, warn=True):
     with open(feed_path, encoding="utf-8") as f:
         bundle = json.load(f)
-    inds = extract_indicators(bundle)
+    inds, unsupported = extract_indicators(bundle)
+    if unsupported and warn:
+        print(f"WARNING: {len(unsupported)} indicator(s) with unsupported pattern "
+              f"type excluded from detection-rate math: "
+              f"{', '.join(str(u) for u in unsupported)}", file=sys.stderr)
     text = evidence_text(evidence_dir).lower()
 
     matched_ids = set()
@@ -90,6 +103,8 @@ def replay_check(feed_path, evidence_dir):
         "feed": feed_path,
         "evidence": evidence_dir,
         "total_indicators": total,
+        "unsupported": len(unsupported),
+        "unsupported_ids": unsupported,
         "matched": matched,
         "detection_rate": rate,
         "false_negative_pct": round(100.0 - rate, 2),
