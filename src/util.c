@@ -51,8 +51,9 @@ void log_info(const char *fmt, ...) {
     
     char timebuf[64];
     time_t t = time(NULL);
-    struct tm *tm_info = localtime(&t);
-    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_info);
+    struct tm tm_buf;
+    localtime_r(&t, &tm_buf);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm_buf);
     
     if (log_initialized && log_file) {
         fprintf(log_file, "[%s] [INFO] %s\n", timebuf, msg);
@@ -70,8 +71,9 @@ void log_warn(const char *fmt, ...) {
     
     char timebuf[64];
     time_t t = time(NULL);
-    struct tm *tm_info = localtime(&t);
-    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_info);
+    struct tm tm_buf;
+    localtime_r(&t, &tm_buf);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm_buf);
     
     if (log_initialized && log_file) {
         fprintf(log_file, "[%s] [WARN] %s\n", timebuf, msg);
@@ -89,8 +91,9 @@ void log_error(const char *fmt, ...) {
     
     char timebuf[64];
     time_t t = time(NULL);
-    struct tm *tm_info = localtime(&t);
-    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_info);
+    struct tm tm_buf;
+    localtime_r(&t, &tm_buf);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm_buf);
     
     if (log_initialized && log_file) {
         fprintf(log_file, "[%s] [ERROR] %s\n", timebuf, msg);
@@ -113,8 +116,9 @@ void log_debug(const char *fmt, ...) {
     #ifndef NDEBUG
     char timebuf[64];
     time_t t = time(NULL);
-    struct tm *tm_info = localtime(&t);
-    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_info);
+    struct tm tm_buf;
+    localtime_r(&t, &tm_buf);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm_buf);
     
     if (log_initialized && log_file) {
         fprintf(log_file, "[%s] [DEBUG] %s\n", timebuf, msg);

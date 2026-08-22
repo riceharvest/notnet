@@ -133,6 +133,19 @@ def _tail(path, n=300):
         return "no alert file" if "alert" in os.path.basename(path) else "unavailable"
 
 
+def _line_ts(line):
+    """Parse the leading ISO-8601 UTC timestamp of an evidence log line.
+
+    Evidence lines are written as "<isoformat> <payload>" (c2_http.log).
+    Returns None when the line carries no parseable timestamp.
+    """
+    tok = line.split(None, 1)[0] if line.split() else ""
+    try:
+        return datetime.fromisoformat(tok)
+    except ValueError:
+        return None
+
+
 def unique_tags(ev):
     """Extract unique bot_tag values from heartbeat JSON in http.log/ws.log."""
     tags = set()
@@ -235,8 +248,16 @@ def recreate_bot(conf):
     for f in files:
         args += ["-f", f]
     args += ["up", "-d", "--force-recreate", "bot"]
-    subprocess.run(args, cwd=BASE, env=env, capture_output=True, text=True,
-                   timeout=120)
+    r = subprocess.run(args, cwd=BASE, env=env, capture_output=True, text=True,
+                       timeout=120)
+    if r.returncode != 0:
+        detail = (r.stderr or "").strip() or "(no stderr)"
+        log(f"  ERROR: bot recreate failed for config {conf} "
+            f"(docker compose exit {r.returncode}): {detail}")
+        raise RuntimeError(
+            f"recreate_bot failed for {conf}: docker compose exited "
+            f"{r.returncode} — subsequent assertions would evaluate stale "
+            f"container state.\n{detail}")
     log(f"bot recreated with config {conf}")
 
 
@@ -713,14 +734,23 @@ def scenario_remaining_parity(report):
                "PASS" if pre_hearts else "FAIL",
                "; ".join(h[1][:80] for h in pre_hearts[-2:]) or "no legacy-server-01 heartbeat yet")
     if pre_hearts:
+        # Baseline is captured STRICTLY BEFORE the reboot is issued: every
+        # heartbeat seen so far belongs to the pre-reboot process.
+        n_before = len(pre_hearts)
         # restart the device container — models a reboot. The device's
         # entrypoint re-runs /app/persist.sh (recorded by the drop) which
         # relaunches the payload; a NEW heartbeat with the same bot_tag
         # proves persistence across reboot.
         subprocess.run(["docker", "restart", "legacy-server-01"],
                        capture_output=True, text=True, timeout=120)
-        n_before = len(pre_hearts)
-        n_after = n_before
+        # The post-reboot window opens only when the restart COMPLETES: a
+        # heartbeat emitted by the old (still-running) container while the
+        # restart was in flight carries a pre-reboot timestamp and must NOT
+        # count as relaunch proof. Only lines whose leading ISO-8601 log
+        # timestamp falls strictly after `reboot_done` qualify — this avoids
+        # the raw line-count race where cadence alone faked a PASS.
+        reboot_done = datetime.now(timezone.utc)
+        post_hearts = []
         last_lines = []
         # Poll up to 90s — the device template's scan_interval=30 caps the
         # payload's heartbeat cadence, so a new line can take ~40s to land.
@@ -728,14 +758,17 @@ def scenario_remaining_parity(report):
         while time.time() < deadline:
             time.sleep(5)
             ev = read_evidence()
-            post_hearts = grep_evidence(ev, ['"tag":"legacy-server-01"'], files=["http.log"])
-            n_after = len(post_hearts)
+            all_hearts = grep_evidence(ev, ['"tag":"legacy-server-01"'], files=["http.log"])
+            post_hearts = [h for h in all_hearts
+                           if (ts := _line_ts(h[1])) is not None and ts > reboot_done]
             last_lines = [h[1][:70] for h in post_hearts[-2:]]
-            if n_after > n_before:
+            if post_hearts:
                 break
         report.add("Persistence: payload relaunches after device reboot (new heartbeat)",
-                   "PASS" if n_after > n_before else "FAIL",
-                   f"before={n_before} after={n_after}; " + "; ".join(last_lines))
+                   "PASS" if post_hearts else "FAIL",
+                   f"pre-reboot={n_before} post-reboot={len(post_hearts)} "
+                   f"(counting only heartbeats logged after {reboot_done.isoformat()}); "
+                   + "; ".join(last_lines))
 
     # ── 4. Payload pinning / checksum ────────────────────────────────
     # Serve a tampered payload and confirm the bot refuses it; serve a valid
