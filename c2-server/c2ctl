@@ -29,6 +29,16 @@ def api(base, path, method="GET", body=None):
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    else:
+        # Tokenless loopback mode: the server persists its CSRF secret to
+        # <db>.console-csrf (0600). Local clients send it as X-Console-Token;
+        # a cross-site page can neither read the file nor set the header.
+        csrf_path = os.environ.get("NOTNET_C2_CSRF_FILE", "c2.db.console-csrf")
+        try:
+            with open(csrf_path, encoding="ascii") as f:
+                headers["X-Console-Token"] = f.read().strip()
+        except OSError:
+            pass  # no file — server may reject POSTs; GETs still work
     qs = f"?token={urllib.parse.quote(token)}" if token else ""
     payload = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url + qs, data=payload, method=method,
