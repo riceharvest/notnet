@@ -54,6 +54,7 @@ DEFAULT_CONSOLE = 8090
 MAX_HTTP_REQUEST = 2 * 1024 * 1024        # total buffered bytes per request
 MAX_UPLOAD_BODY = 8 * 1024 * 1024         # upload body cap (128x payload max)
 MAX_WS_FRAME = 1024 * 1024                # WS frame payload cap
+MAX_WS_HANDSHAKE = 16 * 1024              # #209: handshake/header bytes cap
 UPLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 _lock = threading.Lock()
@@ -764,6 +765,11 @@ def ws_handshake(conn):
             if not chunk:
                 return False
             data += chunk
+            if len(data) > MAX_WS_HANDSHAKE:
+                # #209: header flood — drop the connection instead of
+                # growing the buffer without bound.
+                log(f"WS handshake exceeds {MAX_WS_HANDSHAKE} bytes — dropped")
+                return False
         head = data.split(b"\r\n\r\n", 1)[0].decode("utf-8", errors="replace")
         lines = head.split("\r\n")
         if not lines or "GET" not in lines[0]:
@@ -810,7 +816,14 @@ def ws_read_frame(conn):
         plen = int.from_bytes(ws_recv_exact(conn, 8), "big")
     if plen > MAX_WS_FRAME:
         log(f"WS frame {plen} bytes exceeds cap — dropped")
-        return 0, b""
+        # #208: drain-and-close. The unread payload bytes must never be
+        # re-parsed as the next frame header, so send a close frame and
+        # signal the caller to end the session instead of looping.
+        try:
+            conn.sendall(bytes([0x88, 0x00]))
+        except (ConnectionError, OSError):
+            pass
+        return 0x8, b""
     mask = ws_recv_exact(conn, 4) if masked else b""
     payload = ws_recv_exact(conn, plen)
     if mask:
