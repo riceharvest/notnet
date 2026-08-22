@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -30,7 +31,9 @@ static int parse_cred(const char *line, char *proto,
                       char *user, char *pass) {
     if (!line || !proto || !ip || !port || !user || !pass) return -1;
     unsigned int p = 0;
-    if (sscanf(line, "%[^|]|%[^|]|%u|%[^|]|%[^|\n]",
+    /* Field widths match the caller's buffers (proto[32], ip[16],
+     * user[80], pass[80]) so a hostile cred line cannot overflow (#233). */
+    if (sscanf(line, "%31[^|]|%15[^|]|%u|%79[^|]|%79[^\n]",
                proto, ip, &p, user, pass) != 5) return -1;
     if (p == 0 || p > 65535) return -1;
     *port = (uint16_t)p;
@@ -65,8 +68,15 @@ static int lotl_exec(const char *path, char *const argv[],
     }
     out[n] = '\0';
     close(pipefd[0]);
-    int status = -1;
-    waitpid(pid, &status, 0);
+    /* #234: the child may still be alive once output ends (timeout or EOF,
+     * e.g. ssh hung on TCP or a tty password prompt). Reap non-blocking
+     * first; if it hasn't exited, SIGKILL so the final waitpid cannot
+     * block forever. */
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) == 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+    }
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
