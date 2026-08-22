@@ -456,8 +456,13 @@ hosting — plus an SQLite state store and an operator console.
 - **Channels**: HTTP, WS, IRC. The HTTP listener takes an optional TLS
   wrapper when `NOTNET_C2_TLS_CERT`/`NOTNET_C2_TLS_KEY` are set (the bot
   side is verified with the cert pin from `make TLS=1` builds).
-- **Console**: HTML dashboard + JSON API on port `8090` (`/api/bots`,
-  `/api/creds`, `/api/commands`, `/api/exfil`, `/api/queue`).
+- **Console**: full operator dashboard on port `8090` — fleet summary
+  cards, live activity chart (bots online + creds volume over 30 min),
+  per-CVE hit-rate bars, event feed (`/api/events`), command queue form,
+  and the bots/commands/credentials tables. Endpoints: `/api/bots`,
+  `/api/creds`, `/api/commands`, `/api/exfil`, `/api/events`,
+  `/api/cve`, `/api/security`, `/api/queue`. Zero-build: inline HTML/SVG,
+  no external assets.
 - **`c2ctl` CLI**: `bots`, `creds`, `commands`,
   `queue <cmd> [args...] [--target TAG]`, `killall` (broadcast `kill` to
   every bot on every channel — the operator-side global kill switch).
