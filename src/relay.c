@@ -194,15 +194,28 @@ static void relay_tunnel(int a, int b) {
 
         if (!a_closed && FD_ISSET(a, &rfds)) {
             int n = recv(a, ba, sizeof(ba), 0);
-            if (n <= 0) a_closed = 1;
-            else if (relay_send_all(b, ba, n) != 0) {
+            if (n == 0) {
+                /* a half-closed: propagate its FIN as SHUT_WR on b so the
+                 * peer sees EOF promptly instead of waiting for the idle
+                 * timeout (#228). b may still send data back. */
+                shutdown(b, SHUT_WR);
+                a_closed = 1;
+            } else if (n < 0) {
+                /* read error: no meaningful state left, end the tunnel */
+                a_closed = 1; b_closed = 1;
+            } else if (relay_send_all(b, ba, n) != 0) {
                 a_closed = 1; b_closed = 1;
             }
         }
         if (!b_closed && FD_ISSET(b, &rfds)) {
             int n = recv(b, bb, sizeof(bb), 0);
-            if (n <= 0) b_closed = 1;
-            else if (relay_send_all(a, bb, n) != 0) {
+            if (n == 0) {
+                /* mirror of the a->b case above: propagate b's FIN (#228) */
+                shutdown(a, SHUT_WR);
+                b_closed = 1;
+            } else if (n < 0) {
+                a_closed = 1; b_closed = 1;
+            } else if (relay_send_all(a, bb, n) != 0) {
                 a_closed = 1; b_closed = 1;
             }
         }
