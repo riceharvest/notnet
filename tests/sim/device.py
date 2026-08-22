@@ -121,7 +121,6 @@ def http_response(conn, body, ctype="text/html", code="200 OK", extra=""):
     body_b = body.encode("utf-8") if isinstance(body, str) else body
     resp = (
         f"HTTP/1.0 {code}\r\n"
-        "Server: " + ctype.split(";")[0] + "\r\n"
         f"Content-Type: {ctype}\r\n"
         f"Content-Length: {len(body_b)}\r\n"
         "Connection: close\r\n"
@@ -134,6 +133,19 @@ def http_response(conn, body, ctype="text/html", code="200 OK", extra=""):
         pass
 
 
+MAX_HTTP_REQUEST = 1024 * 1024  # cap on total buffered request bytes (#265)
+
+
+def _http_400(conn, addr, why):
+    http_response(conn, "400 Bad Request", code="400 Bad Request")
+    log(f"HTTP {addr[0]}: {why} -> 400")
+
+
+def _http_413(conn, addr, why):
+    http_response(conn, "413 Request Entity Too Large", code="413 Request Entity Too Large")
+    log(f"HTTP {addr[0]}: {why} -> 413 (cap={MAX_HTTP_REQUEST})")
+
+
 def handle_http_cve(conn, addr):
     """Serve the CVE HTTP endpoints (TBK / HG532 / Realtek) on port 80/37215."""
     conn.settimeout(10)
@@ -144,11 +156,17 @@ def handle_http_cve(conn, addr):
             if not chunk:
                 return
             data += chunk
-        head = data.split(b"\r\n\r\n", 1)[0].decode("utf-8", errors="replace")
-        body = data.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in data else b""
-        lines = head.split("\r\n")
+            if len(data) > MAX_HTTP_REQUEST:
+                _http_413(conn, addr, f"headers reached {len(data)}B without terminator")
+                return
+        head, _, body = data.partition(b"\r\n\r\n")
+        lines = head.decode("utf-8", errors="replace").split("\r\n")
         reqline = lines[0]
-        method, path = reqline.split(" ")[:2]
+        parts = reqline.split(" ")
+        if len(parts) < 2:
+            _http_400(conn, addr, f"malformed request line {reqline[:100]!r}")
+            return
+        method, path = parts[0], parts[1]
         clen = 0
         headers = {}
         for h in lines[1:]:
@@ -156,12 +174,22 @@ def handle_http_cve(conn, addr):
                 k, v = h.split(":", 1)
                 headers[k.strip().lower()] = v.strip()
         if "content-length" in headers:
-            clen = int(headers["content-length"])
+            try:
+                clen = int(headers["content-length"])
+            except ValueError:
+                _http_400(conn, addr, f"bad Content-Length {headers['content-length'][:50]!r}")
+                return
+        if clen < 0 or clen > MAX_HTTP_REQUEST:
+            _http_413(conn, addr, f"declared Content-Length {clen}")
+            return
         while len(body) < clen:
             chunk = conn.recv(4096)
             if not chunk:
                 break
             body += chunk
+            if len(body) > MAX_HTTP_REQUEST:
+                _http_413(conn, addr, f"body reached {len(body)}B")
+                return
         body_txt = body[:clen].decode("utf-8", errors="replace")
 
         if CVE == "CVE-2024-3721":  # TBK DVR
@@ -746,17 +774,24 @@ def handle_redis(conn, addr):
             for ln in lines:
                 upper = ln.upper()
                 if upper.startswith("AUTH"):
-                    parts = ln.split()
-                    if len(parts) >= 2 and parts[1] == REDIS_PASS:
-                        authed = True
-                        record_success("redis", addr[0])
-                        conn.sendall(b"+OK\r\n")
-                        log(f"REDIS {addr[0]} AUTH OK")
+                    if REDIS_PASS == "":
+                        # No-auth device: real Redis keeps serving and answers
+                        # with this exact error; do not flip authed or count a
+                        # lockout failure (#304).
+                        conn.sendall(b"-ERR Client sent AUTH, but no password is set\r\n")
+                        log(f"REDIS {addr[0]} AUTH ignored (no password set)")
                     else:
-                        authed = False
-                        record_failure("redis", addr[0])
-                        conn.sendall(b"-ERR invalid password\r\n")
-                        log(f"REDIS {addr[0]} AUTH FAIL")
+                        parts = ln.split()
+                        if len(parts) >= 2 and parts[1] == REDIS_PASS:
+                            authed = True
+                            record_success("redis", addr[0])
+                            conn.sendall(b"+OK\r\n")
+                            log(f"REDIS {addr[0]} AUTH OK")
+                        else:
+                            authed = False
+                            record_failure("redis", addr[0])
+                            conn.sendall(b"-ERR invalid password\r\n")
+                            log(f"REDIS {addr[0]} AUTH FAIL")
                 elif not authed:
                     conn.sendall(b"-NOAUTH Authentication required.\r\n")
                 elif upper.startswith("PING"):
