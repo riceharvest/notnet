@@ -13,7 +13,9 @@ payload execution on victims, credential harvesting, and an active defence layer
 - **Spreading**: CVE modules (TBK/HG532/Realtek), SSH/Telnet/SMB/Redis/RDP brute-force
 - **Payload loop**: cracked devices actually execute the dropped binary and join
   the C2 as new bots (real propagation, measured by heartbeat bot_tag)
-- **Autonomous propagation** (expected FAIL on shipped code — issue #95)
+- **Autonomous propagation**: spread_local runs its own scan/drop cycle and
+  delivers payloads without operator commands (re-drops on devices already
+  infected by the c2-drive scenario count as propagation evidence)
 - **Resilience**: fast-flux, dead-drop, C2 rotation
 - **Monetization**: SOCKS5 proxy, credential-log exfil, relay
 - **Defence envelope**: same attack under lax/standard/hardened posture
@@ -30,11 +32,14 @@ payload execution on victims, credential harvesting, and an active defence layer
 cd tests/sim
 ./run-sim.sh --scenario all --posture standard          # full run
 ./run-sim.sh --scenario c2-drive --posture lax          # operator-driven spread
-./run-sim.sh --scenario autonomous                      # Finding A proof
+./run-sim.sh --scenario autonomous                      # spread_local + payload delivery
 ./run-sim.sh --scenario defence --posture hardened      # IDS/lockout/EDR
 ./run-sim.sh --scenario resilience                      # dead-drop + rotation
 ./run-sim.sh --scenario flux                            # fast-flux multi-A
 ./run-sim.sh --scenario monetization                    # proxy + relay
+./run-sim.sh --scenario honeytoken                      # canary-cred tripwire (#148)
+./run-sim.sh --scenario honeypot-tier                   # Cowrie/Dionaea capture tier (#149)
+./run-sim.sh --scenario telemetry                       # host telemetry: fileless path, Wazuh/Sigma hit (#150)
 ./run-sim.sh --scenario remaining-parity                # S7: IRC/SOCKS5/persistence/pinning
 ```
 

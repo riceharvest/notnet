@@ -18,11 +18,34 @@ Doing so is unauthorized access and is illegal in most jurisdictions.
 
 If you find a defect in the **defensive** tooling — a detection that fails to
 fire, an intel IOC that has drifted, or a guardrail that does not hold — please
-open an issue or a private advisory. Detection gaps are the highest-priority
-reports because they weaken the repo's stated purpose.
+report it privately via **GitHub Security Advisories**
+(https://github.com/riceharvest/notnet/security/advisories/new). This is the
+only monitored intake channel; there is no security email address for this
+repository. If the defect is not sensitive (e.g. a detection gap with no
+operational impact), a regular issue is also fine.
 
-Contact: **security@riceharvest.github.io** (PGP optional; subject
-`notnet disclosure`).
+### Response and disclosure timeline (best effort)
+
+This is a research/simulation repository maintained on a best-effort basis;
+there are no hard SLAs, but the intent is:
+
+- **Acknowledgment**: within ~72 hours of filing an advisory.
+- **Triage**: within ~1 week — confirm/deny, assess impact on detections,
+  intel, or guardrails.
+- **Fix**: as soon as practical; defensive defects take priority.
+- **Disclosure**: coordinated with the reporter, defaulting to public
+  disclosure once a fix lands or 90 days after the report, whichever comes
+  first.
+
+If you receive no acknowledgment within two weeks, assume the report was
+missed and follow up in a public issue (without sensitive details).
+
+## Supported versions
+
+Only `main` is supported: this repo ships no releases and carries a single
+moving version. Fixes land on `main` via normal PRs; there are no backports
+or long-term-support branches. If you run an older checkout, update to the
+latest `main` before reporting.
 
 ## Reporting abuse of leaked builds
 

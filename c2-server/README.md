@@ -43,7 +43,7 @@ targeted command is served only to the bot whose heartbeat tag matches;
 untargeted commands go to the first bot on the channel. Serve the queue from
 the dashboard's form or:
 
-    c2-server/c2ctl queue exec uname -a --target <bot_tag>
+    c2-server/c2ctl queue --target <bot_tag> exec uname -a
     c2-server/c2ctl queue spread 172.29.10.0/28
     c2-server/c2ctl bots
     c2-server/c2ctl creds
