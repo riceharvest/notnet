@@ -1,9 +1,10 @@
 {
   "version": "0.1.0-dev",
-  "generated": "2026-08-13",
+  "generated": "2026-08-13T00:00:00.000Z",
   "techniques": [
     {
       "technique": "T1190",
+      "name": "Exploit Public-Facing Application",
       "covered_by": [
         "suricata:cve_2017_17215_hg532",
         "suricata:cve_2021_35395_realtek",
@@ -12,12 +13,14 @@
     },
     {
       "technique": "T1110",
+      "name": "Brute Force",
       "covered_by": [
         "sigma:brute_force_ssh_smb_redis"
       ]
     },
     {
       "technique": "T1005",
+      "name": "Data from Local System",
       "covered_by": [
         "sigma:exfil_creds",
         "yara:notnet_cred_log_format"
@@ -25,12 +28,14 @@
     },
     {
       "technique": "T1020",
+      "name": "Automated Exfiltration",
       "covered_by": [
         "sigma:exfil_creds"
       ]
     },
     {
       "technique": "T1572",
+      "name": "Protocol Tunneling",
       "covered_by": [
         "suricata:c2_heartbeat_bot_paths",
         "sigma:proxy_tunnel"
@@ -38,6 +43,7 @@
     },
     {
       "technique": "T1090",
+      "name": "Proxy",
       "covered_by": [
         "suricata:relay_via_chain",
         "sigma:proxy_tunnel"
@@ -45,6 +51,7 @@
     },
     {
       "technique": "T1021",
+      "name": "Remote Services",
       "covered_by": [
         "sigma:admin_share_write",
         "sigma:redis_config_set_authorized_keys"
@@ -52,12 +59,14 @@
     },
     {
       "technique": "T1543",
+      "name": "Create or Modify System Process",
       "covered_by": [
         "sigma:persistence_cron_systemd_sysv"
       ]
     },
     {
       "technique": "T1027",
+      "name": "Obfuscated Files or Information",
       "covered_by": [
         "yara:notnet_fileless_memfd_fexecve",
         "sigma:fileless_memfd_fexecve"
@@ -65,6 +74,7 @@
     },
     {
       "technique": "T1489",
+      "name": "Service Stop",
       "covered_by": [
         "sigma:self_destruct_killswitch"
       ]

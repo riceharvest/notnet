@@ -156,19 +156,11 @@ DETECTIONS = {
     "suricata:cve_2024_3721_tbk": _has("mdc="),
 }
 
-# technique -> expected detections (must all fire on seeded evidence)
-COVERAGE = {
-    "T1190": ["suricata:cve_2017_17215_hg532", "suricata:cve_2021_35395_realtek"],
-    "T1110": ["sigma:brute_force_ssh_smb_redis"],
-    "T1005": ["sigma:exfil_creds", "yara:notnet_cred_log_format"],
-    "T1020": ["sigma:exfil_creds"],
-    "T1572": ["suricata:c2_heartbeat_bot_paths", "sigma:proxy_tunnel"],
-    "T1090": ["suricata:relay_via_chain", "sigma:proxy_tunnel"],
-    "T1021": ["sigma:admin_share_write", "sigma:redis_config_set_authorized_keys"],
-    "T1543": ["sigma:persistence_cron_systemd_sysv"],
-    "T1027": ["yara:notnet_fileless_memfd_fexecve", "sigma:fileless_memfd_fexecve"],
-    "T1489": ["sigma:self_destruct_killswitch"],
-}
+# technique -> expected detections (must all fire on seeded evidence).
+# Imported from intel/build_intel.py TECH_COVERAGE (#206) so attack_mapping.json,
+# this replay gate and ATTACK-COVERAGE.md share one source of truth.
+sys.path.insert(0, os.path.join(REPO, "intel"))
+from build_intel import TECH_COVERAGE as COVERAGE  # noqa: E402
 
 
 def fire_count(det_name, ev):
