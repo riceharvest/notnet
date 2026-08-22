@@ -50,7 +50,6 @@ if [ -n "$PROFILE" ]; then
 fi
 
 export SIM_POSTURE="$POSTURE"
-export SUDO_PW="${SUDO_PW:-}"
 
 # The driver (run_sim.py) runs on the HOST (step 5), not in a container, so it
 # must point at the host-side evidence/queue/reports dirs — not /evidence (which
@@ -108,29 +107,21 @@ mkdir -p state
 echo "[2b] Host firewall (posture=$POSTURE)..."
 FW_PID=""
 if command -v sudo >/dev/null 2>&1; then
-  SUDO_PW="${SUDO_PW:-}"
-  if [ -n "$SUDO_PW" ]; then
-    echo "$SUDO_PW" | sudo -S -v 2>/dev/null
-  fi
+  # Passwordless sudo only (sudo -n): the sim NEVER reads a sudo password
+  # from the environment or stdin. See tests/sim/sudoers.example for the
+  # scoped NOPASSWD rule to install.
   if sudo -n true 2>/dev/null; then
-    if [ -n "$SUDO_PW" ]; then
-      echo "$SUDO_PW" | sudo -S bash defence/host_firewall.sh install --posture="$POSTURE" --ips="${SIM_IPS:-0}" 2>&1 | tail -4
-    else
-      sudo -n bash defence/host_firewall.sh install --posture="$POSTURE" --ips="${SIM_IPS:-0}" 2>&1 | tail -4
-    fi
+    sudo -n ./defence/host_firewall.sh install --posture="$POSTURE" --ips="${SIM_IPS:-0}" 2>&1 | tail -4
     # IPS blacklist watcher (only needed when IPS is on)
     if [ "${SIM_IPS:-0}" = "1" ] || [ "$POSTURE" = "hardened" ]; then
       # </dev/null so the watcher never holds our stdout pipe open (teardown
       # would hang waiting for the pipe to close); redirect output to a file.
-      if [ -n "$SUDO_PW" ]; then
-        echo "$SUDO_PW" | sudo -S bash defence/host_firewall.sh watch --evidence="$PWD/evidence" </dev/null >> evidence/host_firewall.log 2>&1 &
-      else
-        sudo -n bash defence/host_firewall.sh watch --evidence="$PWD/evidence" </dev/null >> evidence/host_firewall.log 2>&1 &
-      fi
+      sudo -n ./defence/host_firewall.sh watch --evidence="$PWD/evidence" </dev/null >> evidence/host_firewall.log 2>&1 &
       FW_PID=$!
     fi
   else
     echo "WARN: no passwordless sudo — host firewall SKIPPED (network posture not enforced)"
+    echo "      install tests/sim/sudoers.example (NOPASSWD, scoped) to enable it"
   fi
 else
   echo "WARN: sudo not found — host firewall SKIPPED"
@@ -182,11 +173,7 @@ else
   echo "[6/6] Tearing down..."
   if [ -n "$FW_PID" ]; then kill "$FW_PID" 2>/dev/null || true; fi
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    if [ -n "${SUDO_PW:-}" ]; then
-      echo "$SUDO_PW" | sudo -S bash defence/host_firewall.sh remove 2>&1 | tail -1
-    else
-      sudo -n bash defence/host_firewall.sh remove 2>&1 | tail -1
-    fi
+    sudo -n ./defence/host_firewall.sh remove 2>&1 | tail -1
   fi
   $COMPOSE_BASE -f docker-compose.fleet.yml down -v 2>&1 | tail -2
 fi

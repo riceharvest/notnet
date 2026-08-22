@@ -38,7 +38,7 @@ gate "make TLS=1 (zero warnings)" bash -c 'make clean >/dev/null 2>&1 && ! make 
 gate "TLS build + smoke" ./c2-server/tls_smoke.sh
 
 # 4. c2-drive smoke against the mock C2 (9 checks)
-gate "sim c2-drive (mock C2)" bash -c "cd tests/sim && SUDO_PW='${SUDO_PW:-}' ./run-sim.sh --scenario c2-drive --posture lax >/dev/null 2>&1"
+gate "sim c2-drive (mock C2)" bash -c "cd tests/sim && ./run-sim.sh --scenario c2-drive --posture lax >/dev/null 2>&1"
 
 # 5. socks5_client fork guard (#194): canonical copy lives in tests/sim/c2/
 gate "socks5_client drift guard" bash -c 'if [ -f c2-server/socks5_client.py ]; then
@@ -52,9 +52,9 @@ gate "killswitch (armed + inert)" ./tests/run-tests.sh killswitch
 
 if [ "${1:-}" = "--full" ] || [ "${1:-}" = "--push" ]; then
     # 7. full regression — all scenarios, mock C2 (21 checks)
-    gate "sim full regression (all, mock)" bash -c "cd tests/sim && SUDO_PW='${SUDO_PW:-}' ./run-sim.sh --scenario all --posture standard >/dev/null 2>&1"
+    gate "sim full regression (all, mock)" bash -c "cd tests/sim && ./run-sim.sh --scenario all --posture standard >/dev/null 2>&1"
     # 8. full suite against the real C2 (21 checks)
-    gate "sim full suite (all, real C2)" bash -c "cd tests/sim && SUDO_PW='${SUDO_PW:-}' ./run-sim.sh --scenario all --posture standard --c2 real >/dev/null 2>&1"
+    gate "sim full suite (all, real C2)" bash -c "cd tests/sim && ./run-sim.sh --scenario all --posture standard --c2 real >/dev/null 2>&1"
 fi
 
 # restore the default build artifact

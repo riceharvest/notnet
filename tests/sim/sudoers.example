@@ -1,0 +1,31 @@
+# notnet sim — example sudoers rule (issue #339)
+#
+# The host firewall (defence/host_firewall.sh) needs root to program the
+# iptables DOCKER-USER / FORWARD chains, and the parity driver (run_sim.py)
+# reads those rules back with `iptables -S`. The sim scripts call sudo with
+# `sudo -n` ONLY — they never read a password from the environment or stdin,
+# so a NOPASSWD rule is required for the firewall layer to be enforced.
+#
+# Install (adjust <REPO> to your checkout path):
+#
+#   sudo install -m 0440 tests/sim/sudoers.example \
+#        /etc/sudoers.d/notnet-sim
+#
+# Scope: exactly two things, nothing else —
+#   1. the sim's host_firewall.sh script itself (run as root; it only ever
+#      touches iptables rules tagged `notnet-sim` on the 172.29.0.0/16 sim
+#      subnet), and
+#   2. read-only `iptables -S` used by run_sim.py to verify enforcement.
+#
+# NEVER grant blanket NOPASSWD for bash/sh, and never export a sudo password
+# into the environment (visible in /proc/<pid>/environ to every child,
+# including the sim's attack containers).
+#
+# Replace <REPO> below with the absolute path of your notnet checkout:
+
+dario ALL=(root) NOPASSWD: <REPO>/tests/sim/defence/host_firewall.sh
+dario ALL=(root) NOPASSWD: /usr/sbin/iptables -S DOCKER-USER, \
+                           /usr/sbin/iptables -S FORWARD
+
+# Validate before installing:
+#   visudo -cf tests/sim/sudoers.example
