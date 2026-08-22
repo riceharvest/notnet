@@ -190,6 +190,9 @@ def handle_http_cve(conn, addr):
         if clen < 0 or clen > MAX_HTTP_REQUEST:
             _http_413(conn, addr, f"declared Content-Length {clen}")
             return
+        # #291: body reads are capped at MAX_HTTP_REQUEST regardless of the
+        # declared Content-Length — the declared value above is client-
+        # controlled and must never set the accumulation bound by itself.
         while len(body) < clen:
             chunk = conn.recv(4096)
             if not chunk:
@@ -864,28 +867,42 @@ def handle_redis(conn, addr):
 
 # ─────────────────────────── dispatch ───────────────────────────
 
+# #291: bound concurrent per-connection threads (mirrors the C2's #187
+# caps) — a connection flood must not exhaust threads/memory on the
+# emulated device. Over-cap accepts are closed immediately.
+MAX_DEVICE_CONN_THREADS = 128
+_device_conn_sem = threading.BoundedSemaphore(MAX_DEVICE_CONN_THREADS)
+
+
 def dispatch(port):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))
     srv.listen(32)
     log(f"LISTEN {DEVICE_ID} type={DEVICE_TYPE} port={port} cve={CVE} patched={PATCHED} partial={PATCHED_PARTIAL} edr={EDR_BLOCK} lockout={LOCKOUT}")
+    handlers = {23: handle_telnet, 22: handle_ssh, 445: handle_smb,
+                3389: handle_rdp, 6379: handle_redis}
     while True:
         try:
             conn, addr = srv.accept()
-            if port == 23:
-                t = threading.Thread(target=handle_telnet, args=(conn, addr), daemon=True)
-            elif port == 22:
-                t = threading.Thread(target=handle_ssh, args=(conn, addr), daemon=True)
-            elif port == 445:
-                t = threading.Thread(target=handle_smb, args=(conn, addr), daemon=True)
-            elif port == 3389:
-                t = threading.Thread(target=handle_rdp, args=(conn, addr), daemon=True)
-            elif port == 6379:
-                t = threading.Thread(target=handle_redis, args=(conn, addr), daemon=True)
-            else:
-                t = threading.Thread(target=handle_http_cve, args=(conn, addr), daemon=True)
-            t.start()
+            target = handlers.get(port, handle_http_cve)
+            if not _device_conn_sem.acquire(blocking=False):
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+
+            def _run():
+                try:
+                    target(conn, addr)
+                finally:
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    _device_conn_sem.release()
+            threading.Thread(target=_run, daemon=True).start()
         except KeyboardInterrupt:
             break
 
