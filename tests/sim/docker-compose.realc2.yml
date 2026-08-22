@@ -14,7 +14,7 @@ name: notnet-sim
 services:
   c2:
     image: python:3.11-slim
-    command: ["python3", "/app/c2.py", "--secret", "mocksecret",
+    command: ["python3", "/app/c2.py", "--secret", "${SIM_C2_SECRET:-mocksecret}",
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",
               "--console-port", "8090",
@@ -33,7 +33,7 @@ services:
 
   c2-ws:
     image: python:3.11-slim
-    command: ["python3", "/app/c2.py", "--secret", "mocksecret",
+    command: ["python3", "/app/c2.py", "--secret", "${SIM_C2_SECRET:-mocksecret}",
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",
               "--console-port", "8090",
@@ -51,7 +51,7 @@ services:
 
   c2-irc:
     image: python:3.11-slim
-    command: ["python3", "/app/c2.py", "--secret", "mocksecret",
+    command: ["python3", "/app/c2.py", "--secret", "${SIM_C2_SECRET:-mocksecret}",
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",
               "--console-port", "8090",
