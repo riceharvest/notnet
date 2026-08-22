@@ -219,7 +219,7 @@ static int ed25519_verify(const unsigned char *sig, const unsigned char *msg,
     EVP_PKEY *pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, pub, 32);
     if (!pkey) return -1;
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    if (!ctx) { EVP_PKEY_free(pkey); /* noop */ EVP_PKEY_free(pkey); return -1; }
+    if (!ctx) { EVP_PKEY_free(pkey); return -1; }
     int ok = EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, pkey);
     if (ok == 1) ok = EVP_DigestVerify(ctx, sig, 64, msg, msglen);
     EVP_MD_CTX_free(ctx);
