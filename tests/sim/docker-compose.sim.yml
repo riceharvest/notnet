@@ -20,7 +20,8 @@ name: notnet-sim
 services:
   # ── C2 infrastructure ──
   c2:
-    image: python:3.11-slim
+    # #324: digest-pinned on top of the version tag
+    image: python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
     container_name: sim-c2
     command: ["python3", "/app/c2_http.py"]
     volumes:
@@ -40,7 +41,8 @@ services:
         ipv4_address: 172.29.0.2
 
   c2-ws:
-    image: python:3.11-slim
+    # #324: digest-pinned on top of the version tag
+    image: python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
     container_name: sim-c2-ws
     command: ["python3", "/app/c2_ws.py"]
     volumes:
@@ -58,7 +60,8 @@ services:
         ipv4_address: 172.29.0.3
 
   c2-irc:
-    image: python:3.11-slim
+    # #324: digest-pinned on top of the version tag
+    image: python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
     container_name: sim-c2-irc
     command: ["python3", "/app/c2_irc.py"]
     volumes:
@@ -75,7 +78,8 @@ services:
         ipv4_address: 172.29.0.4
 
   c2-backup:
-    image: python:3.11-slim
+    # #324: digest-pinned on top of the version tag
+    image: python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
     container_name: sim-c2-backup
     command: ["python3", "/app/c2_http.py"]
     volumes:
@@ -95,7 +99,8 @@ services:
         ipv4_address: 172.29.0.5
 
   deaddrop:
-    image: python:3.11-slim
+    # #324: digest-pinned on top of the version tag
+    image: python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
     container_name: sim-deaddrop
     command: ["python3", "/app/c2_deaddrop.py"]
     volumes:
@@ -112,7 +117,8 @@ services:
         ipv4_address: 172.29.0.6
 
   dnsmasq:
-    image: jpillora/dnsmasq
+    # #324: digest-pinned — floating third-party tags rebuild upstream
+    image: jpillora/dnsmasq@sha256:98b69ad825942089fb7c4b9153e3c5af0205eda3a103c691e30b1a13fd912830
     container_name: sim-dnsmasq
     volumes:
       - ./dnsmasq.conf:/etc/dnsmasq.conf:ro
@@ -217,7 +223,8 @@ services:
         ipv4_address: 172.29.30.70
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    # #324: digest-pinned on top of the version tag
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4@sha256:dfd318b417be1356d9c7fdd6a5577c8a45553ac9d34354929a416c69c85daa9f
     container_name: sim-elasticsearch
     environment:
       discovery.type: single-node
@@ -235,7 +242,8 @@ services:
       retries: 12
 
   kibana:
-    image: docker.elastic.co/kibana/kibana:8.13.4
+    # #324: digest-pinned on top of the version tag
+    image: docker.elastic.co/kibana/kibana:8.13.4@sha256:aa596f0f8eac0529b4275128699db835e1d839d60ac5af05e3f3a1764d52ae79
     container_name: sim-kibana
     environment:
       ELASTICSEARCH_HOSTS: http://172.29.0.11:9200
