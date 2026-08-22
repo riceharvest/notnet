@@ -313,10 +313,15 @@ int plugin_fetch_remote(notnet_bot_t *bot, const char *name,
 
     /* 1. Download (streamed; http_download handles http:// and https://,
      * the latter upgrading to TLS when pinned). Rejects non-2xx.
+     * #293: the PLUGIN_REMOTE_MAX cap is enforced DURING the receive
+     * loop — the fetch aborts (and the partial file is unlinked) as soon
+     * as the stream would exceed 1MB, so a hostile C2 cannot fill the
+     * disk before the SHA-256 gate runs.
      * Returns the body length on success (> 0), -1 on failure. */
-    int dlrc = http_download(bot, url, path);
+    int dlrc = http_download_max(bot, url, path, PLUGIN_REMOTE_MAX);
     if (dlrc < 0) {
-        log_error("PLUGIN: fetch %s download failed: %s", name, url);
+        log_error("PLUGIN: fetch %s download failed (cap %d bytes): %s",
+                  name, PLUGIN_REMOTE_MAX, url);
         unlink(path);
         return -1;
     }
