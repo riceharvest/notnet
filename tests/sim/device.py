@@ -539,25 +539,39 @@ def handle_smb(conn, addr):
         data = conn.recv(4096)
         if not data:
             return
-        # crude parse: password and account are NUL-terminated ASCII in the body
+        # Parse credentials from the session-setup body. The bot's
+        # smb1_session_setup sends [prefix][32B header][24B params] then:
+        # password (NUL-terminated), account (NUL-terminated), primary group
+        # (empty), native OS "Linux". The declared password length lives at
+        # params[12:14], i.e. wire offset 48.
+        import re
+        account = ""
+        password = ""
         try:
-            text = data.decode("latin-1")
-            # find account name near the end: last printable token before \x00\x00
-            import re
-            matches = re.findall(rb"([\x20-\x7e]{1,64})\x00", data)
-            account = ""
-            password = ""
-            # the drop command follows after auth in the same stream
-            if matches:
-                account = matches[-1].decode(errors="replace")
-            # extract password: typically second-to-last or search after "pass"
-        except Exception:
-            account = ""
+            pw_len = int.from_bytes(data[48:50], "little")
+            pos = 60  # past prefix + header + 24-byte param block
+            password = data[pos : pos + pw_len].decode("latin-1", "replace")
+            end = data.find(b"\x00", pos + pw_len)
+            if end != -1:
+                account = data[pos + pw_len : end].decode("latin-1", "replace")
+        except (IndexError, ValueError):
+            pass
+        if not account:
+            # fallback: scan printable NUL-terminated tokens; password and
+            # account are the two immediately before the native OS string
+            try:
+                toks = re.findall(rb"([\x20-\x7e]{1,64})\x00", data)
+                i = len(toks) - 1 - toks[::-1].index(b"Linux")
+                if i >= 2:
+                    password = toks[i - 2].decode("latin-1", "replace")
+                    account = toks[i - 1].decode("latin-1", "replace")
+            except ValueError:
+                pass
         if check_lockout():
             log(f"SMB {addr[0]} auth REJECTED (lockout)")
             smb_status_response(conn, 0xC000006A)  # STATUS_LOGON_FAILURE
             return
-        ok = any(u == account for u, _ in SMB_CREDS) if SMB_CREDS else False
+        ok = cred_ok(SMB_CREDS, account, password) if SMB_CREDS else False
         if ok:
             log(f"SMB {addr[0]} AUTH OK account={account}")
             smb_status_response(conn, 0, uid=30000)
