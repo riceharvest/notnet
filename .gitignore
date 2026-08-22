@@ -2,6 +2,7 @@
 notnet
 notnet.o
 *.o
+*.d
 *.a
 *.so
 build/

