@@ -158,6 +158,9 @@ typedef struct {
     uint8_t proxy_enabled;
     uint16_t proxy_port;
     char proxy_token[64];
+    /* SECURITY FIX (#295): optional listener bind address (IPv4 dotted
+     * quad). Empty = 0.0.0.0 (all interfaces, legacy default). */
+    char proxy_bind[64];
 
     /* SECURITY FIX (#91): ORB-style single-hop relay (the Volt Typhoon
      * pattern — proxy operations through compromised edge devices near
@@ -177,6 +180,9 @@ typedef struct {
     uint8_t relay_enabled;
     uint16_t relay_port;
     char relay_token[64];
+    /* SECURITY FIX (#295): optional listener bind address (IPv4 dotted
+     * quad). Empty = 0.0.0.0 (all interfaces, legacy default). */
+    char relay_bind[64];
 
     /* SECURITY FIX (#139): Decentralized P2P command/peer mesh. A bounded
      * peer table (addr:port + last-seen) is gossiped over relay sockets
@@ -191,6 +197,9 @@ typedef struct {
      * mesh_operator_pubkey= / mesh_static_peers_1..N= . */
     uint8_t mesh_enabled;
     uint16_t mesh_port;
+    /* SECURITY FIX (#295): optional listener bind address (IPv4 dotted
+     * quad). Empty = 0.0.0.0 (all interfaces, legacy default). */
+    char mesh_bind[64];
     char mesh_operator_pubkey[65];        /* 64 hex + NUL */
     char mesh_static_peers[MESH_PEER_MAX][256];
 

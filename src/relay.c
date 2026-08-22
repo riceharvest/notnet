@@ -261,11 +261,19 @@ static void relay_handle_client(int client) {
         return;
     }
 
-    /* 3. Parse the VIA chain (bounded). */
+    /* 3. Parse the VIA chain (bounded). SECURITY FIX (#227): a chain
+     * longer than RELAY_MAX_HOPS is rejected with ERR BADREQ instead of
+     * being silently truncated — truncation would exit through FEWER
+     * relays than requested, changing the egress path without error. */
     relay_hop_t hops[RELAY_MAX_HOPS];
     int nhops = 0;
+    int too_many_hops = 0;
     char *scan = strstr(line, " VIA ");
-    while (scan && nhops < RELAY_MAX_HOPS) {
+    while (scan) {
+        if (nhops >= RELAY_MAX_HOPS) {
+            too_many_hops = 1;
+            break;
+        }
         char *h = scan + 5;
         while (*h == ' ' || *h == '\t') h++;
         char hv[256] = {0};
@@ -277,6 +285,11 @@ static void relay_handle_client(int client) {
         hops[nhops].port = (uint16_t)hp;
         nhops++;
         scan = strstr(h, " VIA ");
+    }
+    if (too_many_hops) {
+        static const char err[] = "ERR BADREQ\r\n";
+        relay_send_all(client, err, sizeof(err) - 1);
+        return;
     }
 
     int upstream;
@@ -460,7 +473,20 @@ int relay_start(notnet_bot_t *bot) {
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bot->relay_bind[0] != '\0') {
+        /* SECURITY FIX (#295): least-privilege bind. A configured but
+         * unparseable address refuses to start (never fall back to
+         * 0.0.0.0 — that would silently widen the listener). */
+        if (inet_pton(AF_INET, bot->relay_bind, &sa.sin_addr) != 1) {
+            log_warn("RELAY: invalid relay_bind='%s' — refusing to start",
+                     bot->relay_bind);
+            close(lfd);
+            pthread_mutex_unlock(&g_relay_mutex);
+            return -1;
+        }
+    } else {
+        sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
     sa.sin_port = htons((uint16_t)bot->relay_port);
     if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         log_warn("RELAY: bind 0.0.0.0:%u failed: %s",
@@ -491,7 +517,9 @@ int relay_start(notnet_bot_t *bot) {
     g_relay_running = 1;
     pthread_mutex_unlock(&g_relay_mutex);
 
-    log_info("RELAY: relay listening on 0.0.0.0:%u", (unsigned)g_relay_port);
+    log_info("RELAY: relay listening on %s:%u",
+             bot->relay_bind[0] ? bot->relay_bind : "0.0.0.0",
+             (unsigned)g_relay_port);
     return 0;
 }
 
