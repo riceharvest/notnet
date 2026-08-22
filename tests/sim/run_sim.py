@@ -796,16 +796,15 @@ def scenario_remaining_parity(report):
 
 
 def fw_rules_active():
-    """Host firewall presence: count our DOCKER-USER rules via sudo."""
+    """Host firewall presence: count our DOCKER-USER rules via sudo.
+
+    Passwordless sudo only (`sudo -n`): no password is ever read from the
+    environment or piped via stdin. See tests/sim/sudoers.example.
+    """
     import subprocess
     try:
-        pw = os.environ.get("SUDO_PW", "")
-        if pw:
-            cmd = ["sudo", "-S", "iptables", "-S", "DOCKER-USER"]
-            r = subprocess.run(cmd, input=pw + "\n", capture_output=True, text=True, timeout=10)
-        else:
-            cmd = ["sudo", "-n", "iptables", "-S", "DOCKER-USER"]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["sudo", "-n", "iptables", "-S", "DOCKER-USER"],
+                           capture_output=True, text=True, timeout=10)
         return "notnet-sim" in (r.stdout or "")
     except Exception:
         return False

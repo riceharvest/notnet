@@ -29,11 +29,10 @@ jobs:
         run: |
           cd tests/sim
           ./run-sim.sh --scenario c2-drive --posture lax
-        env:
-          # Native docker daemon (GH runner VM) + passwordless sudo make the
-          # DOCKER-USER firewall meaningful; dind would hide it in another
-          # netns and false-FAIL the segmentation row.
-          SUDO_PW: ""
+        # Native docker daemon (GH runner VM) + passwordless sudo make the
+        # DOCKER-USER firewall meaningful; dind would hide it in another
+        # netns and false-FAIL the segmentation row.
+        # run-sim.sh uses `sudo -n` only — no SUDO_PW (issue #339).
 
       - name: Upload parity report
         if: always()
@@ -57,8 +56,6 @@ jobs:
         run: |
           cd tests/sim
           ./run-sim.sh --scenario all --posture standard --c2 real
-        env:
-          SUDO_PW: ""
 
       - name: Upload parity report
         if: always()
@@ -132,8 +129,6 @@ jobs:
         run: |
           cd tests/sim
           ./run-sim.sh --scenario all --posture standard
-        env:
-          SUDO_PW: ""
 
       - name: Upload parity report
         if: always()

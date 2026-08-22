@@ -65,8 +65,10 @@ Segmentation is enforced TWO ways:
    DOCKER-USER chain so segments are actually isolated at the packet level
    (IoT cannot reach Office/DMZ, DMZ cannot initiate inward, C2 control ports
    stay reachable, hardened adds brute-force protection + IPS blacklist drops).
-   Needs root: set `SUDO_PW=<pw>` or NOPASSWD sudo, else the firewall is
-   skipped with a warning and the sim runs with the log-layer defence only.
+   Needs root: install the scoped NOPASSWD rule from `tests/sim/sudoers.example`,
+   else the firewall is skipped with a warning and the sim runs with the
+   log-layer defence only. The scripts use `sudo -n` only — never set or
+   export a sudo password (no SUDO_PW; issue #339).
 
 The defence layer also runs on evidence logs (no packet capture required).
 
