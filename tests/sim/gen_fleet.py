@@ -89,12 +89,12 @@ def device_env(d):
 
 
 
-def seg_net(d):
-    """Map a fleet segment to its compose network (#130)."""
-    return {"iot": "simnet-iot", "office": "simnet-office",
-            "dmz": "simnet-dmz"}.get(d.get("segment", "iot"), "simnet-iot")
-
 def build_compose(fleet):
+    # NOTE (#309/#130): every device attaches to the single flat 'simnet'
+    # bridge carrying its real segment IP (172.29.10/20/30.x). Segmentation is
+    # enforced by the router's firewall rules (tests/sim/defence/router.sh),
+    # not by L2-separated per-segment networks — full L2 separation was
+    # attempted and rejected in issue #130.
     services = {}
     for d in fleet["devices"]:
         if d.get("type", "").startswith("honeypot"):

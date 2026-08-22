@@ -9,7 +9,10 @@ RUN make clean && make
 
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends libc6 gcc make wget ca-certificates \
+# Runtime needs only libc + fetch tooling (#323): gcc/make existed solely for
+# the rare on-target compile fallback and shipped a full toolchain in every
+# bot container; the binary below is built in the builder stage.
+RUN apt-get update && apt-get install -y --no-install-recommends libc6 wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/notnet /usr/local/bin/notnet

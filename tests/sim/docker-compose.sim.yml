@@ -240,7 +240,10 @@ services:
     environment:
       ELASTICSEARCH_HOSTS: http://172.29.0.11:9200
     ports:
-      - "5601:5601"
+      # Loopback only (#317): ES runs with xpack.security disabled, so an
+      # unauthenticated Kibana must not be reachable from other host
+      # interfaces; the sim driver never needs it off-host either.
+      - "127.0.0.1:5601:5601"
     depends_on:
       elasticsearch:
         condition: service_healthy
