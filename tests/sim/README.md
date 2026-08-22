@@ -134,3 +134,10 @@ The container-internal port stays 8090; the host port is overridable so it
 never collides with other local services. The dashboard shows live fleet
 cards, a 30-min activity chart, CVE hit-rate bars and the event feed while
 the scenario runs.
+
+Auth: the published console requires the token from `--console-token`
+(default `simconsole`, override with `SIM_CONSOLE_TOKEN`). Open the
+dashboard as `http://127.0.0.1:8091/?token=simconsole` — or for c2ctl,
+`export NOTNET_C2_TOKEN=simconsole`. The console binds 0.0.0.0 inside the
+container (a container-loopback socket is unreachable by the docker port
+proxy); the published side is host-loopback only.
