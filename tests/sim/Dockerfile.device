@@ -19,5 +19,13 @@ COPY tests/sim/conf/notnet.conf.device.tpl /app/notnet.conf.tpl
 COPY tests/sim/device_entrypoint.sh /app/device_entrypoint.sh
 RUN chmod +x /app/device_entrypoint.sh
 
+# Non-root like the bot images (#297): device.py writes persist.sh and the
+# dropped payload under /app, so /app is chowned; /etc/notnet.conf is
+# pre-created writable so the entrypoint can render it as this user (the
+# executed payload only needs to read it); /evidence is a host bind mount.
+RUN touch /etc/notnet.conf && chown -R 1000:1000 /app /etc/notnet.conf
+
+USER 1000:1000
+
 WORKDIR /app
 ENTRYPOINT ["/app/device_entrypoint.sh"]

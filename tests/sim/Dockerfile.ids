@@ -3,4 +3,10 @@ FROM python:3.11-slim
 
 COPY tests/sim/defence/ids_monitor.py /app/ids_monitor.py
 
+# Non-root (#297): the monitor only reads /evidence/*.log and appends alerts/
+# blacklist entries into the same host bind mount (uid 1000 on the host).
+RUN chown -R 1000:1000 /app
+
+USER 1000:1000
+
 CMD ["python3", "/app/ids_monitor.py"]

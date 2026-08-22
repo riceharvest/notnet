@@ -1,0 +1,16 @@
+# Build-context hygiene (#322): every sim image builds from the repo root
+# (compose context ../..), and Dockerfile.sim does `COPY . .`. Keep VCS
+# history, captured run artifacts and local state out of the build context
+# and out of image layers.
+.git
+.gitignore
+tests/sim/evidence
+tests/sim/queue
+tests/sim/payload
+tests/sim/conf/generated
+reports
+queue
+payload
+*.log
+__pycache__
+**/__pycache__
