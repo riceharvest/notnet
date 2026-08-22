@@ -264,6 +264,41 @@ int install_systemd(const char *bin_path) {
 }
 
 /* ── cron Job ──────────────────────────────────────────────── */
+
+/* Read an entire stream into a malloc'd, NUL-terminated buffer (#226).
+ * The previous fixed char[4096] stack read silently dropped everything
+ * past 4095 bytes and then rewrote the TRUNCATED content back via
+ * `crontab <tmpfile>`, permanently destroying unrelated user cron
+ * entries. Growing-buffer reads preserve arbitrary sizes.
+ * Returns a caller-freed buffer, or NULL on allocation/read error. */
+static char *read_stream_all(FILE *f) {
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    for (;;) {
+        size_t n = fread(buf + len, 1, cap - len - 1, f);
+        len += n;
+        buf[len] = '\0';
+        if (n == 0) {
+            if (ferror(f)) {
+                free(buf);
+                return NULL;
+            }
+            break; /* EOF */
+        }
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (!nb) {
+                free(buf);
+                return NULL;
+            }
+            buf = nb;
+        }
+    }
+    return buf;
+}
+
 int install_cron(const char *bin_path) {
     if (validate_bin_path(bin_path) != 0) return -1;
 
@@ -280,20 +315,20 @@ int install_cron(const char *bin_path) {
      * Build the new crontab in a temp file and feed it to crontab
      * directly; no shell interpolation of the cron line at all. */
 
-    /* Read existing crontab */
-    char existing[4096];
-    existing[0] = '\0';
+    /* Read existing crontab (dynamic size — #226) */
+    char *existing = NULL;
     FILE *f = popen("crontab -l 2>/dev/null", "r");
     if (f) {
-        if (fread(existing, 1, sizeof(existing) - 1, f) == 0 && ferror(f)) {
+        existing = read_stream_all(f);
+        if (!existing) {
             log_debug("persist: crontab read failed");
         }
-        existing[sizeof(existing) - 1] = '\0';
         pclose(f);
     }
 
     /* Check if already installed */
-    if (strstr(existing, bin_path)) {
+    if (existing && strstr(existing, bin_path)) {
+        free(existing);
         log_info("cron: already installed");
         return 0;
     }
@@ -303,6 +338,7 @@ int install_cron(const char *bin_path) {
     int fd = mkstemp(tmp_path);
     if (fd < 0) {
         log_error("cron: mkstemp failed: %s", strerror(errno));
+        free(existing);
         return -1;
     }
     FILE *tf = fdopen(fd, "w");
@@ -310,11 +346,13 @@ int install_cron(const char *bin_path) {
         close(fd);
         unlink(tmp_path);
         log_error("cron: fdopen failed: %s", strerror(errno));
+        free(existing);
         return -1;
     }
-    if (existing[0]) fprintf(tf, "%s\n", existing);
+    if (existing && existing[0]) fprintf(tf, "%s\n", existing);
     fprintf(tf, "%s", cron_line);
     fclose(tf);
+    free(existing);
 
     /* Install via crontab <file> — no shell, no interpolation */
     char cmd[512];
@@ -474,17 +512,16 @@ int persist_remove(notnet_bot_t *bot) {
 
     /* cron entries mentioning our binary. Same temp-file pattern as
      * install_cron — no shell interpolation of the cron line (CWE-78). */
-    char existing[4096];
-    existing[0] = '\0';
+    char *existing = NULL;
     FILE *f = popen("crontab -l 2>/dev/null", "r");
     if (f) {
-        if (fread(existing, 1, sizeof(existing) - 1, f) == 0 && ferror(f)) {
+        existing = read_stream_all(f);
+        if (!existing) {
             log_debug("persist: crontab read failed");
         }
-        existing[sizeof(existing) - 1] = '\0';
         pclose(f);
     }
-    if (existing[0] && strstr(existing, bin_path)) {
+    if (existing && existing[0] && strstr(existing, bin_path)) {
         char tmp_path[] = "/tmp/notnet.cron.XXXXXX";
         int fd = mkstemp(tmp_path);
         if (fd >= 0) {
@@ -510,6 +547,7 @@ int persist_remove(notnet_bot_t *bot) {
             }
         }
     }
+    free(existing);
 
     /* SysV init script */
     if (access("/etc/init.d/notnet", F_OK) == 0) {
