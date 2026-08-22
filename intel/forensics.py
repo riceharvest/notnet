@@ -8,8 +8,20 @@ DID). Stdlib-only, same style.
 Subcommands:
   iocs     --evidence DIR --out bundle.json   STIX 2.1 IOC bundle
   timeline --evidence DIR --out FILE          merged attack timeline (.json/.md)
-  seal     --dir DIR --out chain.json          SHA-256 hash chain over files
-  verify   --chain chain.json [--dir DIR]      verify chain (tamper position)
+  seal     --dir DIR --out chain.json [--keyfile KEYFILE]
+                                               SHA-256 hash chain over files,
+                                               HMAC-signed manifest (#276)
+  verify   --chain chain.json [--dir DIR] [--keyfile KEYFILE]
+                                               verify chain + signature
+                                               (tamper position)
+
+Signing key custody (#276): the seal manifest is signed with HMAC-SHA256
+using a key from --keyfile or FORENSICS_SIGNING_KEY. The key MUST live
+outside the evidence directory — the signing key IS the tamper evidence:
+anyone without it cannot rewrite history and re-seal undetectably, and a
+re-seal or tail truncation fails signature verification. Legacy (v1)
+unsigned seals still verify, with a warning that re-seal/truncation is
+undetectable for them.
 
 PCAP: live packet capture needs a tcpdump sidecar container (network_mode:
 host, writing /evidence/capture.pcapng). Not implemented; when present,
@@ -17,6 +29,7 @@ timeline --include-pcap will reference it as an event source.
 """
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -299,7 +312,61 @@ def _chain_head(entries):
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+SEAL_VERSION = 2
+SEAL_ALG = "hmac-sha256"
+
+
+def _load_key(args):
+    """#276: signing key from --keyfile (path) or FORENSICS_SIGNING_KEY env.
+    Returns bytes or None. The key must be stored OUTSIDE the evidence dir —
+    key custody is what makes re-seal/tail-truncation detectable."""
+    kf = getattr(args, "keyfile", None)
+    if kf:
+        try:
+            with open(kf, encoding="utf-8") as f:
+                key = f.read().strip()
+        except OSError as e:
+            print(f"ERROR: cannot read keyfile {kf}: {e}", file=sys.stderr)
+            return None
+        if not key:
+            print(f"ERROR: keyfile {kf} is empty", file=sys.stderr)
+            return None
+        return key.encode()
+    env = os.environ.get("FORENSICS_SIGNING_KEY")
+    if env:
+        return env.encode()
+    return None
+
+
+def _manifest(entries, base):
+    """Signed manifest (#276): chain-head digest + file count + total bytes.
+    Binding count+bytes means deleting trailing entries/files (tail
+    truncation) changes the manifest and breaks the signature even though
+    every remaining hash link would still verify."""
+    total = 0
+    for e in entries:
+        try:
+            total += os.path.getsize(os.path.join(base, e["file"]))
+        except OSError as e2:
+            print(f"ERROR: cannot stat {e['file']}: {e2}", file=sys.stderr)
+            raise
+    return {"chain_head": _chain_head(entries), "files": len(entries),
+            "bytes": total}
+
+
+def _sign(manifest, key):
+    msg = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
 def cmd_seal(args):
+    key = _load_key(args)
+    if key is None:
+        print("ERROR: no signing key — pass --keyfile KEYFILE or set "
+              "FORENSICS_SIGNING_KEY. An unsigned seal cannot detect "
+              "re-sealing or tail truncation (#276); refusing to write one.",
+              file=sys.stderr)
+        return 2
     entries = []
     prev = GENESIS
     for fn in sorted(os.listdir(args.dir)):
@@ -309,31 +376,38 @@ def cmd_seal(args):
         h = _hash_file(p)
         entries.append({"file": fn, "sha256": h, "prev_hash": prev})
         prev = h
+    manifest = _manifest(entries, args.dir)
+    mac = _sign(manifest, key)
+    # #276: v2 format — signed manifest rides inside chain.json; the HMAC
+    # key lives outside the evidence dir, so a tamperer with write access
+    # to the dir can rebuild links (v1's weakness) but cannot re-sign.
+    doc = {"version": SEAL_VERSION, "alg": SEAL_ALG,
+           "manifest": manifest, "signature": mac, "entries": entries}
     with open(args.out, "w") as f:
-        json.dump(entries, f, indent=2)
-    head = _chain_head(entries)
+        json.dump(doc, f, indent=2)
+    head = manifest["chain_head"]
     # #301: anchor the chain head OUTSIDE the evidence. Print it for
     # out-of-band custody and write it to a sidecar next to the chain
     # file (which should itself live outside the sealed directory).
     head_path = args.out + ".head"
     with open(head_path, "w") as f:
         f.write(head + "\n")
-    print(f"sealed {len(entries)} files → {args.out}")
+    print(f"sealed {manifest['files']} files ({manifest['bytes']} bytes) "
+          f"→ {args.out}")
     print(f"CHAIN HEAD (record out-of-band, e.g. in the case file): {head}")
     print(f"chain head written to {head_path} — keep it OUT of the sealed dir")
+    print(f"SIGNED ({SEAL_ALG}); keep the signing key OUT of the evidence "
+          f"dir — key custody IS the tamper evidence")
     return 0
 
 
-def cmd_verify(args):
-    try:
-        chain = json.load(open(args.chain))
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"VERIFY FAIL: cannot read chain: {e}", file=sys.stderr)
-        return 1
-    base = args.dir or os.path.dirname(os.path.abspath(args.chain))
-    head_path = args.chain + ".head"
-    chain_fn = os.path.basename(os.path.abspath(args.chain))
-    head_fn = os.path.basename(head_path)
+def _verify_v1(chain, base, args):
+    """Legacy unsigned seal (plain entry list). Chain integrity only — a
+    tamperer who rewrites history and re-seals, or truncates the tail,
+    still verifies clean; warn accordingly (#276)."""
+    print("WARNING: legacy UNSIGNED seal (pre-#276 format) — re-sealing or "
+          "tail truncation is UNDETECTABLE for this chain; re-seal with a "
+          "signing key", file=sys.stderr)
     prev = GENESIS
     covered = set()
     for i, e in enumerate(chain):
@@ -352,12 +426,12 @@ def cmd_verify(args):
             return 1
         covered.add(e["file"])
         prev = e["sha256"]
-    # #301: recompute the chain-head digest and check it against the
-    # anchored copy — a re-sealed (consistently rebuilt) chain.json no
-    # longer verifies clean.
     head = _chain_head(chain)
-    if os.path.isfile(head_path):
-        with open(head_path) as f:
+    head_fn = os.path.basename(args.chain) + ".head"
+    if os.path.isfile(os.path.join(os.path.dirname(
+            os.path.abspath(args.chain)), head_fn)):
+        with open(os.path.join(os.path.dirname(os.path.abspath(args.chain)),
+                               head_fn)) as f:
             recorded = f.read().strip()
         if recorded != head:
             print(f"VERIFY FAIL: chain-head mismatch — chain.json was "
@@ -365,11 +439,9 @@ def cmd_verify(args):
                   f"recomputed {head[:16]}...)")
             return 1
     else:
-        print(f"NOTICE: no anchored head found at {head_path}; compare the "
+        print(f"NOTICE: no anchored head found at {head_fn}; compare the "
               f"recomputed head against out-of-band custody: {head}")
-    # #197: tampering-by-addition — any file in the evidence dir that the
-    # chain does not cover fails verification (planting fake evidence must
-    # not pass as "chain intact").
+    chain_fn = os.path.basename(os.path.abspath(args.chain))
     for fn in sorted(os.listdir(base)):
         p = os.path.join(base, fn)
         if not os.path.isfile(p):
@@ -379,7 +451,114 @@ def cmd_verify(args):
         print(f"VERIFY FAIL: unsealed file present in evidence dir: {fn} "
               f"— added after sealing")
         return 1
-    print(f"VERIFY OK: {len(chain)} files, chain intact, head anchored")
+    print(f"VERIFY OK: {len(chain)} files, chain intact, UNSIGNED legacy "
+          f"seal (see warning)")
+    return 0
+
+
+def cmd_verify(args):
+    try:
+        chain = json.load(open(args.chain))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"VERIFY FAIL: cannot read chain: {e}", file=sys.stderr)
+        return 1
+    base = args.dir or os.path.dirname(os.path.abspath(args.chain))
+
+    # v1 backward compat: plain list = pre-#276 unsigned seal.
+    if isinstance(chain, list):
+        return _verify_v1(chain, base, args)
+
+    # #276: v2 — verify the HMAC-signed manifest before anything else.
+    if not isinstance(chain, dict) or \
+            not all(k in chain for k in ("version", "entries",
+                                         "manifest", "signature")):
+        print("VERIFY FAIL: unrecognized seal format", file=sys.stderr)
+        return 1
+    if chain.get("alg") != SEAL_ALG:
+        print(f"VERIFY FAIL: unsupported signature alg "
+              f"{chain.get('alg')!r}", file=sys.stderr)
+        return 1
+    key = _load_key(args)
+    if key is None:
+        print(f"VERIFY FAIL: signing key unavailable (set FORENSICS_SIGNING_KEY "
+              f"or pass --keyfile) — cannot authenticate sealed manifest "
+              f"{os.path.basename(args.chain)}", file=sys.stderr)
+        return 1
+
+    entries = chain["entries"]
+    # Walk the chain itself first so a failure names the tamper position.
+    prev = GENESIS
+    covered = set()
+    for i, e in enumerate(entries):
+        if e["prev_hash"] != prev:
+            print(f"VERIFY FAIL at entry {i} ({e['file']}): chain break")
+            return 1
+        p = os.path.join(base, e["file"])
+        if not os.path.isfile(p):
+            print(f"VERIFY FAIL at entry {i}: missing file {e['file']} — "
+                  f"possible tail truncation")
+            return 1
+        actual = _hash_file(p)
+        if actual != e["sha256"]:
+            print(f"VERIFY FAIL at entry {i} ({e['file']}): hash mismatch "
+                  f"(expected {e['sha256'][:16]}..., got {actual[:16]}...) — "
+                  f"file tampered")
+            return 1
+        covered.add(e["file"])
+        prev = e["sha256"]
+
+    # Recompute the manifest from disk and check the signature. Any edit to
+    # history + re-seal, or any deletion (count/bytes/head shift), fails here
+    # because the attacker lacks the custody key.
+    try:
+        recomputed = _manifest(entries, base)
+    except OSError:
+        return 1
+    recorded_manifest = chain["manifest"]
+    for field in ("chain_head", "files", "bytes"):
+        if recorded_manifest.get(field) != recomputed[field]:
+            print(f"VERIFY FAIL: manifest {field} mismatch — seal does not "
+                  f"match evidence (recorded {recorded_manifest.get(field)!r}, "
+                  f"recomputed {recomputed[field]!r}); re-sealed or truncated?")
+            return 1
+    expect_mac = _sign(recomputed, key)
+    if not hmac.compare_digest(expect_mac, chain["signature"]):
+        print(f"VERIFY FAIL: signature mismatch — chain.json was modified "
+              f"after sealing or re-sealed without the custody key "
+              f"(expected {expect_mac[:16]}..., got "
+              f"{str(chain['signature'])[:16]}...)")
+        return 1
+
+    # #301 sidecar head: out-of-band anchor, checked when present.
+    head_path = args.chain + ".head"
+    if os.path.isfile(head_path):
+        with open(head_path) as f:
+            recorded = f.read().strip()
+        if recorded != recomputed["chain_head"]:
+            print(f"VERIFY FAIL: chain-head mismatch vs anchored copy "
+                  f"(expected {recorded[:16]}..., recomputed "
+                  f"{recomputed['chain_head'][:16]}...)")
+            return 1
+    else:
+        print(f"NOTICE: no anchored head found at {head_path}; compare the "
+              f"recomputed head against out-of-band custody: "
+              f"{recomputed['chain_head']}")
+    # #197: tampering-by-addition — any file in the evidence dir that the
+    # chain does not cover fails verification (planting fake evidence must
+    # not pass as "chain intact").
+    chain_fn = os.path.basename(os.path.abspath(args.chain))
+    head_fn = os.path.basename(head_path)
+    for fn in sorted(os.listdir(base)):
+        p = os.path.join(base, fn)
+        if not os.path.isfile(p):
+            continue
+        if fn in covered or fn in (chain_fn, head_fn):
+            continue
+        print(f"VERIFY FAIL: unsealed file present in evidence dir: {fn} "
+              f"— added after sealing")
+        return 1
+    print(f"VERIFY OK: {len(entries)} files, {recomputed['bytes']} bytes, "
+          f"chain intact, signature valid ({SEAL_ALG})")
     return 0
 
 
@@ -402,11 +581,16 @@ def main():
     p = sub.add_parser("seal")
     p.add_argument("--dir", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--keyfile", default=None,
+                   help="path to HMAC signing key (outside the evidence "
+                        "dir); falls back to FORENSICS_SIGNING_KEY env")
     p.set_defaults(fn=cmd_seal)
 
     p = sub.add_parser("verify")
     p.add_argument("--chain", required=True)
     p.add_argument("--dir", default=None)
+    p.add_argument("--keyfile", default=None,
+                   help="path to the HMAC signing key used at seal time")
     p.set_defaults(fn=cmd_verify)
 
     args = ap.parse_args()
