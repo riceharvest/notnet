@@ -280,7 +280,8 @@ Config is loaded from `/etc/notnet.conf` (key=value).
 | `mesh_static_peers` | *(none)* | Up to `MESH_PEER_MAX` (16) seed peers, one per line as `host:port` |
 | `plugin_enabled` | `1` | Enable the plugin framework |
 | `byovd_guard` | `0` | BYOVD defense posture toggle (reporting only) |
-| `c2_backup_1`..`c2_backup_4` | *(none)* | Backup C2 endpoints (`host:port`, contiguous from 1) |
+| `allow_secret_fallback` | `0` | Opt-in legacy `?secret=` payload-drop URL fallback when the token endpoint fails. Default 0 = fail closed (drop skipped) so the fleet secret never re-enters victim command lines |
+| `c2_backup_1`..`c2_backup_4` | *(none)* | Backup C2 endpoints (`host:port`, contiguous from 1; gaps rejected) |
 | `bot_tag` | *(none)* | Affiliate/operator tag (max 64 chars) |
 | `c2_secret` | *(none)* | Shared secret for HTTP/WS command auth (or `NOTNET_C2_SECRET`) |
 | `tls_cert_pin_sha256` | *(none)* | TLS cert pin; requires `make TLS=1` (or `NOTNET_TLS_CERT_PIN_SHA256`) |
@@ -470,12 +471,18 @@ hosting — plus an SQLite state store and an operator console.
   covers HTTP/WS/IRC delivery plus the killall broadcast (9 checks).
   `ci-local.sh` runs the same gates locally.
 
-**Known limitation — operator exposure.** All listeners bind `0.0.0.0`
-and the console API has no authentication. Anyone who can reach port
-`8090` can `POST /api/queue {"cmd":"kill","broadcast":true}` and kill the
-fleet, or read `/api/creds` and `/api/exfil`. Do not expose the console
-(or the C2 ports) beyond your trusted network; a firewall rule or binding
-the console to loopback is required for anything beyond a lab run.
+**Operator exposure (post-hardening).** The C2 data listeners default to
+loopback (`DEFAULT_BIND = 127.0.0.1`; override with `--bind-address` /
+`NOTNET_C2_BIND`). The console API is token-gated: with `--console-token`
+every request must carry the token (constant-time compare), and
+`POST /api/queue` additionally requires a JSON content type plus an
+`X-Console-Token` header, which kills cross-site form-post CSRF. In
+tokenless loopback mode a per-process CSRF secret is minted and enforced
+the same way. The bot's proxy/relay/mesh listeners take explicit bind
+addresses (`proxy_bind=` / `relay_bind=` / `mesh_bind=`; invalid values
+refuse to start). Legacy exposure notes: do not point the C2 at a public
+interface without understanding that anything reachable can be probed —
+bind loopback or firewall it for anything beyond a lab run.
 
 See `c2-server/README.md`.
 
