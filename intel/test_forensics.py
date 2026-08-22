@@ -77,23 +77,129 @@ r = subprocess.run([sys.executable, FORENSICS, "timeline", "--evidence", ev, "--
 check("md timeline exits 0", r.returncode == 0)
 check("md has table header", "| ts |" in open(tl_md).read())
 
-print("== seal / verify round-trip ==")
+print("== seal / verify round-trip (#276 signed) ==")
+KEY = os.path.join(tmp, "custody.key")  # key lives OUTSIDE the evidence dir
+with open(KEY, "w") as f:
+    f.write("test-custody-key-276\n")
 export_dir = os.path.join(tmp, "export")
 os.makedirs(export_dir)
 shutil.copy(bundle_path, export_dir)
 shutil.copy(tl_json, export_dir)
 chain_path = os.path.join(tmp, "chain.json")
-r = subprocess.run([sys.executable, FORENSICS, "seal", "--dir", export_dir, "--out", chain_path],
+env_key = dict(os.environ, FORENSICS_SIGNING_KEY="env-key-276")
+r = subprocess.run([sys.executable, FORENSICS, "seal", "--dir", export_dir,
+                    "--out", chain_path],
                    capture_output=True, text=True)
-check("seal exits 0", r.returncode == 0)
-r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain", chain_path, "--dir", export_dir],
+check("seal without key refused", r.returncode == 2 and "no signing key" in r.stderr)
+r = subprocess.run([sys.executable, FORENSICS, "seal", "--dir", export_dir,
+                    "--out", chain_path, "--keyfile", KEY],
                    capture_output=True, text=True)
-check("verify round-trip OK", r.returncode == 0 and "VERIFY OK" in r.stdout)
+print(r.stdout.strip() or r.stderr.strip())
+check("seal with keyfile exits 0", r.returncode == 0)
+check("seal reports SIGNED", "SIGNED" in r.stdout)
+doc = json.load(open(chain_path))
+check("v2 format has signature",
+      doc.get("version") == 2 and "signature" in doc and "manifest" in doc)
+r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain",
+                    chain_path, "--dir", export_dir, "--keyfile", KEY],
+                   capture_output=True, text=True)
+check("verify round-trip OK (signed)", r.returncode == 0 and "VERIFY OK" in r.stdout
+      and "signature valid" in r.stdout)
+# env-var key path seals independently (keys differ → MACs differ)
+chain2 = os.path.join(tmp, "chain-env.json")
+r2 = subprocess.run([sys.executable, FORENSICS, "seal", "--dir", export_dir,
+                     "--out", chain2], capture_output=True, text=True, env=env_key)
+check("env-key seal exits 0", r2.returncode == 0)
+d1 = json.load(open(chain_path)); d2 = json.load(open(chain2))
+check("distinct keys → distinct MACs",
+      d1["signature"] != d2["signature"])
+r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain", chain2,
+                    "--dir", export_dir],
+                   capture_output=True, text=True, env=env_key)
+check("env-key seal verifies with env key", r.returncode == 0)
+# verify via env key too
+r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain",
+                    chain_path, "--dir", export_dir],
+                   capture_output=True, text=True, env=dict(os.environ, FORENSICS_SIGNING_KEY="test-custody-key-276"))
+check("verify with matching env key OK", r.returncode == 0)
+
+print("== #276 re-seal / truncation / missing-key detection ==")
+# missing key at verify time → FAIL (fail-closed)
+r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain",
+                    chain_path, "--dir", export_dir],
+                   capture_output=True, text=True,
+                   env={k: v for k, v in os.environ.items() if k != "FORENSICS_SIGNING_KEY"})
+check("missing key fails verify", r.returncode == 1 and "signing key unavailable" in r.stderr)
+# wrong key fails
+r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain",
+                    chain_path, "--dir", export_dir],
+                   capture_output=True, text=True, env=env_key)
+check("wrong key fails verify", r.returncode == 1)
+
+def fresh_seal():
+    """Re-create pristine evidence + sealed chain."""
+    if os.path.isdir(export_dir):
+        shutil.rmtree(export_dir)
+    os.makedirs(export_dir)
+    shutil.copy(bundle_path, export_dir)
+    shutil.copy(tl_json, export_dir)
+    r = subprocess.run([sys.executable, FORENSICS, "seal", "--dir", export_dir,
+                        "--out", chain_path, "--keyfile", KEY],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+# attack 1: rewrite history + re-seal WITHOUT the custody key → detected
+fresh_seal()
+with open(os.path.join(export_dir, "bundle.json"), "a") as f:
+    f.write("forged line\n")
+# attacker re-seals the forged evidence with their own key (they lack ours)
+atk_env = dict(os.environ, FORENSICS_SIGNING_KEY="attacker-key")
+r = subprocess.run([sys.executable, FORENSICS, "seal", "--dir", export_dir,
+                    "--out", chain_path],
+                   capture_output=True, text=True, env=atk_env)
+check("attacker can re-seal with own key (expected)", r.returncode == 0)
+r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain",
+                    chain_path, "--dir", export_dir, "--keyfile", KEY],
+                   capture_output=True, text=True)
+check("re-seal with wrong key DETECTED", r.returncode == 1 and "signature mismatch" in r.stdout)
+
+# attack 2: tail truncation — drop the LAST entry + its file. The remaining
+# chain links stay internally consistent; only the signed manifest catches it.
+fresh_seal()
+trunc_chain = json.load(open(chain_path))
+dropped = trunc_chain["entries"].pop()  # last entry = timeline.json
+os.remove(os.path.join(export_dir, dropped["file"]))
+json.dump(trunc_chain, open(chain_path, "w"), indent=2)
+r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain",
+                    chain_path, "--dir", export_dir, "--keyfile", KEY],
+                   capture_output=True, text=True)
+check("tail truncation DETECTED", r.returncode == 1)
+
+# legacy v1 unsigned seal still verifies, with warning
+legacy_entries = []
+prev = "0" * 64
+for fn in sorted(os.listdir(export_dir)):
+    h = subprocess.run([sys.executable, "-c",
+                        f"import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())",
+                        os.path.join(export_dir, fn)],
+                       capture_output=True, text=True).stdout.strip()
+    legacy_entries.append({"file": fn, "sha256": h, "prev_hash": prev})
+    prev = h
+legacy_path = os.path.join(tmp, "chain-v1.json")
+json.dump(legacy_entries, open(legacy_path, "w"), indent=2)
+r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain",
+                    legacy_path, "--dir", export_dir],
+                   capture_output=True, text=True)
+check("legacy v1 verifies with warning",
+      r.returncode == 0 and "UNSIGNED" in r.stdout
+      and "UNDETECTABLE" in r.stderr)
 
 print("== tamper detection ==")
+fresh_seal()
 with open(os.path.join(export_dir, "bundle.json"), "a") as f:
     f.write("tampered")
-r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain", chain_path, "--dir", export_dir],
+r = subprocess.run([sys.executable, FORENSICS, "verify", "--chain",
+                    chain_path, "--dir", export_dir, "--keyfile", KEY],
                    capture_output=True, text=True)
 check("tampered file detected", r.returncode == 1)
 
