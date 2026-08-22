@@ -19,6 +19,12 @@ services:
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",
               "--bind-address", "0.0.0.0", "--console-port", "8090",
+              # #397: console must bind 0.0.0.0 INSIDE the container for the
+              # host port publish to forward (a container-loopback socket is
+              # unreachable by the docker proxy). Safe: the published side is
+              # 127.0.0.1-only AND --console-token gates every request (#136).
+              "--console-bind", "0.0.0.0",
+              "--console-token", "${SIM_CONSOLE_TOKEN:-simconsole}",
               "--queue-dir", "/queue", "--payload-dir", "/payload",
               "--db", "/state/c2.db"]
     volumes:
