@@ -74,23 +74,28 @@ def log(line):
 
 def check_lockout():
     """Return True if the device is in lockout (reject all auths)."""
-    global lockout_until
     if not LOCKOUT:
         return False
-    if time.time() < lockout_until:
-        return True
-    return False
+    # Shared state read from per-connection threads: take the module lock so
+    # we never observe a torn/partial update of lockout_until.
+    with lock:
+        return time.time() < lockout_until
 
 
 def record_failure():
     global failed_auths, lockout_until
     if not LOCKOUT:
         return
-    failed_auths += 1
-    if failed_auths >= 5:
-        lockout_until = time.time() + 60
-        log(f"LOCKOUT triggered after {failed_auths} failures (60s)")
-        failed_auths = 0
+    msg = None
+    with lock:
+        failed_auths += 1
+        if failed_auths >= 5:
+            lockout_until = time.time() + 60
+            msg = f"LOCKOUT triggered after {failed_auths} failures (60s)"
+            failed_auths = 0
+    # log() acquires `lock` itself, so it must run outside the held lock.
+    if msg:
+        log(msg)
 
 
 def cred_ok(creds, user, password):
