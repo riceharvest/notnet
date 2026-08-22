@@ -126,6 +126,11 @@ static int init_bot(void) {
      * the framework. */
     g_bot.plugin_enabled = PLUGIN_DEFAULT_ENABLED;
 
+    /* #314: legacy ?secret= drop-URL fallback is OPT-IN and defaults
+     * OFF — a token-endpoint failure fails closed (drop skipped) so the
+     * fleet secret never silently re-appears in victim command lines. */
+    g_bot.allow_secret_fallback = 0;
+
     /* SECURITY FIX (#94): BYOVD defense-neutralization guard. Off by
      * default. The byovd plugin is a defensive-only research scaffold —
      * this repo ships no driver-loading code. When byovd_guard=1 its
