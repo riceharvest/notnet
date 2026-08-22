@@ -233,7 +233,12 @@ def assert_no_heartbeat_gaps(ev, max_gap_s=30):
             continue
         for ln in lines:
             low = ln.lower()
-            if "heartbeat" not in low and "serve" not in low:
+            # #395: gap analysis must use HEARTBEAT lines only. SERVE lines
+            # carry no "tag" field (they land in the "-" stream) and stop
+            # once the driver's pre-queued commands are consumed — charging
+            # their silence as a "dropout tail" reports starvation that
+            # never happened (163s false FAIL on c2-drive).
+            if "heartbeat" not in low:
                 continue
             tok = ln.split(None, 1)[0] if ln.split() else ""
             try:
