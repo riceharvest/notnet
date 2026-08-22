@@ -18,7 +18,7 @@ services:
     command: ["python3", "/app/c2.py", "--secret", "${SIM_C2_SECRET:-mocksecret}",
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",
-              "--console-port", "8090",
+              "--bind-address", "0.0.0.0", "--console-port", "8090",
               "--queue-dir", "/queue", "--payload-dir", "/payload",
               "--db", "/state/c2.db"]
     volumes:
@@ -43,7 +43,7 @@ services:
     command: ["python3", "/app/c2.py", "--secret", "${SIM_C2_SECRET:-mocksecret}",
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",
-              "--console-port", "8090",
+              "--bind-address", "0.0.0.0", "--console-port", "8090",
               "--queue-dir", "/queue", "--payload-dir", "/payload",
               "--db", "/state/ws.db"]
     volumes:
@@ -62,7 +62,7 @@ services:
     command: ["python3", "/app/c2.py", "--secret", "${SIM_C2_SECRET:-mocksecret}",
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",
-              "--console-port", "8090",
+              "--bind-address", "0.0.0.0", "--console-port", "8090",
               "--queue-dir", "/queue", "--payload-dir", "/payload",
               "--db", "/state/irc.db"]
     volumes:
