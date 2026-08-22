@@ -1018,6 +1018,18 @@ static int smb1_write_file(int sock, uint16_t /* tid */, uint16_t uid, uint16_t 
     data_section[dpos++] = 0;
 
     /* Actual data to write */
+    /* #223: data_len is the FULL downloaded payload (up to
+     * PAYLOAD_MAX_SIZE, megabytes) while data_section is a fixed
+     * 1 KiB stack buffer — an unguarded memcpy here smashed the stack.
+     * Header (14) + file name + NUL are already at dpos, so reject any
+     * payload that cannot fit the remaining room instead of copying. */
+    if (data_len < 0 ||
+        data_len > (int)sizeof(data_section) - dpos) {
+        log_error("SMB: write rejected — payload %d bytes exceeds "
+                  "the %d-byte transaction buffer",
+                  data_len, (int)sizeof(data_section) - dpos);
+        return -1;
+    }
     memcpy(data_section + dpos, data, data_len);
     dpos += data_len;
 
@@ -2690,19 +2702,34 @@ static cve_registry_entry_t *cve_stats_find(const char *id) {
     return NULL;
 }
 
+/* #224: the counters are bumped from concurrent scan threads
+ * (cve_run_modules runs inside spawn_scan_threads), so every bump and
+ * the render readout go through this mutex — same static
+ * PTHREAD_MUTEX_INITIALIZER pattern as arch_detect.c's cache lock. */
+static pthread_mutex_t g_cve_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void cve_stats_hit(const char *id) {
     cve_registry_entry_t *e = cve_stats_find(id);
-    if (e) e->hits++;
+    if (!e) return;
+    pthread_mutex_lock(&g_cve_stats_mutex);
+    e->hits++;
+    pthread_mutex_unlock(&g_cve_stats_mutex);
 }
 
 void cve_stats_miss(const char *id) {
     cve_registry_entry_t *e = cve_stats_find(id);
-    if (e) e->misses++;
+    if (!e) return;
+    pthread_mutex_lock(&g_cve_stats_mutex);
+    e->misses++;
+    pthread_mutex_unlock(&g_cve_stats_mutex);
 }
 
 void cve_stats_fail(const char *id) {
     cve_registry_entry_t *e = cve_stats_find(id);
-    if (e) e->fails++;
+    if (!e) return;
+    pthread_mutex_lock(&g_cve_stats_mutex);
+    e->fails++;
+    pthread_mutex_unlock(&g_cve_stats_mutex);
 }
 
 /* Render non-zero counters as comma-separated "id:result=N" triplets
@@ -2718,7 +2745,11 @@ void cve_stats_render(char *buf, size_t len) {
         const cve_registry_entry_t *e = &cve_registry[i];
         unsigned vals[3];
         const char *kinds[3] = { "hit", "miss", "fail" };
+        /* #224: snapshot the counters under the stats mutex so a
+         * concurrent bump cannot tear the readout. */
+        pthread_mutex_lock(&g_cve_stats_mutex);
         vals[0] = e->hits; vals[1] = e->misses; vals[2] = e->fails;
+        pthread_mutex_unlock(&g_cve_stats_mutex);
         for (int k = 0; k < 3; k++) {
             if (vals[k] == 0) continue;
             int w = snprintf(buf + pos, len - pos, "%s%s:%s=%u",
