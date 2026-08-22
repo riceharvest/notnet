@@ -57,6 +57,8 @@ LEGACY_TIER = [
     # vendor-diversity tier (#102) — legacy variants, vulnerable by design
     "dahua-dvr-02", "tenda-router-02", "hikvision-cam-02",
     "synology-nas-02", "switch-02", "ap-02",
+    # legacy CVE gadgets from #160 (fleet.yaml) — keep in sync with fleet.yaml
+    "legacy-boa-01", "legacy-zyxel-01", "legacy-dlink-01",
 ]
 HONEYPOTS = ["honeypot-telnet-01", "honeypot-ssh-01"]
 
@@ -94,6 +96,23 @@ def queue_cmd(cmd, args="", channel=""):
 
 
 # ───────────────────────── evidence helpers ─────────────────────────
+
+def clear_evidence():
+    """Clear prior-run evidence so grep-based assertions can't PASS on stale
+    artifacts (#285, #321): run-sim.sh cleans before a run, but nothing stopped
+    a direct `python3 run_sim.py` invocation from reading the full history of
+    previous runs (eve.json / cowrie.json / dionaea/ survive *.log-only rm)."""
+    os.makedirs(EVIDENCE, exist_ok=True)
+    for fn in os.listdir(EVIDENCE):
+        p = os.path.join(EVIDENCE, fn)
+        if fn.endswith(".log") or fn in ("eve.json", "cowrie.json", "ips_blacklist"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        elif fn == "dionaea" and os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+
 
 def read_evidence():
     """Return dict: filename -> list of lines."""
@@ -1146,6 +1165,10 @@ def main():
                     choices=["lax", "standard", "hardened"])
     args = ap.parse_args()
     os.environ["SIM_POSTURE"] = args.posture
+
+    # #285: clear prior-run evidence on every driver start so direct
+    # invocations can't PASS on a previous run's artifacts.
+    clear_evidence()
 
     os.makedirs(REPORTS, exist_ok=True)
     report = Report()

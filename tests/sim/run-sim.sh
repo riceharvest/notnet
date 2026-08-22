@@ -10,6 +10,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+BASE="$PWD"
 
 SCENARIO="all"
 POSTURE="lax"
@@ -98,14 +99,31 @@ else
   echo "WARN: no dist/notnet-src.tar (run make dist-src for compile-fallback tests)"
 fi
 
-# 2. Clean state
-rm -f evidence/*.log queue/*.json
+# 2. Clean state — clear the FULL artifact set, not just *.log: stale
+# eve.json / cowrie.json / dionaea/ / ips_blacklist from a previous run let
+# scenario checks grep PASS on last run's alerts (#321). run_sim.py's
+# clear_evidence() (#285) mirrors this for direct invocations.
+rm -f evidence/*.log evidence/eve.json evidence/cowrie.json \
+      evidence/ips_blacklist queue/*.json
+rm -rf evidence/dionaea
 : > evidence/.keep
 mkdir -p state
 
 # 2b. Host firewall (L3 enforcement of the posture — DOCKER-USER chain)
 echo "[2b] Host firewall (posture=$POSTURE)..."
 FW_PID=""
+# #320: teardown must also cover the compose-up failure path — without a trap
+# an early `exit 1` leaks the DOCKER-USER rules and the sudo watcher process.
+TEARDOWN_DONE=0
+firewall_teardown() {
+  [ "$TEARDOWN_DONE" = "1" ] && return 0
+  TEARDOWN_DONE=1
+  if [ -n "$FW_PID" ]; then kill "$FW_PID" 2>/dev/null || true; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo -n ./defence/host_firewall.sh remove 2>&1 | tail -1 || true
+  fi
+}
+trap firewall_teardown EXIT INT TERM
 if command -v sudo >/dev/null 2>&1; then
   # Passwordless sudo only (sudo -n): the sim NEVER reads a sudo password
   # from the environment or stdin. See tests/sim/sudoers.example for the
@@ -171,10 +189,7 @@ if [ "$KEEP" -eq 1 ]; then
   echo "[6/6] --keep: leaving stack up"
 else
   echo "[6/6] Tearing down..."
-  if [ -n "$FW_PID" ]; then kill "$FW_PID" 2>/dev/null || true; fi
-  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo -n ./defence/host_firewall.sh remove 2>&1 | tail -1
-  fi
+  firewall_teardown
   $COMPOSE_BASE -f docker-compose.fleet.yml down -v 2>&1 | tail -2
 fi
 

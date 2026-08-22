@@ -317,6 +317,10 @@ services:
     depends_on:
       - c2
       - c2-ws
+      # S7 drives IRC C2 and the flux scenario resolves via dnsmasq (dns:
+      # 172.29.0.7) — recreate_bot() starts only declared deps (#316).
+      - c2-irc
+      - dnsmasq
     tmpfs:
       - /tmp
 
