@@ -29,11 +29,16 @@ def git_commit():
 
 
 def git_dirty():
+    # Fail closed (#248): if git status cannot run (missing git, not a repo,
+    # permission error), the tree's state is UNKNOWN — record it as dirty
+    # rather than making an unverified "clean" claim in the attestation.
     try:
         return subprocess.check_output(["git", "status", "--porcelain"],
                                        stderr=subprocess.DEVNULL).decode().strip() != ""
-    except Exception:
-        return False
+    except Exception as e:
+        print(f"WARNING: git status failed ({e}); recording source_dirty=true (fail-closed)",
+              file=sys.stderr)
+        return True
 
 
 def sha256(path):

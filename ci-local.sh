@@ -50,6 +50,34 @@ fi'
 # 6. global killswitch (#130): armed build self-destructs at boot, inert control runs
 gate "killswitch (armed + inert)" ./tests/run-tests.sh killswitch
 
+# ── detections-ci.yml parity (#246) ──
+# 7. detection-as-code: schema + source-drift + replay
+gate "detections validate --strict" python3 detections/validate.py --strict
+
+# 8. STIX 2.1 intel: bundle build + drift check (schema needs stix2 installed;
+#    build_intel.py falls back to a structural check — same semantics as CI)
+gate "intel build + drift check" bash -c 'python3 intel/build_intel.py >/dev/null && python3 intel/build_intel.py --check'
+
+# 9. guardrails (#154): disclosure docs, inert killswitch default, attest tool
+gate "guardrails (#154)" bash -c 'grep -q "Responsible Use & Disclosure" README.md \
+    && grep -q SECURITY.md README.md \
+    && test -f SECURITY.md \
+    && grep -qi "Responsible disclosure" SECURITY.md \
+    && grep -q "KILLSWITCH_DOMAIN_DEFAULT   \"killswitch.invalid\"" include/config.h \
+    && test -f attest.py \
+    && python3 attest.py --help >/dev/null'
+
+# ── sim.yml host-runnable parity (#246) ──
+# 10. dist-src completeness + compile gate (#138 / #133)
+gate "dist-src verify (compile gate)" ./c2-server/verify_dist_src.sh
+
+# 11. mesh command-signer trust gate (#139): MESH_ED25519 build + host test.
+#     Links src/*.o so the test binary matches the Makefile-built one (#241).
+gate "mesh trust gate (MESH_ED25519)" bash -c 'make clean >/dev/null 2>&1 \
+    && make MESH_ED25519=1 >/dev/null 2>&1 \
+    && gcc -DTLS_ENABLED -DMESH_ED25519 -I include -o /tmp/mesh_test tests/host/mesh_test.c src/*.o -lssl -lcrypto -lpthread \
+    && /tmp/mesh_test'
+
 if [ "${1:-}" = "--full" ] || [ "${1:-}" = "--push" ]; then
     # 7. full regression — all scenarios, mock C2 (21 checks)
     gate "sim full regression (all, mock)" bash -c "cd tests/sim && ./run-sim.sh --scenario all --posture standard >/dev/null 2>&1"
@@ -68,6 +96,15 @@ else
 fi
 
 if [ "${1:-}" = "--push" ] && [ "$FAILS" -eq 0 ]; then
-    git push origin main
+    # Push HEAD's actual branch, not a hardcoded ref (#247): only main is
+    # allowed through; from any other branch, refuse rather than silently
+    # publishing a stale local main.
+    branch="$(git symbolic-ref --quiet --short HEAD || true)"
+    if [ "$branch" = "main" ]; then
+        git push origin HEAD:main
+    else
+        echo "REFUSING to push: --push only publishes main; current branch is '${branch:-DETACHED}'" >&2
+        FAILS=$((FAILS+1))
+    fi
 fi
 exit "$FAILS"

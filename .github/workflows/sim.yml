@@ -107,10 +107,11 @@ jobs:
         run: |
           make clean
           make MESH_ED25519=1
+          # Link every module object the make-built binary uses (Makefile SRCS,
+          # OBJS := $(SRCS:.c=.o)) instead of a hand-copied enumeration, so this
+          # gate exercises the same code as the shipped binary (#241).
           gcc -DTLS_ENABLED -DMESH_ED25519 -I include -o /tmp/mesh_test tests/host/mesh_test.c \
-            src/mesh.o src/util.o src/protocol.o src/persist.o src/spread.o src/payload.o \
-            src/proxy.o src/deaddrop.o src/relay.o src/plugin.o src/killswitch.o \
-            src/arch_detect.o \
+            src/*.o \
             -lssl -lcrypto -lpthread
           /tmp/mesh_test
 

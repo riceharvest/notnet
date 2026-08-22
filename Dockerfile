@@ -12,7 +12,13 @@ COPY . .
 # Inject the killswitch domain into config.h (sed, no -D quoting layers).
 # Default killswitch.invalid is a no-op replacement, so stock builds
 # keep the inert RFC 2606 domain.
-RUN sed -i "s/killswitch\.invalid/${KILLSWITCH_DOMAIN}/" include/config.h \
+# The value is validated against the hostname charset first (#244): an
+# unescaped build arg containing /, & or \ would corrupt the sed replacement
+# and silently arm the killswitch (#130) with the wrong domain. Restricting to
+# [A-Za-z0-9.-] makes the sed substitution injection-proof by construction.
+RUN echo "${KILLSWITCH_DOMAIN}" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$' \
+    || { echo "FATAL: KILLSWITCH_DOMAIN must be a bare hostname ([A-Za-z0-9.-], no / \\ &), got '${KILLSWITCH_DOMAIN}'" >&2; exit 1; } \
+ && sed -i "s/killswitch\.invalid/${KILLSWITCH_DOMAIN}/" include/config.h \
  && make clean && make
 
 FROM debian:bookworm-slim
