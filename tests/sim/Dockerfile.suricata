@@ -1,7 +1,9 @@
 # notnet sim — real network IDS (#131): Suricata with packet capture on
 # the sim bridge (jasonish/suricata base — OISF repo is unreachable from
 # this host, Debian bookworm has no suricata package).
-FROM jasonish/suricata:7.0
+# #324: digest-pinned — this image runs host-networked with NET_ADMIN,
+# so a changed upstream tag would get host packet visibility silently.
+FROM jasonish/suricata:7.0@sha256:a0ff6866177f176b03f48384acb997b9a88ab1e83d4efa3546cb36edb2cc43bd
 COPY suricata/suricata.yaml /etc/suricata/suricata.yaml
 COPY suricata/notnet.rules /etc/suricata/rules/notnet.rules
 COPY suricata/start.sh /usr/local/bin/start.sh

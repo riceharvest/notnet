@@ -98,19 +98,24 @@ def build_compose(fleet):
     services = {}
     for d in fleet["devices"]:
         if d.get("type", "").startswith("honeypot"):
-            # Cowrie honeypot: official image, telnet 2223 or ssh 2222
+            # Cowrie honeypot: official image, ssh 2222 or telnet 2223
+            # (#328: unprivileged ports — uid 999 cannot bind 22/23; cfg,
+            # gen_fleet and run_sim all agree on 2222/2223)
             if d.get("ports", []) == [22]:
                 cowrie_port = 2222
-                host_port = 22
             else:
                 cowrie_port = 2223
-                host_port = 23
             services[d["id"]] = {
-                "image": "cowrie/cowrie:latest",
+                # #313: pin version+digest — :latest silently changes config
+                # layout and log paths (the var/log/cowrie mount is
+                # version-sensitive). 3.0.12 verified on Docker Hub.
+                "image": "cowrie/cowrie:3.0.12@sha256:3e4ce75576e4dffc3397ae3ad8dbb00afa00fe826b1531fea50d4fd9728326e1",
                 "container_name": d["id"],
                 "hostname": d["id"],
                 "networks": {"simnet": {"ipv4_address": d["ip"]}},
-                "expose": [f"{host_port}/tcp"],
+                # #311: expose what Cowrie actually listens on (2222/2223),
+                # not the host-side service port
+                "expose": [f"{cowrie_port}/tcp"],
                 "volumes": [
                     # Cowrie writes its jsonlog to var/log/cowrie inside its git
                     # tree (not /cowrie/log); mount that exact path so the bot's

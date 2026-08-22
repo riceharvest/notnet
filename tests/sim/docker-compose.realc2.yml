@@ -13,7 +13,8 @@ name: notnet-sim
 
 services:
   c2:
-    image: python:3.11-slim
+    # #324: digest-pinned — floating base-image tags rebuild upstream
+    image: python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
     command: ["python3", "/app/c2.py", "--secret", "${SIM_C2_SECRET:-mocksecret}",
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",
@@ -32,7 +33,8 @@ services:
       SIM_BOT_IP: "172.29.0.9"
 
   c2-ws:
-    image: python:3.11-slim
+    # #324: digest-pinned — floating base-image tags rebuild upstream
+    image: python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
     command: ["python3", "/app/c2.py", "--secret", "${SIM_C2_SECRET:-mocksecret}",
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",
@@ -50,7 +52,8 @@ services:
       SIM_BOT_IP: "172.29.0.9"
 
   c2-irc:
-    image: python:3.11-slim
+    # #324: digest-pinned — floating base-image tags rebuild upstream
+    image: python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
     command: ["python3", "/app/c2.py", "--secret", "${SIM_C2_SECRET:-mocksecret}",
               "--http-port", "8080", "--payload-port", "8443",
               "--ws-port", "8081", "--irc-port", "6667",

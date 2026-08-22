@@ -3,7 +3,8 @@
 # carries the host user's uid, so we COPY it into the image as root instead.
 # Build context is the repo root (docker compose context: ../..), so the config
 # lives at tests/sim/defence/filebeat.yml.
-FROM docker.elastic.co/beats/filebeat:8.13.4
+# #324: digest-pinned on top of the version tag
+FROM docker.elastic.co/beats/filebeat:8.13.4@sha256:86ef84c34ccf57d1b5b16f0c59e1827b85fa178ce71309e7c02cefaaeab0443d
 COPY tests/sim/defence/filebeat.yml /usr/share/filebeat/filebeat.yml
 # Filebeat's entrypoint runs as root and the copied file is root-owned, satisfying
 # the config-ownership check. We point -c at this copied file.

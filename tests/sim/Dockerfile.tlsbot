@@ -1,7 +1,8 @@
 # TLS-enabled notnet bot image for the TLS smoke test.
 # The binary is built with `make TLS=1` inside a bookworm builder (so the
 # glibc matches) and copied into this runtime image with libssl3.
-FROM debian:bookworm-slim
+# #324: digest-pinned — floating base-image tags rebuild upstream
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends libssl3 \
     && rm -rf /var/lib/apt/lists/*
 COPY notnet /usr/local/bin/notnet

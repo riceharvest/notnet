@@ -10,5 +10,14 @@ alert tcp any any -> any 80 (msg:"notnet CVE-EXPLOIT Realtek formSysCmd"; flow:t
 # ── TBK DVR device.rsp injection on 80 ──
 alert tcp any any -> any 80 (msg:"notnet CVE-EXPLOIT TBK DVR device.rsp"; flow:to_server,established; content:"/device.rsp"; content:"___S_O_S_T_R_E_A_MAX___"; classtype:attempted-admin; sid:1000003; rev:1;)
 
+# ── CVE-2018-10088 (Boa httpd formAuth injection on 80) ──
+alert tcp any any -> any 80 (msg:"notnet CVE-EXPLOIT Boa formAuth"; flow:to_server,established; content:"POST /boafrm/formAuth"; content:"cmd="; classtype:attempted-admin; sid:1000005; rev:1;)
+
+# ── CVE-2020-29583 (Zyxel ZTP zysh command= injection on 80) ──
+alert tcp any any -> any 80 (msg:"notnet CVE-EXPLOIT Zyxel zysh handle"; flow:to_server,established; content:"POST /ztp/cgi-bin/handle"; content:"command="; content:"zysh"; classtype:attempted-admin; sid:1000006; rev:1;)
+
+# ── CVE-2015-2051 (D-Link HNAP SOAPAction backtick injection on 8080) ──
+alert tcp any any -> any 8080 (msg:"notnet CVE-EXPLOIT D-Link HNAP1 SOAPAction injection"; flow:to_server,established; content:"POST /HNAP1"; content:"SOAPAction|3a|http|3a|//purenetworks.com/HNAP1/"; content:"`"; classtype:attempted-admin; sid:1000007; rev:1;)
+
 # ── BRUTE-BURST: >40 new connections to one destination in 30s ──
 alert tcp any any -> any any (msg:"notnet BRUTE-BURST scan/burst"; flow:to_server; flags:S; threshold:type both, track by_dst, count 40, seconds 30; classtype:misc-attack; sid:1000004; rev:1;)

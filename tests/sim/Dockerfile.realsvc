@@ -2,10 +2,11 @@
 # One image, env-configurable: real OpenSSH, Redis, Samba, telnetd, nginx.
 # The container also pre-places /etc/notnet.conf so the REAL payload runs
 # and joins the C2 when the device is cracked (real end-to-end infection).
-FROM debian:bookworm-slim
+# #324: digest-pinned — floating base-image tags rebuild upstream
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 # official busybox carries the telnetd + login applets; use the static
 # musl build so it runs on bookworm (the glibc build needs GLIBC 2.38+)
-COPY --from=busybox:1.36-musl /bin/busybox /usr/local/bin/busybox-iot
+COPY --from=busybox:1.36-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213 /bin/busybox /usr/local/bin/busybox-iot
 
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
       openssh-server openssh-client redis-server samba inetutils-telnetd \
