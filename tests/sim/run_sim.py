@@ -123,6 +123,16 @@ def grep_evidence(ev, patterns, files=None):
     return hits
 
 
+def _tail(path, n=300):
+    """Guarded detail read for report rows: never raises on missing or
+    non-UTF8 evidence (#290), never leaks the fd."""
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()[:n]
+    except OSError:
+        return "no alert file" if "alert" in os.path.basename(path) else "unavailable"
+
+
 def _line_ts(line):
     """Parse the leading ISO-8601 UTC timestamp of an evidence log line.
 
@@ -514,13 +524,21 @@ def scenario_resilience(report):
         botlog = (r.stdout or "") + (r.stderr or "")
     except Exception:
         botlog = ""
+    dd_bot = [l for l in botlog.splitlines()
+              if "Dead-drop" in l or "dead_drop" in l]
     dd_hits = grep_evidence(ev, ["dead-drop", "DEADDROP", "dead_drop", "applied verified"],
                             files=["deaddrop.log", "http.log"])
-    dd_bot = [l for l in botlog.splitlines() if "Dead-drop" in l or "dead_drop" in l]
+    # AUDIT 87 (#287): a mere mention of dead-drop (config echo, attempted-but-
+    # failed fetch) must NOT satisfy this claim. Anchor PASS to the specific
+    # success marker deaddrop.c emits only after signature verification.
+    dd_verified = ([h for h in dd_hits if "applied verified C2 override" in h[1].lower()]
+                   + [l for l in dd_bot if "applied verified C2 override" in l.lower()])
     all_dd = dd_hits + [("sim-bot-log", l.strip()) for l in dd_bot]
     report.add("Dead-drop blob fetched + verified override applied",
-               "PASS" if all_dd else "FAIL",
-               "; ".join(h[1][:80] for h in all_dd[:3]) or "no dead-drop evidence")
+               "PASS" if dd_verified else "FAIL",
+               "; ".join(h[1][:80] for h in dd_verified[:3])
+               or ("mention-only, no 'applied verified C2 override' marker: "
+                   + "; ".join(h[1][:60] for h in all_dd[:2]) if all_dd else "no dead-drop evidence"))
 
 
 def scenario_flux(report):
@@ -565,16 +583,26 @@ def scenario_monetization(report):
         botlog = (r.stdout or "") + (r.stderr or "")
     except Exception:
         botlog = ""
-    proxy_hits = grep_evidence(ev, ["proxy", "SOCKS"], files=["http.log", "ws.log"])
-    proxy_bot = [l for l in botlog.splitlines() if "proxy" in l.lower()]
-    relay_hits = grep_evidence(ev, ["relay"], files=["http.log", "ws.log"])
-    relay_bot = [l for l in botlog.splitlines() if "relay" in l.lower()]
+    # AUDIT 87 (#287): 'proxy'/'SOCKS'/'relay' substrings match config echoes
+    # and known-failure lines ('proxy disabled', failed binds), so the rows
+    # could never fail on absence. Anchor PASS to the success markers the
+    # components emit only after actually binding: proxy.c's "SOCKS5: proxy
+    # listening", relay.c's "RELAY: relay listening" / protocol.c's response
+    # "relay on: listening".
+    PROXY_OK = "socks5: proxy listening"
+    RELAY_OK = ("relay listening on", "relay on: listening")
+    proxy_hits = grep_evidence(ev, ["SOCKS5: proxy listening"], files=["http.log", "ws.log"])
+    proxy_bot = [l for l in botlog.splitlines() if PROXY_OK in l.lower()]
+    relay_hits = grep_evidence(ev, ["RELAY: relay listening", "relay on: listening"],
+                               files=["http.log", "ws.log"])
+    relay_bot = [l for l in botlog.splitlines()
+                 if any(m in l.lower() for m in RELAY_OK)]
     report.add("proxy on command dispatched + listener starts",
                "PASS" if proxy_hits or proxy_bot else "FAIL",
-               "; ".join(h[1][:80] for h in proxy_hits[:2] + [("sim-bot-log", l.strip()) for l in proxy_bot[:2]]) or "no proxy evidence")
+               "; ".join(h[1][:80] for h in proxy_hits[:2] + [("sim-bot-log", l.strip()) for l in proxy_bot[:2]]) or "no SOCKS5 listener-start evidence (mention-only matches don't count)")
     report.add("relay on command dispatched + listener starts",
                "PASS" if relay_hits or relay_bot else "FAIL",
-               "; ".join(h[1][:80] for h in relay_hits[:2] + [("sim-bot-log", l.strip()) for l in relay_bot[:2]]) or "no relay evidence")
+               "; ".join(h[1][:80] for h in relay_hits[:2] + [("sim-bot-log", l.strip()) for l in relay_bot[:2]]) or "no relay bind evidence (mention-only matches don't count)")
 
 
 def scenario_remaining_parity(report):
@@ -958,9 +986,11 @@ def scenario_honeytoken(report):
                     fp_hits += 1
     except OSError:
         pass
+    # AUDIT 16 (#290): guarded read — the alert log may contain non-UTF8
+    # evidence bytes; never raise inside report construction, never leak the fd.
     report.add("Honeytoken alert fires when bot harvests the canary cred (zero-FP)",
                "PASS" if honey_hits else "FAIL",
-               f"honey alerts={honey_hits}; " + (open(alert_log).read()[:300] if os.path.exists(alert_log) else "no alert file"))
+               f"honey alerts={honey_hits}; " + _tail(alert_log))
     report.add("No false-positive honeytoken alert on a real harvested cred",
                "PASS" if fp_hits == 0 else "FAIL",
                f"false-positives={fp_hits}")
@@ -1014,10 +1044,31 @@ def scenario_telemetry(report):
     report.add("Host telemetry (Wazuh) raises fileless/LOTL Sigma hit (memfd/fexecve) from genuine bot event",
                "PASS" if host_hit else "SKIP",
                f"bot fileless markers={bot_emitted}; host telemetry events={host_hit}; "
-               + (open(tel_log).read()[:200] if os.path.exists(tel_log) else "no telemetry log"))
+               + _tail(tel_log, 200))
+    # The network IDS (Suricata) has no file/on-disk signal for memfd exec, so
+    # it should stay silent — that is the whole point of the host layer.
+    # AUDIT 92 (#287) / AUDIT 16 (#282): the old row was `"PASS" if True`,
+    # a tautology that could never fail. Assert it against real evidence:
+    # read eve.json and FAIL if any fileless-related signature fired; SKIP
+    # only when Suricata produced no eve.json at all (IDS not running), so
+    # a missing file can never free-pass the row either.
+    eve_path = os.path.join(EVIDENCE, "eve.json")
+    fileless_alerts = []
+    try:
+        with open(eve_path, errors="replace") as f:
+            for ln in f:
+                if '"alert"' in ln and any(
+                        m in ln.lower() for m in ("memfd", "fexecve", "fileless")):
+                    fileless_alerts.append(ln.strip())
+    except OSError:
+        pass
+    suri_state = "SKIP" if not os.path.exists(eve_path) else (
+        "PASS" if not fileless_alerts else "FAIL")
     report.add("Network IDS (Suricata) is blind to fileless exec (expected: host-only gap)",
-               "PASS" if True else "FAIL",
-               "by design — memfd_create/fexecve leave no on-disk artifact for the wire")
+               suri_state,
+               f"fileless-related eve.json alerts={len(fileless_alerts)}; "
+               + ("; ".join(a[:120] for a in fileless_alerts[:2])
+                  or "no fileless signatures in wire telemetry"))
 
 
 def scenario_honeypot_tier(report):
