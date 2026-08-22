@@ -1,6 +1,10 @@
 # notnet adversarial audit — wave 3 (issues #51–#57, filed 2026-08)
 
-Third adversarial pass over riceharvest/notnet, filed on top of wave 1 (#32–#40) and wave 2 (#41–#50, see `audit-2026-08-findings.md` and `wave2-2026-08-findings.md`). Read-only audit; no code fixed.
+Third adversarial pass over riceharvest/notnet, filed on top of wave 1 (#32–#40)
+and wave 2 (#41–#50). The wave-1/wave-2 findings were never committed as files
+(`audit-2026-08-findings.md` / `wave2-2026-08-findings.md` do not exist in this
+repository or its history); their record is the GitHub issue tracker itself:
+#32–#40 (wave 1) and #41–#50 (wave 2). Read-only audit; no code fixed.
 
 | # | Title | File:loc | Fix direction |
 |---|-------|----------|---------------|

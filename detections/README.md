@@ -42,9 +42,24 @@ detections/
 - **Suricata**: drop `detections/suricata/*.rules` into your Suricata rules dir and
   reference them from your `suricata.yaml`.
 
-## Honesty guarantee
+## What validate.py actually checks
 
-`validate.py` (run in CI, #151) asserts every rule still parses and that the IOC
-strings CVEs / C2 domains / killswitch domain in this directory still match the
-current `include/config.h` and `src/spread.c`. If a rule drifts from the source it
-fails the build, so the shipped intel stays truthful.
+`validate.py` (run in CI, #151) runs three stages. It is a lightweight,
+dependency-free gate — not a full rule compiler:
+
+- **Schema**: Sigma YAML files parse and contain `title`, `detection`, and
+  `logsource`; every Suricata line starts with `alert` and carries `sid:`/`msg:`;
+  the YARA file contains a `condition:` block and at least 5 rules. These are
+  structural checks only — no YARA or Suricata parser is invoked, so
+  syntactically broken rule *bodies* can pass this stage.
+- **Drift**: runs `intel/build_intel.py --check`, which verifies the STIX intel
+  bundle against `include/config.h` and `src/spread.c`. The Sigma/Suricata/YARA
+  rule files themselves are not compared to the source; a rule whose IOC strings
+  drift passes as long as the intel bundle is regenerated.
+- **Replay**: seeds synthetic evidence lines and asserts that hand-written
+  Python predicates approximating each wired detection fire on them. The
+  predicates are not the rules executed, so they can silently drift from the
+  real rule content while staying green.
+
+For full validation, run the rules through real tooling (`yara`,
+`suricata -T`, `sigma convert`) before relying on them.
