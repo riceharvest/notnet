@@ -1,0 +1,11 @@
+# notnet sharded distributed inference (#402)
+# The worm fetches weight shards (<model>.layers<start>-<end>.bin) from the
+# operator and forwards hidden-state activations between infected hosts
+# (pipeline parallelism). Two strong signatures:
+#   1. a large model-shard file download (.layersN-M.bin) — ingress tool
+#      transfer of a weight payload;
+#   2. sustained device-to-device traffic on the relay port that would not
+#      ordinarily communicate at that volume (the activation forward).
+# Both mirror the network-signature mitigation the Anthropic paper describes.
+alert http any any -> any any (msg:"notnet shard weight-file download (.layersN-M.bin)"; flow:to_server,established; http.uri; content:".layers"; content:".bin"; classtype:command-and-control; reference:url,https://github.com/riceharvest/notnet; sid:910130; rev:1;)
+alert tcp any any -> any 1082 (msg:"notnet shard activation forward (sustained relay volume)"; flow:established,to_server; classtype:command-and-control; reference:url,https://github.com/riceharvest/notnet; sid:910131; rev:1;)

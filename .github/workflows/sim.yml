@@ -135,6 +135,24 @@ jobs:
             -lpthread
           /tmp/ara_test
 
+  shard:
+    name: distributed-inference sharding gate (#402)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Build and run the shard host test
+        run: |
+          make
+          gcc -I include -o /tmp/shard_test tests/host/shard_test.c \
+            src/*.o \
+            -lpthread
+          /tmp/shard_test
+
   full:
     name: sim full regression (all scenarios)
     needs: [c2-real]

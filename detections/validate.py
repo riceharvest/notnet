@@ -131,6 +131,9 @@ def build_seed_evidence():
     # ARA LLM adapt call + notes inheritance (#401)
     ev.append('POST /v1/chat/completions HTTP/1.1 model=test-model')
     ev.append('GET /bot/notnet?token=abc&notes=3:try+ssh+on+2222')
+    # shard weight download + activation forward (#402)
+    ev.append('GET /shards/gemma4-26b-a4b.layers8-11.bin HTTP/1.1')
+    ev.append('tcp 10.0.0.5:1082 -> 10.0.0.6:1082 sustained activation forward')
     return ev
 
 
@@ -161,6 +164,8 @@ DETECTIONS = {
                                or ("notes=" in s.lower() and "/bot/notnet" in s.lower())),
     "sigma:ara_llm_adapt": (lambda s: "/v1/chat/completions" in s.lower()
                             or ("notes=" in s.lower() and "/bot/notnet" in s.lower())),
+    "suricata:shard_distributed_inference": (lambda s: ".layers" in s.lower() and ".bin" in s.lower()),
+    "sigma:shard_distributed_inference": (lambda s: ".layers" in s.lower() and ".bin" in s.lower()),
 }
 
 # technique -> expected detections (must all fire on seeded evidence).

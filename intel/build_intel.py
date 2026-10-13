@@ -40,6 +40,7 @@ ATTACK_TECHS = {
     "T1489": "Service Stop",
     "T1071": "Application Layer Protocol",
     "T1105": "Ingress Tool Transfer",
+    "T1041": "Exfiltration Over C2 Channel",
 }
 
 # technique -> detections that cover it (#206 single source of truth).
@@ -59,7 +60,10 @@ TECH_COVERAGE = {
     "T1027": ["yara:notnet_fileless_memfd_fexecve", "sigma:fileless_memfd_fexecve"],
     "T1489": ["sigma:self_destruct_killswitch"],
     "T1071": ["suricata:ara_llm_adapt", "sigma:ara_llm_adapt"],
-    "T1105": ["suricata:ara_llm_adapt"],
+    "T1105": ["suricata:ara_llm_adapt", "suricata:shard_distributed_inference",
+              "sigma:shard_distributed_inference"],
+    "T1041": ["suricata:shard_distributed_inference",
+              "sigma:shard_distributed_inference"],
 }
 
 

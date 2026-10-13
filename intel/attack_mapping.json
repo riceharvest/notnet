@@ -91,7 +91,17 @@
       "technique": "T1105",
       "name": "Ingress Tool Transfer",
       "covered_by": [
-        "suricata:ara_llm_adapt"
+        "suricata:ara_llm_adapt",
+        "suricata:shard_distributed_inference",
+        "sigma:shard_distributed_inference"
+      ]
+    },
+    {
+      "technique": "T1041",
+      "name": "Exfiltration Over C2 Channel",
+      "covered_by": [
+        "suricata:shard_distributed_inference",
+        "sigma:shard_distributed_inference"
       ]
     }
   ]
