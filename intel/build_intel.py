@@ -38,6 +38,8 @@ ATTACK_TECHS = {
     "T1543": "Create or Modify System Process",
     "T1027": "Obfuscated Files or Information",
     "T1489": "Service Stop",
+    "T1071": "Application Layer Protocol",
+    "T1105": "Ingress Tool Transfer",
 }
 
 # technique -> detections that cover it (#206 single source of truth).
@@ -56,6 +58,8 @@ TECH_COVERAGE = {
     "T1543": ["sigma:persistence_cron_systemd_sysv"],
     "T1027": ["yara:notnet_fileless_memfd_fexecve", "sigma:fileless_memfd_fexecve"],
     "T1489": ["sigma:self_destruct_killswitch"],
+    "T1071": ["suricata:ara_llm_adapt", "sigma:ara_llm_adapt"],
+    "T1105": ["suricata:ara_llm_adapt"],
 }
 
 

@@ -1,5 +1,5 @@
 {
-  "id": "bundle--f9f36571-a72f-549c-9534-7c7c7b6eba59",
+  "id": "bundle--77f3bb28-9a9a-5a52-aa00-3ce426a0c82c",
   "objects": [
     {
       "created": "2026-08-13T00:00:00.000Z",
@@ -436,6 +436,36 @@
       "id": "attack-pattern--d51076c2-2e3c-566d-ae4e-36a87f6bbb5d",
       "modified": "2026-08-13T00:00:00.000Z",
       "name": "Service Stop",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1071",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1071/"
+        }
+      ],
+      "id": "attack-pattern--f1b319ab-fd00-56fd-ad32-e323822e8632",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Application Layer Protocol",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1105",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1105/"
+        }
+      ],
+      "id": "attack-pattern--d6997b0a-1981-5b05-8e3e-1df1d00575d4",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Ingress Tool Transfer",
       "spec_version": "2.1",
       "type": "attack-pattern"
     }

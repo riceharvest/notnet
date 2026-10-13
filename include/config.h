@@ -109,6 +109,7 @@
 #define CMD_PING             "ping"
 #define CMD_PONG             "pong"
 #define CMD_CVE              "cve"
+#define CMD_ARA              "ara"
 
 /* ── Misc ───────────────────────────────────────────────────── */
 #define MAX_CONNECTIONS      128

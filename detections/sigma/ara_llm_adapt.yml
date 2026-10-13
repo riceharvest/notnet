@@ -1,0 +1,33 @@
+title: notnet ARA Adaptive Replication Agent LLM call (#401)
+id: 3c1e7a4b-2f6d-4e8a-9b0c-5d6e7f8a9b01
+status: experimental
+description: >
+  notnet's Adaptive Replication Agent calls an operator-configured LLM
+  (OpenAI-compatible /v1/chat/completions) to decide how to infect an
+  unfamiliar target, then carries the learned notes parent->daughter on
+  the payload drop URL (&notes=). A process issuing chat-completions
+  POSTs that is not a known chat/coding client, or a payload fetch
+  carrying a notes= param, is anomalous.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-10-13
+tags:
+  - attack.command_and_control
+  - attack.t1071
+  - attack.t1105
+logsource:
+  product: notnet
+  service: c2
+detection:
+  selection_llm:
+    http.uri|contains: '/v1/chat/completions'
+    http.method: 'POST'
+  selection_notes:
+    http.uri|contains: '/bot/notnet'
+    http.uri|contains: 'notes='
+  condition: selection_llm or selection_notes
+falsepositives:
+  - Authorized blue-team emulation of the notnet bot
+  - Legitimate LLM API clients (tune by process/image allowlist)
+level: high

@@ -128,6 +128,9 @@ def build_seed_evidence():
     ev.append('DNS query killswitch.invalid')
     # broadcast (yara notnet_broadcast_bc)
     ev.append('bc-payload.sh peeked (never consumed)')
+    # ARA LLM adapt call + notes inheritance (#401)
+    ev.append('POST /v1/chat/completions HTTP/1.1 model=test-model')
+    ev.append('GET /bot/notnet?token=abc&notes=3:try+ssh+on+2222')
     return ev
 
 
@@ -154,6 +157,10 @@ DETECTIONS = {
     "suricata:cve_2017_17215_hg532": _has("urn:DeviceUpgrade"),
     "suricata:cve_2021_35395_realtek": _has("formSysCmd"),
     "suricata:cve_2024_3721_tbk": _has("mdc="),
+    "suricata:ara_llm_adapt": (lambda s: "/v1/chat/completions" in s.lower()
+                               or ("notes=" in s.lower() and "/bot/notnet" in s.lower())),
+    "sigma:ara_llm_adapt": (lambda s: "/v1/chat/completions" in s.lower()
+                            or ("notes=" in s.lower() and "/bot/notnet" in s.lower())),
 }
 
 # technique -> expected detections (must all fire on seeded evidence).

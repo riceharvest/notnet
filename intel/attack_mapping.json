@@ -78,6 +78,21 @@
       "covered_by": [
         "sigma:self_destruct_killswitch"
       ]
+    },
+    {
+      "technique": "T1071",
+      "name": "Application Layer Protocol",
+      "covered_by": [
+        "suricata:ara_llm_adapt",
+        "sigma:ara_llm_adapt"
+      ]
+    },
+    {
+      "technique": "T1105",
+      "name": "Ingress Tool Transfer",
+      "covered_by": [
+        "suricata:ara_llm_adapt"
+      ]
     }
   ]
 }

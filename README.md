@@ -193,6 +193,56 @@ operation with a clear log. `byovd_guard=1` makes the refusal report that
 BYOVD-style abuse is blocked. See `references/byovd.md` for the research
 note and a Windows defender checklist.
 
+### Adaptive Replication Agent (#401)
+
+An LLM-directed infection brain, modelled on the autonomous-replication
+decomposition in Anthropic's *self-replicating AI* research: **find
+targets → gain execution → establish inference → continue propagation.**
+notnet already covers stages 1/2/4 (scan + `arch_detect`, CVE/LOTL/
+brute-force, `spread_local`). ARA adds stage 3 plus the paper's
+*adaptation* finding — parent instances pass their prompts, code, and
+notes to daughter replicators (Lamarckian inheritance), which the paper
+measured lifting inference-setup success from 45% to 61–84% across
+generations.
+
+How it works:
+
+1. When a spread attempt fails on an unfamiliar target, the bot POSTs an
+   OpenAI-compatible chat-completions request to the operator's LLM
+   (`ara_llm_url`, `ara_llm_model`, `ara_llm_key`) with the operator's
+   two prompt templates (`ara_llm_sysprompt`, `ara_llm_userprompt`).
+2. The advisor's answer is parsed into concrete next-step notes and
+   persisted in a bounded notes file (`ara_notes_dir`).
+3. Those notes ride the payload drop URL as `&notes=` — the daughter
+   boots with its parent's learned state instead of cold, and its
+   generation counter increments.
+
+Trust model: the LLM is **operator** infrastructure. Notes are treated
+as hints only — they never widen the existing spreader trust boundaries
+(the CVE probe→verify→drop discipline and the payload SHA-256 pin are
+unchanged). A hostile LLM can only reorder vectors the bot already runs;
+it cannot mint a payload drop. The fleet secret is never sent to the
+LLM (only the operator's own bearer key). Every decision is logged for
+the evidence trail.
+
+Off by default (`ara_enabled=0`): no LLM calls, no notes file, no
+drop-URL `notes` param — stock behaviour unchanged.
+
+| Config key | Env var | Meaning |
+|---|---|---|
+| `ara_enabled=` | `NOTNET_ARA_ENABLED` | Master switch (default 0) |
+| `ara_llm_url=` | `NOTNET_ARA_LLM_URL` | OpenAI-compatible endpoint, `http(s)://` |
+| `ara_llm_model=` | `NOTNET_ARA_LLM_MODEL` | Model name |
+| `ara_llm_key=` | `NOTNET_ARA_LLM_KEY` | Bearer API key |
+| `ara_llm_sysprompt=` | — | System prompt |
+| `ara_llm_userprompt=` | — | User prompt; placeholders `{target}` `{arch}` `{notes}` `{error}` |
+| `ara_notes_dir=` | `NOTNET_ARA_NOTES_DIR` | Where `ara-notes.conf` lives |
+
+The user-prompt template expands `{target}` (ip:port), `{arch}`
+(`arch_detect` label), `{notes}` (inherited notes) and `{error}` (the
+failure that triggered the adapt). Heartbeats report an `ara` field
+(`gen=N notes=N r0=X adapted=0/1`); the `ara` C2 command drives it live.
+
 ## Operations
 
 - **`bot_tag`** — affiliate/operator identifier (max 64 chars), reported
@@ -238,6 +288,7 @@ dropped.
 | plugin | `plugin status` / `plugin <name> load\|run\|unload\|status` | Dispatch built-in plugins by name |
 | rotate | `rotate` | Advance the C2 rotation chain manually |
 | kill | `kill` | Wipe state, stop modules, remove persistence, exit 0 |
+| ara | `ara status` / `ara notes` / `ara adapt <ip:port> [error]` / `ara r0 <infections> <quarantines>` | Adaptive Replication Agent control (#401) |
 | status | — | Heartbeat: version, hostname, uptime, scan count, cred count, proxy/relay status, tag |
 
 ## Configuration

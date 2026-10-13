@@ -2871,6 +2871,17 @@ int cve_run_modules(notnet_bot_t *bot, const char *ip, uint16_t port) {
         log_warn("CVE: %s drop failed on %s:%d", m->id, ip, m->port);
         cve_stats_fail(m->id);
     }
+    /* #401: nothing fired — if the ARA brain is enabled, ask the LLM
+     * how to adapt to this unfamiliar target before the next cycle.
+     * Hints only: they never widen the probe->verify->drop discipline.
+     * Bounded by the underlying HTTP timeout so a stuck advisor cannot
+     * stall the scan thread. */
+    if (bot->ara.enabled && bot->ara.url[0]) {
+        char tgt[80];
+        snprintf(tgt, sizeof(tgt), "%s:%d", ip, port ? port : 0);
+        if (ara_adapt(bot, &bot->ara, tgt, arch, "no CVE module fired") == 0)
+            log_info("ARA: adapted after failed CVE sweep on %s", tgt);
+    }
     return -1;
 }
 
