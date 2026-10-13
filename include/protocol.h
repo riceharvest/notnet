@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "ara.h"
+#include "shard.h"
 #include <time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -379,6 +380,11 @@ typedef struct {
      * Lamarckian notes file. */
     ara_llm_t ara;
     char ara_notes_dir[128];   /* where ara-notes.conf lives */
+
+    /* ── Distributed-inference sharding (#402) ───────────────── */
+    /* Turn the fleet into a pipelined inference engine. Off by
+     * default; see include/shard.h for the trust model. */
+    shard_cfg_t shard;
 } notnet_bot_t;
 
 /* #401: ARA adapt call (declared here — needs the complete bot type).
@@ -389,6 +395,14 @@ typedef struct {
  * underlying HTTP timeout. */
 int ara_adapt(notnet_bot_t *bot, const ara_llm_t *llm,
               const char *target, const char *arch, const char *error);
+
+/* #402: shard fetch + bot binding (declared here — need the complete
+ * bot type). shard_fetch verifies a weight shard against a SHA-256
+ * pin (fail-closed); shard_bind_bot gives shard_forward the relay
+ * token it needs to push activations to the next pipeline peer. */
+int  shard_fetch(notnet_bot_t *bot, const shard_cfg_t *cfg,
+                 const shard_assignment_t *asg);
+void shard_bind_bot(notnet_bot_t *bot);
 
 /* ── IRC Functions ──────────────────────────────────────────── */
 int irc_connect(notnet_bot_t *bot);

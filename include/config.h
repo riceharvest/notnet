@@ -110,6 +110,7 @@
 #define CMD_PONG             "pong"
 #define CMD_CVE              "cve"
 #define CMD_ARA              "ara"
+#define CMD_SHARD            "shard"
 
 /* ── Misc ───────────────────────────────────────────────────── */
 #define MAX_CONNECTIONS      128

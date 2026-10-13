@@ -1,5 +1,5 @@
 {
-  "id": "bundle--77f3bb28-9a9a-5a52-aa00-3ce426a0c82c",
+  "id": "bundle--8ea3bed4-754b-5f6d-9075-17b8442b534f",
   "objects": [
     {
       "created": "2026-08-13T00:00:00.000Z",
@@ -466,6 +466,21 @@
       "id": "attack-pattern--d6997b0a-1981-5b05-8e3e-1df1d00575d4",
       "modified": "2026-08-13T00:00:00.000Z",
       "name": "Ingress Tool Transfer",
+      "spec_version": "2.1",
+      "type": "attack-pattern"
+    },
+    {
+      "created": "2026-08-13T00:00:00.000Z",
+      "external_references": [
+        {
+          "external_id": "T1041",
+          "source_name": "mitre-attack",
+          "url": "https://attack.mitre.org/techniques/T1041/"
+        }
+      ],
+      "id": "attack-pattern--fc7e6494-a6a6-55b2-981b-c69e3ba22c0a",
+      "modified": "2026-08-13T00:00:00.000Z",
+      "name": "Exfiltration Over C2 Channel",
       "spec_version": "2.1",
       "type": "attack-pattern"
     }

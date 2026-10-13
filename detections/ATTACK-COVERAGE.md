@@ -32,7 +32,8 @@ a rule dump.
 | T1027 | Obfuscated/Fileless | YARA `notnet_indicators.yar` (`memfd`/`fexecve` memory), Sigma `fileless_memfd_fexecve.yml` | remaining-parity | PASS |
 | T1489 | Service Stop (killswitch) | Sigma `self_destruct_killswitch.yml` | killswitch | PASS |
 | T1071 | Application Layer Protocol | Suricata `ara_llm_adapt.rules`, Sigma `ara_llm_adapt.yml` (LLM `/v1/chat/completions` adapt call, `src/ara.c`) | remaining-parity | PASS |
-| T1105 | Ingress Tool Transfer | Suricata `ara_llm_adapt.rules` (`&notes=` Lamarckian inheritance on the payload drop URL, `src/ara.c` + `build_drop_url`) | remaining-parity | PASS |
+| T1105 | Ingress Tool Transfer | Suricata `ara_llm_adapt.rules` (`&notes=` inheritance), `shard_distributed_inference.rules` (weight-shard `.layersN-M.bin` download, `src/shard.c`) | remaining-parity | PASS |
+| T1041 | Exfiltration Over C2 Channel | Suricata `shard_distributed_inference.rules` (sustained device-to-device activation forward on the relay port, `src/shard.c`) | remaining-parity | PASS |
 
 ---
 

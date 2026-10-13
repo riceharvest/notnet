@@ -1,0 +1,33 @@
+title: notnet Distributed Inference Sharding weight + activation traffic (#402)
+id: 7b2f9c1d-4a3e-4c5b-9e0f-2a1b3c4d5e6f
+status: experimental
+description: >
+  notnet's sharding module turns the infected fleet into a pipelined
+  inference engine: it downloads model weight shards
+  (<model>.layers<start>-<end>.bin) from operator infrastructure and
+  forwards hidden-state activations between hosts over the relay port.
+  Detect the weight-shard download (a large .layersN-M.bin ingress) and
+  sustained device-to-device traffic that would not ordinarily
+  communicate at that volume.
+references:
+  - https://github.com/riceharvest/notnet
+author: notnet-detections
+date: 2026-10-13
+tags:
+  - attack.command_and_control
+  - attack.t1105
+  - attack.t1041
+logsource:
+  product: notnet
+  service: c2
+detection:
+  selection_shard_dl:
+    http.uri|contains: '.layers'
+    http.uri|contains: '.bin'
+  selection_activation:
+    dst_port: 1082
+  condition: selection_shard_dl or selection_activation
+falsepositives:
+  - Authorized blue-team emulation of the notnet bot
+  - Legitimate large model-weight distribution (tune by source allowlist)
+level: high
