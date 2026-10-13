@@ -48,7 +48,8 @@ SRCS := notnet.c \
         src/plugin.c \
         src/killswitch.c \
         src/mesh.c \
-        src/lotl.c
+        src/lotl.c \
+        src/ara.c
 
 OBJS := $(SRCS:.c=.o)
 
@@ -113,12 +114,12 @@ DIST_SRC_FILES := notnet.c \
                   src/protocol.c src/spread.c src/payload.c \
                   src/persist.c src/util.c src/deaddrop.c src/proxy.c \
                   src/relay.c src/plugin.c src/killswitch.c src/mesh.c src/lotl.c \
-                  src/arch_detect.c \
+                  src/arch_detect.c src/ara.c \
                   include/config.h include/protocol.h include/spread.h \
                   include/payload.h include/persist.h include/util.h \
                   include/deaddrop.h include/proxy.h include/relay.h \
                   include/plugin.h include/killswitch.h include/mesh.h include/lotl.h \
-                  include/arch_detect.h \
+                  include/arch_detect.h include/ara.h \
                   Makefile
 dist-src:
 	@mkdir -p dist

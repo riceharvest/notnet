@@ -115,6 +115,26 @@ jobs:
             -lssl -lcrypto -lpthread
           /tmp/mesh_test
 
+  ara:
+    name: ARA adaptive-replication brain gate (#401)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Build and run the ARA host test
+        run: |
+          make
+          # Link every module object the make-built binary uses (src/*.o)
+          # so this gate exercises the same code as the shipped binary.
+          gcc -I include -o /tmp/ara_test tests/host/ara_test.c \
+            src/*.o \
+            -lpthread
+          /tmp/ara_test
+
   full:
     name: sim full regression (all scenarios)
     needs: [c2-real]

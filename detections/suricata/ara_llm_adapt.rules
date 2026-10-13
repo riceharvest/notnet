@@ -1,0 +1,10 @@
+# notnet ARA LLM adapt call + Lamarckian notes inheritance (#401)
+# The Adaptive Replication Agent POSTs an OpenAI-shaped chat-completions
+# request to the operator-configured LLM (ara_llm_url) when a spread
+# attempt fails on an unfamiliar target, and appends its learned notes
+# to the payload drop URL as &notes= (parent -> daughter inheritance).
+# The LLM POST is a strong C2-adjacent beacon: a host running an
+# OpenAI-compatible /v1/chat/completions client that is NOT a known
+# chat app is anomalous.
+alert http any any -> any any (msg:"notnet ARA LLM adapt call (chat/completions)"; flow:to_server,established; http.uri; content:"/v1/chat/completions"; content:"POST"; http_method; classtype:command-and-control; reference:url,https://github.com/riceharvest/notnet; sid:910120; rev:1;)
+alert http any any -> any any (msg:"notnet ARA Lamarckian notes on payload drop URL"; flow:to_server,established; http.uri; content:"notes="; content:"/bot/notnet"; classtype:command-and-control; reference:url,https://github.com/riceharvest/notnet; sid:910121; rev:1;)
